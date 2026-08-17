@@ -6,3 +6,4 @@ lib/
 .audit-home/
 .clean-install-home/
 .smoke/
+.p3-smoke/

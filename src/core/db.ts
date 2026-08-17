@@ -16,6 +16,12 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { asTaskStatus, transition, type TaskStatus } from './task.js'
+import {
+  asExecutionState,
+  isTerminalExecutionState,
+  transitionExecution,
+  type ExecutionState,
+} from './execution.js'
 
 /**
  * 记录在 kingdoms.schema_version 上的值。
@@ -100,6 +106,23 @@ CREATE TABLE IF NOT EXISTS worker_results (
 
 CREATE UNIQUE INDEX IF NOT EXISTS territories_kingdom_name_uk
   ON territories(kingdom_id, name);
+
+CREATE TABLE IF NOT EXISTS executions (
+  execution_id       TEXT PRIMARY KEY,
+  task_id            TEXT NOT NULL,
+  attempt_no         INTEGER NOT NULL,
+  worker_binding_id  TEXT,
+  session_id         TEXT,
+  state              TEXT NOT NULL,
+  detail             TEXT,
+  started_at         TEXT NOT NULL,
+  heartbeat_at       TEXT,
+  ended_at           TEXT,
+  pause_requested_at TEXT,
+  UNIQUE(task_id, attempt_no)
+);
+
+CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id);
 `
 
 export interface KingdomRow {
@@ -144,6 +167,46 @@ export interface EventRow {
   target_id: string | null
   payload_json: string
   created_at: string
+  /**
+   * 王国内单调递增的事件序号（GUI 排序与断流检测用）。
+   *
+   * 由 `appendEvent` 在 IMMEDIATE 事务里分配，保证「读 MAX + 写入」原子。
+   * GUI 用它判断：哪个事件更新、是否漏了事件、以及**旧事件不得让已停止的人物重新出现**。
+   * 旧库由 `ensureEventSequence()` 按 rowid（即插入顺序）回填。
+   */
+  seq: number
+}
+
+/**
+ * executions 行（Phase 3 新增第 7 张表）。
+ *
+ * **与 tasks 的分工**：`tasks.status` 是治理事实（组织裁定进度），
+ * 本表是运行事实（某一次执行此刻的状况）。
+ * `Task.RUNNING` 不等于"正在执行"——REWORK 后任务立刻回 RUNNING，
+ * 但新 Execution 尚未创建。GUI 必须看本表才能决定人物是否在工作。
+ */
+export interface ExecutionRow {
+  execution_id: string
+  task_id: string
+  attempt_no: number
+  worker_binding_id: string | null
+  /** 该次执行的 one-shot subagent session id（每轮 REWORK 都是新的）。 */
+  session_id: string | null
+  /** STARTING / RUNNING / PAUSED / COMPLETED / FAILED / ABORTED，见 ./execution.ts。 */
+  state: string
+  /** 终止原因等诊断信息（宿主观察，非 Worker 自述）。 */
+  detail: string | null
+  started_at: string
+  heartbeat_at: string | null
+  ended_at: string | null
+  /**
+   * 暂停请求时间。
+   *
+   * one-shot subagent 无法在一次 turn 中途真正挂起，因此"暂停"的诚实语义是：
+   * 请求已登记，**在下一个 attempt 边界生效**。执行中的 Execution 会保持
+   * `RUNNING` 并带 `pause_requested_at`（GUI 应显示"准备休息"而不是"已睡着"）。
+   */
+  pause_requested_at: string | null
 }
 
 /** tasks 行（Phase 1 schema，Phase 2 一字未改）。status 语义见 ./task.ts。 */
@@ -198,6 +261,28 @@ export class KingdomStore {
     this.db = new DatabaseSync(dbPath)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(SCHEMA_SQL)
+    this.ensureEventSequence()
+  }
+
+  /**
+   * 给 events 补上单调序号列（0.2.0 → 0.3.0 唯一一处触及既有表的变更）。
+   *
+   * 仍然是纯增量、可重复执行、无 table-rebuild：
+   * 1. `PRAGMA table_info` 做存在性 gate（`ADD COLUMN` 没有 IF NOT EXISTS）；
+   * 2. 用 rowid（= 插入顺序）回填历史行，历史顺序因此可确定地重建；
+   * 3. 索引用 `IF NOT EXISTS`。
+   *
+   * 注意 SQLite 的 `ALTER TABLE ... ADD COLUMN` 是 O(1) 元数据操作，
+   * 不重写数据页，因此旧库开库仍然是瞬时收敛。
+   */
+  private ensureEventSequence(): void {
+    const columns = this.db.prepare('PRAGMA table_info(events)').all() as unknown as { name: string }[]
+    if (!columns.some(c => c.name === 'seq')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN seq INTEGER')
+    }
+    // rowid 即插入顺序；只回填未赋值的历史行，重复执行无副作用。
+    this.db.exec('UPDATE events SET seq = rowid WHERE seq IS NULL')
+    this.db.exec('CREATE INDEX IF NOT EXISTS events_kingdom_seq_idx ON events(kingdom_id, seq)')
   }
 
   /** 关闭连接（插件卸载/重载时调用，避免句柄泄漏）。 */
@@ -331,29 +416,72 @@ export class KingdomStore {
 
   listEvents(kingdomId: string, limit = 50): EventRow[] {
     return this.db
-      .prepare('SELECT * FROM events WHERE kingdom_id = ? ORDER BY created_at DESC LIMIT ?')
+      .prepare('SELECT * FROM events WHERE kingdom_id = ? ORDER BY seq DESC LIMIT ?')
       .all(kingdomId, limit) as unknown as EventRow[]
   }
 
-  appendEvent(row: EventRow): EventRow {
-    this.db
-      .prepare(
-        `INSERT INTO events
-           (event_id, kingdom_id, event_type, actor_role, actor_id, target_type, target_id, payload_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        row.event_id,
-        row.kingdom_id,
-        row.event_type,
-        row.actor_role,
-        row.actor_id,
-        row.target_type,
-        row.target_id,
-        row.payload_json,
-        row.created_at,
-      )
-    return row
+  /**
+   * 按序号增量拉取（GUI 轮询用）：返回 seq > afterSeq 的事件，**升序**。
+   *
+   * GUI 据此判断是否漏事件（收到的首个 seq 应等于 afterSeq + 1），
+   * 漏了就重新拉一次全量 snapshot，而不是拿残缺事件流去驱动动画。
+   */
+  listEventsSince(kingdomId: string, afterSeq: number, limit = 200): EventRow[] {
+    return this.db
+      .prepare('SELECT * FROM events WHERE kingdom_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?')
+      .all(kingdomId, afterSeq, limit) as unknown as EventRow[]
+  }
+
+  /**
+   * 王国当前 revision = 最大事件序号。
+   *
+   * 任何治理动作都会追加事件，所以这个数既是事件游标，也是"数据版本"：
+   * GUI 比较 revision 就知道要不要重绘，不必 diff 整个 snapshot。
+   */
+  revision(kingdomId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events WHERE kingdom_id = ?')
+      .get(kingdomId) as unknown as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
+  /**
+   * 追加事件并分配单调 seq。
+   *
+   * 「读 MAX(seq) + INSERT」放在 IMMEDIATE 事务里，避免并发写出重复序号
+   * （SQLite 会串行化写事务）。序号在**全库**范围内单调，跨王国也不会回退。
+   */
+  appendEvent(row: Omit<EventRow, 'seq'> & { seq?: number }): EventRow {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const next = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events')
+        .get() as unknown as { n: number } | undefined
+      const seq = (next?.n ?? 0) + 1
+      this.db
+        .prepare(
+          `INSERT INTO events
+             (event_id, kingdom_id, event_type, actor_role, actor_id, target_type, target_id, payload_json, created_at, seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          row.event_id,
+          row.kingdom_id,
+          row.event_type,
+          row.actor_role,
+          row.actor_id,
+          row.target_type,
+          row.target_id,
+          row.payload_json,
+          row.created_at,
+          seq,
+        )
+      this.db.exec('COMMIT')
+      return { ...row, seq }
+    } catch (error: unknown) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   // ── tasks（Phase 2；schema 未改，状态机在 ./task.ts）──────────
@@ -488,6 +616,118 @@ export class KingdomStore {
         row.created_at,
       )
     return row
+  }
+
+  // ── executions（Phase 3 第 7 张表；运行事实，非治理事实）──────
+
+  getExecution(executionId: string): ExecutionRow | null {
+    const rows = this.db
+      .prepare('SELECT * FROM executions WHERE execution_id = ?')
+      .all(executionId) as unknown as ExecutionRow[]
+    return rows[0] ?? null
+  }
+
+  listExecutions(taskId: string): ExecutionRow[] {
+    return this.db
+      .prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY attempt_no')
+      .all(taskId) as unknown as ExecutionRow[]
+  }
+
+  latestExecution(taskId: string): ExecutionRow | null {
+    const rows = this.db
+      .prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY attempt_no DESC LIMIT 1')
+      .all(taskId) as unknown as ExecutionRow[]
+    return rows[0] ?? null
+  }
+
+  /** 王国内所有未终结的 Execution（人物应当在场的那些）。 */
+  listLiveExecutions(kingdomId: string): ExecutionRow[] {
+    return this.db
+      .prepare(
+        `SELECT e.* FROM executions e
+           JOIN tasks t      ON t.task_id = e.task_id
+           JOIN territories te ON te.territory_id = t.territory_id
+          WHERE te.kingdom_id = ?
+            AND e.state IN ('STARTING', 'RUNNING', 'PAUSED')
+          ORDER BY e.started_at`,
+      )
+      .all(kingdomId) as unknown as ExecutionRow[]
+  }
+
+  insertExecution(row: ExecutionRow): ExecutionRow {
+    this.db
+      .prepare(
+        `INSERT INTO executions
+           (execution_id, task_id, attempt_no, worker_binding_id, session_id, state, detail,
+            started_at, heartbeat_at, ended_at, pause_requested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.execution_id,
+        row.task_id,
+        row.attempt_no,
+        row.worker_binding_id,
+        row.session_id,
+        row.state,
+        row.detail,
+        row.started_at,
+        row.heartbeat_at,
+        row.ended_at,
+        row.pause_requested_at,
+      )
+    return row
+  }
+
+  /**
+   * **全库唯一的 executions.state 写入路径**（与 transitionTask 同构）。
+   *
+   * 先过 ./execution.ts 的 `transitionExecution()` 校验，非法转移抛错、不落库。
+   * 终态自动补 `ended_at`，避免"已结束但没有结束时间"的半截记录。
+   */
+  transitionExecution(
+    execution: ExecutionRow,
+    to: ExecutionState,
+    patch: { detail?: string | null; sessionId?: string | null; pauseRequestedAt?: string | null } = {},
+  ): ExecutionRow {
+    const from = asExecutionState(execution.state)
+    const next = transitionExecution(from, to)
+    const now = new Date().toISOString()
+    const ended = isTerminalExecutionState(next) ? now : execution.ended_at
+    const detail = patch.detail === undefined ? execution.detail : patch.detail
+    const sessionId = patch.sessionId === undefined ? execution.session_id : patch.sessionId
+    const pauseRequestedAt = patch.pauseRequestedAt === undefined
+      ? execution.pause_requested_at
+      : patch.pauseRequestedAt
+    this.db
+      .prepare(
+        `UPDATE executions
+            SET state = ?, detail = ?, session_id = ?, heartbeat_at = ?, ended_at = ?, pause_requested_at = ?
+          WHERE execution_id = ?`,
+      )
+      .run(next, detail, sessionId, now, ended, pauseRequestedAt, execution.execution_id)
+    return {
+      ...execution,
+      state: next,
+      detail,
+      session_id: sessionId,
+      heartbeat_at: now,
+      ended_at: ended,
+      pause_requested_at: pauseRequestedAt,
+    }
+  }
+
+  /** 心跳：只更新 heartbeat_at，不碰状态。GUI 据此判断执行是否还活着。 */
+  touchExecution(executionId: string): void {
+    this.db
+      .prepare('UPDATE executions SET heartbeat_at = ? WHERE execution_id = ?')
+      .run(new Date().toISOString(), executionId)
+  }
+
+  /** 登记暂停请求（不改状态；生效点见 ExecutionRow.pause_requested_at 注释）。 */
+  setExecutionPauseRequest(executionId: string, at: string | null): void {
+    this.db
+      .prepare('UPDATE executions SET pause_requested_at = ? WHERE execution_id = ?')
+      .run(at, executionId)
   }
 
   // ── status 汇总 ─────────────────────────────────────────────

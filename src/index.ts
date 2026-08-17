@@ -27,7 +27,21 @@ import z from 'schemastery'
 import { KingdomManager } from './core/kingdom.js'
 import { bindRole, listBindings } from './core/binding.js'
 import { createTerritory, listTerritories } from './core/territory.js'
-import { assignTask, listTasks, planTask, reviewTask, startTask } from './core/task-service.js'
+import {
+  abortExecution,
+  assignTask,
+  listTasks,
+  pauseExecution,
+  planTask,
+  resumeExecution,
+  reviewTask,
+  startTask,
+  type CommandContext,
+  type Principal,
+} from './core/task-service.js'
+import { buildSnapshot, buildTaskDetail, toEventView } from './gui/snapshot.js'
+import { startGuiServer } from './gui/server.js'
+import type { AuthView, CommandResultView } from './gui/contract.js'
 import { DshSubagentExecutor, type SubagentsLike } from './worker/dsh-subagent.js'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 
@@ -38,6 +52,10 @@ export interface Config {
   kingdomName: string
   ownerName: string
   workerProvider: string
+  guiPort: number
+  guiToken: string
+  guiAllowOrigins: string[]
+  authMode: 'declarative' | 'session-bound'
 }
 
 export const Config = z.object({
@@ -45,6 +63,22 @@ export const Config = z.object({
   ownerName: z.string().default(''),
   /** Worker 执行用的 subagent provider（dsh base bundle 默认注册 spawn / fork）。 */
   workerProvider: z.string().default('spawn'),
+  /**
+   * 本地 GUI 通道端口。**默认 0 = 关闭** —— 不在用户不知情时打开监听端口。
+   * 设为非零值即启用，只绑定 127.0.0.1。
+   */
+  guiPort: z.number().default(0),
+  /** 可选 bearer token；设置后 GUI 所有请求都要带 Authorization 头。 */
+  guiToken: z.string().default(''),
+  /** CORS 允许的 Origin 列表；默认放开（服务只绑本机回环）。 */
+  guiAllowOrigins: z.array(z.string()).default(['*']),
+  /**
+   * 角色鉴权强度。
+   * `declarative`（默认，Phase 1/2 延续）只校验"王国中存在该角色绑定"，
+   * **不验证调用者就是该角色** —— snapshot 会如实报 `trustLevel: local-demo`。
+   * `session-bound` 额外要求调用方 session 与 binding.session_id 一致。
+   */
+  authMode: z.union(['declarative', 'session-bound'] as const).default('declarative'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -61,6 +95,24 @@ export function apply(ctx: Context, config: Config): void {
     const kingdom = store.getDefaultKingdom()
     return kingdom ? kingdom.kingdom_id : null
   }
+
+  /** 如实声明本次部署的鉴权强度，GUI 必须把它显示出来。 */
+  const authView: AuthView = config.authMode === 'session-bound'
+    ? {
+        mode: 'session-bound',
+        trustLevel: 'session-verified',
+        note: '命令调用方的 session 必须与角色 binding 的 session_id 一致。',
+      }
+    : {
+        mode: 'declarative',
+        trustLevel: 'local-demo',
+        note: '仅校验王国中存在对应角色绑定，不验证调用者身份。'
+          + 'GUI 若提供派发/复核/返工按钮，必须显著标注为「本地可信演示权限」。',
+      }
+
+  const commandContext = (kingdomId: string, principal?: Principal): CommandContext =>
+    ({ kingdomId, auth: authView, ...principal ? { principal } : {} })
+
 
   // ── 工具注册（全部挂 ctx.effect）────────────────────────────
 
@@ -197,13 +249,12 @@ export function apply(ctx: Context, config: Config): void {
     }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return planTask(store, {
-        kingdomId,
+      return planTask(store, commandContext(kingdomId), {
         title: args.title,
         description: args.description,
         acceptanceCriteria: args.acceptance_criteria,
         territoryId: args.territory_id,
-      }).text
+      }).message
     },
   })), 'dsh-kingdom: plan-task tool')
 
@@ -221,11 +272,10 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args: { task_id: string; worker_binding_id?: string }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return assignTask(store, {
-        kingdomId,
+      return assignTask(store, commandContext(kingdomId), {
         taskId: args.task_id,
         workerBindingId: args.worker_binding_id,
-      }).text
+      }).message
     },
   })), 'dsh-kingdom: assign-task tool')
 
@@ -259,8 +309,8 @@ export function apply(ctx: Context, config: Config): void {
         parent: exec.agent,
         signal: exec.signal,
       })
-      const result = await startTask(store, executor, { kingdomId, taskId: args.task_id })
-      return result.text
+      const result = await startTask(store, executor, commandContext(kingdomId), { taskId: args.task_id })
+      return result.message
     },
   })), 'dsh-kingdom: start-task tool')
 
@@ -279,12 +329,11 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args: { task_id: string; decision: string; reason?: string }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return reviewTask(store, {
-        kingdomId,
+      return reviewTask(store, commandContext(kingdomId), {
         taskId: args.task_id,
         decision: args.decision,
         reason: args.reason,
-      }).text
+      }).message
     },
   })), 'dsh-kingdom: review-task tool')
 
@@ -302,13 +351,170 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args: { territory_id?: string; status?: string }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return listTasks(store, {
-        kingdomId,
+      return listTasks(store, kingdomId, {
         territoryId: args.territory_id,
         status: args.status,
       })
     },
   })), 'dsh-kingdom: list-tasks tool')
+
+  // ── Phase 3：GUI 适配（结构化读接口 + Execution 控制）─────────────
+  //
+  // 架构原则：**插件输出治理事实和活动语义，GUI 决定人物、场景和动画。**
+  // 因此这里返回的 stage 只有 { role, state, activity }，
+  // 不会出现任何贴图名、clip id 或场景文件名。
+
+  const jsonTool = (
+    name: string,
+    description: string,
+    parameters: Record<string, unknown>,
+    execute: (args: Record<string, string | undefined>) => unknown,
+  ) => ctx.tools.register(defineTool({
+    name,
+    description,
+    parameters: parameters as never,
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: Record<string, string | undefined>) {
+      return JSON.stringify(execute(args), null, 2)
+    },
+  }))
+
+  ctx.effect(() => jsonTool(
+    'kingdom_snapshot',
+    '返回王国的结构化快照 JSON（王国/Owner/绑定/领地/任务/最新 Claim/活跃执行/表演状态/最近事件/revision），供 GUI 或需要精确数据的调用方使用',
+    {},
+    () => {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return { error: 'KINGDOM_NOT_INITIALIZED', message: '尚未初始化王国。请先 /kingdom init。' }
+      return buildSnapshot(store, { auth: authView })
+    },
+  ), 'dsh-kingdom: snapshot tool')
+
+  ctx.effect(() => jsonTool(
+    'kingdom_task_detail',
+    '返回单个任务的结构化详情 JSON：验收标准、尝试历史、全部 Claim、Supervisor 决策、执行记录、关联事件与允许的下一步动作',
+    { task_id: { type: 'string', required: true, description: '任务 id' } },
+    (args) => {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return { error: 'KINGDOM_NOT_INITIALIZED', message: '尚未初始化王国。请先 /kingdom init。' }
+      const detail = buildTaskDetail(store, kingdomId, args.task_id ?? '')
+      return detail ?? { error: 'TASK_NOT_FOUND', message: `找不到任务 ${args.task_id}。` }
+    },
+  ), 'dsh-kingdom: task-detail tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_execution_control',
+    description: '控制一次 Worker 执行的运行状态（Supervisor 职权）：pause 暂停 / resume 恢复 / abort 终止。只影响运行事实，不改变任务的治理状态',
+    parameters: {
+      execution_id: { type: 'string', required: true, description: 'Execution id（可从 kingdom_snapshot 的 liveExecutions 获取）' },
+      action: { type: 'string', required: true, description: 'pause / resume / abort' },
+      reason: { type: 'string', description: '原因（可选，会记入事件）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { execution_id: string; action: string; reason?: string }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      const input = { executionId: args.execution_id, reason: args.reason }
+      const cmd = commandContext(kingdomId)
+      switch (args.action.trim().toLowerCase()) {
+        case 'pause': return pauseExecution(store, cmd, input).message
+        case 'resume': return resumeExecution(store, cmd, input).message
+        case 'abort': return abortExecution(store, cmd, input).message
+        default: return `错误：action 必须是 pause / resume / abort 之一，收到 "${args.action}"。`
+      }
+    },
+  })), 'dsh-kingdom: execution-control tool')
+
+  // ── 本地 GUI 通道（默认关闭；配置 guiPort 后启用）────────────────
+
+  if (config.guiPort > 0) {
+    ctx.effect(() => startGuiServer({
+      snapshot: () => buildSnapshot(store, { auth: authView }),
+      taskDetail: (taskId) => {
+        const kingdomId = requireKingdom()
+        return kingdomId ? buildTaskDetail(store, kingdomId, taskId) : null
+      },
+      eventsSince: (afterSeq, limit) => {
+        const kingdomId = requireKingdom()
+        if (!kingdomId) return { revision: 0, events: [] }
+        return {
+          revision: store.revision(kingdomId),
+          events: store.listEventsSince(kingdomId, afterSeq, limit).map(toEventView),
+        }
+      },
+      command: (name, payload) => runGuiCommand(name, payload),
+    }, {
+      port: config.guiPort,
+      ...config.guiToken ? { token: config.guiToken } : {},
+      allowOrigins: config.guiAllowOrigins,
+      logger: ctx.logger,
+    }), 'dsh-kingdom: GUI channel')
+  }
+
+  const guiFailure = (errorCode: CommandResultView['errorCode'], message: string): CommandResultView => ({
+    ok: false,
+    errorCode,
+    message,
+    task: null,
+    execution: null,
+    emittedEvents: [],
+    allowedActions: [],
+    revision: requireKingdom() ? store.revision(requireKingdom()!) : 0,
+  })
+
+  /** GUI 写命令的分发。GUI 仍然经插件执行命令，绝不直接写 SQLite。 */
+  async function runGuiCommand(name: string, payload: Record<string, unknown>): Promise<CommandResultView> {
+    const kingdomId = requireKingdom()
+    if (!kingdomId) {
+      return guiFailure('KINGDOM_NOT_INITIALIZED', '尚未初始化王国。请先 /kingdom init。')
+    }
+    const str = (key: string): string => typeof payload[key] === 'string' ? payload[key] : ''
+    const opt = (key: string): string | undefined => typeof payload[key] === 'string' ? payload[key] : undefined
+    const principal: Principal | undefined = typeof payload.session_id === 'string'
+      ? { sessionId: payload.session_id }
+      : undefined
+    const cmd = commandContext(kingdomId, principal)
+
+    switch (name) {
+      case 'plan':
+        return planTask(store, cmd, {
+          title: str('title'),
+          description: opt('description'),
+          acceptanceCriteria: opt('acceptance_criteria'),
+          territoryId: opt('territory_id'),
+        })
+      case 'assign':
+        return assignTask(store, cmd, { taskId: str('task_id'), workerBindingId: opt('worker_binding_id') })
+      case 'review':
+        return reviewTask(store, cmd, {
+          taskId: str('task_id'),
+          decision: str('decision'),
+          reason: opt('reason'),
+        })
+      case 'execution.pause':
+        return pauseExecution(store, cmd, { executionId: str('execution_id'), reason: opt('reason') })
+      case 'execution.resume':
+        return resumeExecution(store, cmd, { executionId: str('execution_id'), reason: opt('reason') })
+      case 'execution.abort':
+        return abortExecution(store, cmd, { executionId: str('execution_id'), reason: opt('reason') })
+      case 'start':
+        // 诚实的 Beta 边界：启动 Worker 需要一个**活的委派父 Agent**
+        // （in-process provider 从它派生 workspace / 血缘 / 委派深度）。
+        // HTTP 请求没有 Agent 上下文，所以这条命令只能从 DSH 会话里
+        // 经 kingdom_start_task 触发。这里明确报错，而不是伪造一次执行。
+        return guiFailure('EXECUTOR_UNAVAILABLE',
+          'kingdom_start_task 需要由 DSH 会话中的 Agent 触发（Worker subagent 需要委派父 Agent）。'
+          + 'GUI 请引导用户在 DSH 会话中说“开始执行这个任务”，或调用 kingdom_start_task 工具。')
+      default:
+        return guiFailure('INVALID_INPUT', `未知命令 "${name}"。`)
+    }
+  }
 
   // ── Slash 命令（确定性管理入口）──────────────────────────────
 
@@ -336,7 +542,7 @@ export function apply(ctx: Context, config: Config): void {
           return {
             kind: 'success',
             text: [
-              'dsh-Kingdom v0.2（Phase 2：Worker Claim Bridge）',
+              'dsh-Kingdom v0.3（Phase 3：GUI 适配）',
               '/kingdom init    初始化或接入本地王国（幂等）',
               '/kingdom status  查看王国真实状态',
               '/kingdom reset   重新扫描接入（不删除数据）',
@@ -345,6 +551,9 @@ export function apply(ctx: Context, config: Config): void {
               '任务闭环：plan → assign → start（Worker 执行）→ review（ACCEPT/REWORK/FAIL）',
               'Worker 交回的结果只是待审查的 Claim（任务进入 REVIEW），',
               '只有 Supervisor 的 ACCEPT 才能让任务成为 DONE。',
+              '',
+              'GUI：kingdom_snapshot / kingdom_task_detail 返回结构化 JSON；',
+              '配置 guiPort 可开本地 HTTP 通道（默认关闭，只绑 127.0.0.1）。',
             ].join('\n'),
           }
         default:

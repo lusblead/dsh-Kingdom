@@ -28,6 +28,10 @@ const { DshSubagentExecutor } = await import(`file://${join(ROOT, 'lib/worker/ds
 const { parseStructuredResult, WORKER_OUTPUT_SCHEMA, buildWorkerPrompt } =
   await import(`file://${join(ROOT, 'lib/worker/executor.js')}`)
 
+const AUTH_DEMO = { mode: 'declarative', trustLevel: 'local-demo', note: '本地可信演示权限' }
+/** Phase 3 起命令签名为 (store, ctx, input)；Phase 2 语义本身未变。 */
+const CTX = () => ({ kingdomId: KID, auth: AUTH_DEMO })
+
 let passed = 0
 let failed = 0
 const failures = []
@@ -161,20 +165,19 @@ const WORKER_BINDING = store.getBindingByRole(KID, 'WORKER').binding_id
 // ════════════════════════════════════════════════════════════════
 section('C. ★ 核心验收：Claim ≠ Fact（Phase 2 第一优先级）')
 
-const planned = planTask(store, {
-  kingdomId: KID, territoryId: TERRITORY,
+const planned = planTask(store, CTX(), { territoryId: TERRITORY,
   title: '给 RAG 加重排序', description: '接入 bge-reranker',
   acceptanceCriteria: '召回率提升 >= 5%，且有可复现实验记录',
 })
-check('kingdom_plan_task → CREATED', planned.ok && planned.task.status === 'CREATED', planned.text)
-const T1 = planned.task.task_id
+check('kingdom_plan_task → CREATED', planned.ok && planned.task.status === 'CREATED', planned.message)
+const T1 = planned.task.taskId
 
-const assigned = assignTask(store, { kingdomId: KID, taskId: T1 })
-check('kingdom_assign_task → ASSIGNED', assigned.ok && assigned.task.status === 'ASSIGNED', assigned.text)
-check('assign 记录了 Worker binding', assigned.task.assigned_binding_id === WORKER_BINDING)
+const assigned = assignTask(store, CTX(), { taskId: T1 })
+check('kingdom_assign_task → ASSIGNED', assigned.ok && assigned.task.status === 'ASSIGNED', assigned.message)
+check('assign 记录了 Worker binding', assigned.task.assignedBindingId === WORKER_BINDING)
 
 const exec1 = fakeExecutor([claim('COMPLETED', '已接入 bge-reranker，召回率 +7%')])
-const started = await startTask(store, exec1, { kingdomId: KID, taskId: T1 })
+const started = await startTask(store, exec1, CTX(), { taskId: T1 })
 
 check('★ Worker 完成任务后 Task.status == REVIEW',
   started.task.status === 'REVIEW', started.task.status)
@@ -190,10 +193,9 @@ check('Worker Context 收到验收标准',
   exec1.seen[0].context.acceptanceCriteria.includes('召回率提升'))
 
 // ── ACCEPT → DONE ──
-const accepted = reviewTask(store, {
-  kingdomId: KID, taskId: T1, decision: 'ACCEPT', reason: '实验记录可复现',
+const accepted = reviewTask(store, CTX(), { taskId: T1, decision: 'ACCEPT', reason: '实验记录可复现',
 })
-check('Supervisor ACCEPT → Task.status == DONE', accepted.ok && accepted.task.status === 'DONE', accepted.text)
+check('Supervisor ACCEPT → Task.status == DONE', accepted.ok && accepted.task.status === 'DONE', accepted.message)
 const acceptEvents = store.listEvents(KID, 100).filter(e => e.event_type === 'TASK_ACCEPTED' && e.target_id === T1)
 check('ACCEPT 记了 TASK_ACCEPTED 事件', acceptEvents.length === 1)
 check('TASK_ACCEPTED 带 reviewer binding + reason', (() => {
@@ -201,32 +203,30 @@ check('TASK_ACCEPTED 带 reviewer binding + reason', (() => {
   return p.reviewer_binding_id === store.getBindingByRole(KID, 'SUPERVISOR').binding_id
     && p.reason === '实验记录可复现'
 })(), acceptEvents[0]?.payload_json)
-check('DONE 是终态：不能再被审查', !reviewTask(store, { kingdomId: KID, taskId: T1, decision: 'FAIL', reason: 'x' }).ok)
+check('DONE 是终态：不能再被审查', !reviewTask(store, CTX(), { taskId: T1, decision: 'FAIL', reason: 'x' }).ok)
 
 // ════════════════════════════════════════════════════════════════
 section('D. REWORK（裁决 5）：同一 Worker Binding、新 session、attempt+1')
 
-const t2 = planTask(store, {
-  kingdomId: KID, territoryId: TERRITORY, title: '写 RAG 评测脚本',
+const t2 = planTask(store, CTX(), { territoryId: TERRITORY, title: '写 RAG 评测脚本',
   acceptanceCriteria: '覆盖 3 个数据集',
-}).task.task_id
-assignTask(store, { kingdomId: KID, taskId: t2 })
+}).task.taskId
+assignTask(store, CTX(), { taskId: t2 })
 
 const exec2 = fakeExecutor([
   claim('COMPLETED', '第一轮：只覆盖了 1 个数据集', 'sess-round-1'),
   claim('COMPLETED', '第二轮：补齐 3 个数据集', 'sess-round-2'),
 ])
-await startTask(store, exec2, { kingdomId: KID, taskId: t2 })
+await startTask(store, exec2, CTX(), { taskId: t2 })
 check('第一轮结果到达 → REVIEW', store.getTask(t2).status === 'REVIEW')
 
-const reworked = reviewTask(store, {
-  kingdomId: KID, taskId: t2, decision: 'REWORK', reason: '只覆盖 1 个数据集，未满足 3 个',
+const reworked = reviewTask(store, CTX(), { taskId: t2, decision: 'REWORK', reason: '只覆盖 1 个数据集，未满足 3 个',
 })
-check('Supervisor REWORK → Task 回 RUNNING', reworked.ok && reworked.task.status === 'RUNNING', reworked.text)
+check('Supervisor REWORK → Task 回 RUNNING', reworked.ok && reworked.task.status === 'RUNNING', reworked.message)
 check('REWORK 必须给 reason',
-  !reviewTask(store, { kingdomId: KID, taskId: T1, decision: 'REWORK' }).ok)
+  !reviewTask(store, CTX(), { taskId: T1, decision: 'REWORK' }).ok)
 
-const round2 = await startTask(store, exec2, { kingdomId: KID, taskId: t2 })
+const round2 = await startTask(store, exec2, CTX(), { taskId: t2 })
 const results2 = store.listWorkerResults(t2)
 check('REWORK 后 attempt_no == 2', results2.length === 2 && results2[1].attempt_no === 2,
   JSON.stringify(results2.map(r => r.attempt_no)))
@@ -253,24 +253,24 @@ check('第二轮结果到达后仍是 REVIEW（不是 DONE）', round2.task.stat
 section('E. FAIL 的两个来源（裁决 6）')
 
 // E1: Worker 自称 FAILED，但那只是 Claim
-const t3 = planTask(store, { kingdomId: KID, territoryId: TERRITORY, title: '迁移向量库' }).task.task_id
-assignTask(store, { kingdomId: KID, taskId: t3 })
+const t3 = planTask(store, CTX(), { territoryId: TERRITORY, title: '迁移向量库' }).task.taskId
+assignTask(store, CTX(), { taskId: t3 })
 const r3 = await startTask(store, fakeExecutor([claim('FAILED', '依赖缺失，我做不下去')]),
-  { kingdomId: KID, taskId: t3 })
+  CTX(), { taskId: t3 })
 check('★ Worker 返回合法结构化结果但 outcome=FAILED → Task 仍是 REVIEW（不是 FAILED）',
   r3.task.status === 'REVIEW', r3.task.status)
 check('worker_results 忠实记下 Worker 自称的 FAILED', store.latestWorkerResult(t3).outcome === 'FAILED')
 
-const failed3 = reviewTask(store, { kingdomId: KID, taskId: t3, decision: 'FAIL', reason: '确认依赖不可得' })
-check('只有 Supervisor FAIL 才 REVIEW → FAILED', failed3.ok && failed3.task.status === 'FAILED', failed3.text)
+const failed3 = reviewTask(store, CTX(), { taskId: t3, decision: 'FAIL', reason: '确认依赖不可得' })
+check('只有 Supervisor FAIL 才 REVIEW → FAILED', failed3.ok && failed3.task.status === 'FAILED', failed3.message)
 check('FAILED 是终态', TASK_TRANSITIONS.FAILED.length === 0)
 
 // E2: executor 客观失败
-const t4 = planTask(store, { kingdomId: KID, territoryId: TERRITORY, title: '跑一个会崩的任务' }).task.task_id
-assignTask(store, { kingdomId: KID, taskId: t4 })
+const t4 = planTask(store, CTX(), { territoryId: TERRITORY, title: '跑一个会崩的任务' }).task.taskId
+assignTask(store, CTX(), { taskId: t4 })
 const r4 = await startTask(store,
   fakeExecutor([{ kind: 'executor-failure', reason: 'subagent 启动失败：no provider', sessionId: null }]),
-  { kingdomId: KID, taskId: t4 })
+  CTX(), { taskId: t4 })
 check('★ executor 客观失败 → Task RUNNING → FAILED', r4.task.status === 'FAILED', r4.task.status)
 const wef = store.listEvents(KID, 200).filter(e => e.event_type === 'WORKER_EXECUTION_FAILED' && e.target_id === t4)
 check('★ 记录了 WORKER_EXECUTION_FAILED 事件', wef.length === 1)
@@ -292,29 +292,29 @@ check('store.transitionTask 拦截非法转移（库层兜底）', (() => {
   return throws(() => store.transitionTask(t, 'DONE')) !== null
 })())
 check('未 REVIEW 的任务不能被 review',
-  !reviewTask(store, { kingdomId: KID, taskId: t4, decision: 'ACCEPT' }).ok)
+  !reviewTask(store, CTX(), { taskId: t4, decision: 'ACCEPT' }).ok)
 check('无 SUPERVISOR 绑定时 start/review 被拒（声明性角色校验）', (() => {
   const solo = new KingdomManager({ kingdomName: 'Solo', ownerName: 'x', dbPath: join(SMOKE, 'solo.db') })
   solo.init()
   const sid = solo.storeHandle.getDefaultKingdom().kingdom_id
   createTerritory(solo.storeHandle, { kingdomId: sid, name: 'T' })
-  const noChancellor = planTask(solo.storeHandle, { kingdomId: sid, title: 'x' })
+  const noChancellor = planTask(solo.storeHandle, { kingdomId: sid, auth: AUTH_DEMO }, { title: 'x' })
   solo.close()
-  return !noChancellor.ok && noChancellor.text.includes('CHANCELLOR')
+  return !noChancellor.ok && noChancellor.message.includes('CHANCELLOR')
 })())
 
 // ════════════════════════════════════════════════════════════════
 section('G. kingdom_list_tasks 反映真实状态')
 
-const listing = listTasks(store, { kingdomId: KID })
+const listing = listTasks(store, KID)
 check('list 含 DONE 任务', listing.includes('[DONE]'))
 check('list 含 FAILED 任务', listing.includes('[FAILED]'))
 check('list 含 REVIEW 任务', listing.includes('[REVIEW]'))
 check('list 展示尝试次数', listing.includes('尝试次数：2'))
 check('list 展示最新 Claim 摘要', listing.includes('第二轮：补齐 3 个数据集'))
 check('list 对 REVIEW 明示「尚未成为完成事实」', listing.includes('尚未成为完成事实'))
-check('list 按状态过滤', listTasks(store, { kingdomId: KID, status: 'DONE' }).includes('[DONE]')
-  && !listTasks(store, { kingdomId: KID, status: 'DONE' }).includes('[FAILED]'))
+check('list 按状态过滤', listTasks(store, KID, { status: 'DONE' }).includes('[DONE]')
+  && !listTasks(store, KID, { status: 'DONE' }).includes('[FAILED]'))
 
 // ════════════════════════════════════════════════════════════════
 section('H. 重启 DSH 后完整恢复')
@@ -333,7 +333,7 @@ check('重启后 Task 状态完整恢复',
 check('重启后 worker_results 完整恢复', store2.listWorkerResults(t2).length === snapshot.results)
 check('重启后 events 完整恢复', store2.listEvents(KID, 500).length === snapshot.events)
 check('重启后仍能继续治理闭环（REVIEW 任务可被 ACCEPT）',
-  reviewTask(store2, { kingdomId: KID, taskId: t2, decision: 'ACCEPT' }).task.status === 'DONE')
+  reviewTask(store2, CTX(), { taskId: t2, decision: 'ACCEPT' }).task.status === 'DONE')
 reopened.close()
 
 // ════════════════════════════════════════════════════════════════
