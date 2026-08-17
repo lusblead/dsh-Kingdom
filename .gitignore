@@ -1,0 +1,8 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+.p2-smoke/
+.audit-home/
+.clean-install-home/
+.smoke/

@@ -1,0 +1,6 @@
+# dsh-kingdom bundle patch：把本插件作为 profile bundle 层插入。
+# 安装（dsh plugin add @dsh-external/dsh-kingdom）后自动进入 profile bundles，
+# 重启 DSH 自动加载，无需 dev_inject_plugin。
+- insert:
+    - id: dsh-kingdom
+      name: '@dsh-external/dsh-kingdom'
