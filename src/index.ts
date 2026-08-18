@@ -603,6 +603,11 @@ export function apply(ctx: Context, config: Config): void {
 
   /** GUI 写命令的分发。GUI 仍然经插件执行命令，绝不直接写 SQLite。 */
   async function runGuiCommand(name: string, payload: Record<string, unknown>): Promise<CommandResultView> {
+    // `init` 是唯一允许在王国未初始化时执行的命令（幂等，本地建库）。
+    if (name === 'init') {
+      const result = manager.init()
+      return plainResult(result.detail, result.kingdomId)
+    }
     const kingdomId = requireKingdom()
     if (!kingdomId) {
       return guiFailure('KINGDOM_NOT_INITIALIZED', '尚未初始化王国。请先 /kingdom init。')

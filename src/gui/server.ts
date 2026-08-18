@@ -42,6 +42,7 @@ export interface GuiServerOptions {
 const CLIENT_HEADER = 'x-kingdom-client'
 
 const COMMANDS = new Set([
+  'init',
   'territory.create',
   'binding.bind', 'binding.unbind', 'binding.session',
   'plan', 'assign', 'start', 'review',
