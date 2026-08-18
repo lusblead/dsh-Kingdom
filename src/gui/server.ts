@@ -186,14 +186,44 @@ export function startGuiServer(handlers: GuiServerHandlers, options: GuiServerOp
     sendError(res, 404, 'NOT_FOUND', `no route for ${req.method ?? 'GET'} ${path}`)
   }
 
+  let retries = 0
+  let retryTimer: NodeJS.Timeout | null = null
+  let disposed = false
+
+  /**
+   * 端口占用时有界重试。
+   *
+   * HMR 的常见时序是「新实例先起、旧实例后卸」，此时端口还在旧实例手里。
+   * 不重试的话，新实例的 GUI 通道会在整个生命周期里保持死掉——
+   * 开发时表现为「改一次代码 GUI 就再也连不上，必须整体重启 DSH」。
+   * 重试是有界的（最多 ~3 秒），避免真正的端口冲突变成无限循环。
+   */
+  const RETRY_DELAY_MS = 300
+  const MAX_RETRIES = 10
+
   server.on('error', (error: NodeJS.ErrnoException) => {
-    const hint = error.code === 'EADDRINUSE'
-      ? `：端口 ${options.port} 已被占用，请换一个 guiPort`
-      : ''
-    options.logger?.warn(`dsh-kingdom GUI 通道启动失败${hint}（${error.message}）`)
+    if (error.code === 'EADDRINUSE' && !disposed && retries < MAX_RETRIES) {
+      retries++
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        if (!disposed) server.listen(options.port, host)
+      }, RETRY_DELAY_MS)
+      // 重试期间保持安静；只有最终放弃才告警，避免刷屏。
+      if (retries === MAX_RETRIES) {
+        options.logger?.warn(
+          `dsh-kingdom GUI 通道：端口 ${options.port} 持续被占用，`
+          + `已重试 ${MAX_RETRIES} 次仍失败，本次加载不提供 GUI 通道（请换 guiPort 或检查残留进程）。`,
+        )
+      }
+      return
+    }
+    if (!disposed) {
+      options.logger?.warn(`dsh-kingdom GUI 通道启动失败（${error.message}）`)
+    }
   })
 
   server.listen(options.port, host, () => {
+    retries = 0
     options.logger?.info(
       `dsh-kingdom GUI 通道已监听 http://${host}:${options.port}`
       + `（snapshot / tasks / events / commands${token ? '，已启用 bearer token' : ''}）`,
@@ -201,6 +231,11 @@ export function startGuiServer(handlers: GuiServerHandlers, options: GuiServerOp
   })
 
   return () => {
+    disposed = true
+    if (retryTimer) {
+      clearTimeout(retryTimer)
+      retryTimer = null
+    }
     server.close()
     server.closeAllConnections?.()
   }

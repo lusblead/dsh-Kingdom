@@ -207,6 +207,7 @@ binding 未绑 session 时直接拒绝（无法验证就不放行）。
 DSH_CHECKOUT=<checkout> bash scripts/build.sh   # 或手动 tsc
 node scripts/p2-smoke.mjs                        # Phase 2 治理闭环自测（81 断言）
 node scripts/p3-smoke.mjs                        # Phase 3 GUI 适配自测（109 断言）
+node scripts/hotplug-audit.mjs                   # 热插拔审计（25 断言：卸载/重载/端口/在途执行）
 npm pack                                         # 产出可分发 tgz
 ```
 

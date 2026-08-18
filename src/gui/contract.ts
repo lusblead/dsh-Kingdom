@@ -26,24 +26,32 @@
  */
 
 /** 组织角色。GUI 自行决定每个角色用哪个人物形象。 */
-export type ActorRole = 'OWNER' | 'CHANCELLOR' | 'SUPERVISOR' | 'WORKER'
+export const ACTOR_ROLES = ['OWNER', 'CHANCELLOR', 'SUPERVISOR', 'WORKER'] as const
+
+export type ActorRole = (typeof ACTOR_ROLES)[number]
 
 /**
  * 人物状态（Resolver 的 `state` 维）。
  *
  * `absent` 表示该角色没有绑定：GUI 应当**保留组织节点与姓名牌**，只是不渲染人物 Sprite。
+ *
+ * 这份清单是**契约的一部分**：GUI 侧 Visual Resolver 必须逐个处理它们，
+ * 漏掉任何一个都会让人物静默退化成 idle。改动本数组前请同步 GUI。
  */
-export type ActorState =
-  | 'absent'
-  | 'idle'
-  | 'planning'
-  | 'assigning'
-  | 'working'
-  | 'sleeping'
-  | 'reviewing'
-  | 'waiting'
-  | 'confused'
-  | 'celebrating'
+export const ACTOR_STATES = [
+  'absent',
+  'idle',
+  'planning',
+  'assigning',
+  'working',
+  'sleeping',
+  'reviewing',
+  'waiting',
+  'confused',
+  'celebrating',
+] as const
+
+export type ActorState = (typeof ACTOR_STATES)[number]
 
 /**
  * 角色专属动作（Resolver 的 `activity` 维）。

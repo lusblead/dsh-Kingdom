@@ -33,6 +33,7 @@ import {
   listTasks,
   pauseExecution,
   planTask,
+  reclaimOrphanExecutions,
   resumeExecution,
   reviewTask,
   startTask,
@@ -112,6 +113,21 @@ export function apply(ctx: Context, config: Config): void {
 
   const commandContext = (kingdomId: string, principal?: Principal): CommandContext =>
     ({ kingdomId, auth: authView, ...principal ? { principal } : {} })
+
+  // ── 加载期回收：清掉上一个插件生命周期留下的孤儿 Execution ──────
+  //
+  // Worker 是 one-shot in-process subagent，生命周期绑在插件 fiber 上，
+  // 不可能跨越重载存活。所以开库时看到的"活跃"执行必然是残骸。
+  // 不回收的话，GUI 会看到骑士永远在工作，且该任务再也无法重新 start。
+  {
+    const kingdomId = requireKingdom()
+    if (kingdomId) {
+      const reclaimed = reclaimOrphanExecutions(store, kingdomId)
+      if (reclaimed > 0) {
+        ctx.logger.info(`dsh-kingdom：已回收 ${reclaimed} 个上次运行残留的 Execution（标记为 ABORTED）`)
+      }
+    }
+  }
 
 
   // ── 工具注册（全部挂 ctx.effect）────────────────────────────

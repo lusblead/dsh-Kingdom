@@ -197,6 +197,17 @@ export interface ExecutionRow {
   /** 终止原因等诊断信息（宿主观察，非 Worker 自述）。 */
   detail: string | null
   started_at: string
+  /**
+   * 最近一次**状态转移**的时刻，不是心跳。
+   *
+   * 诚实说明：one-shot subagent 这个 seam 不提供任何进度回调
+   * （`SubagentRun` 只有 `{id, localAgent, result, dispose}`），
+   * 所以执行进行中没有任何可以周期性上报的信号，本字段在整个执行体内不会前进。
+   *
+   * **不要拿它做存活判定**：一次合法的长执行与一次挂死的执行，
+   * 在这个字段上完全无法区分。插件崩溃/重载导致的残骸由加载期回收兜底
+   * （见 task-service.ts 的 reclaimOrphanExecutions），那条路径不依赖本字段。
+   */
   heartbeat_at: string | null
   ended_at: string | null
   /**
@@ -598,6 +609,26 @@ export class KingdomStore {
     return row?.n ?? 0
   }
 
+  /**
+   * executions 侧的最大 attempt_no。
+   *
+   * **不能只看 worker_results 来编下一个 attempt 号**：executor 客观失败、
+   * 被 abort、以及重载后被回收的僵尸执行都只有 Execution 行、没有 Claim 行。
+   * 只按 Claim 计数会重复发号，撞上 `UNIQUE(task_id, attempt_no)`。
+   * 下一次尝试号必须取两者的最大值再 +1（见 nextAttemptNo）。
+   */
+  maxExecutionAttemptNo(taskId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(attempt_no), 0) AS n FROM executions WHERE task_id = ?')
+      .get(taskId) as unknown as { n: number } | undefined
+    return row?.n ?? 0
+  }
+
+  /** 下一次执行应使用的 attempt 号：Claim 与 Execution 两侧取大再 +1。 */
+  nextAttemptNo(taskId: string): number {
+    return Math.max(this.maxAttemptNo(taskId), this.maxExecutionAttemptNo(taskId)) + 1
+  }
+
   insertWorkerResult(row: WorkerResultRow): WorkerResultRow {
     this.db
       .prepare(
@@ -714,13 +745,6 @@ export class KingdomStore {
       ended_at: ended,
       pause_requested_at: pauseRequestedAt,
     }
-  }
-
-  /** 心跳：只更新 heartbeat_at，不碰状态。GUI 据此判断执行是否还活着。 */
-  touchExecution(executionId: string): void {
-    this.db
-      .prepare('UPDATE executions SET heartbeat_at = ? WHERE execution_id = ?')
-      .run(new Date().toISOString(), executionId)
   }
 
   /** 登记暂停请求（不改状态；生效点见 ExecutionRow.pause_requested_at 注释）。 */

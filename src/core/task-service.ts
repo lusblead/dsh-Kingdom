@@ -171,6 +171,49 @@ function loadTask(
   return { ok: true, task }
 }
 
+// ── 加载期回收（热插拔正确性）──────────────────────────────────
+
+/**
+ * 插件加载时回收孤儿 Execution。
+ *
+ * **为什么这是安全的**：Worker 以 **one-shot in-process subagent** 执行，
+ * 它的生命周期完全绑在插件 fiber 上。插件一旦卸载/重载，那个 subagent
+ * 就不可能还活着。因此**开库时看到的任何"活跃" Execution，都必然是
+ * 上一个进程留下的残骸** —— 这不是推测，是由执行模型保证的。
+ *
+ * 不回收会怎样：Execution 永远停在 RUNNING，
+ * - GUI 看到骑士永远在工作（谎报运行状态）；
+ * - 该任务再也无法 start（被"已有未结束的 Execution"挡住）。
+ *
+ * 回收判定为 `ABORTED` 而不是 `FAILED`：这是宿主观察到的**中断**，
+ * 不是"executor 没跑出合法结果"，两者语义必须分开。
+ * 任务的治理状态**不动** —— 回收只处理运行事实，不替 Supervisor 做裁定。
+ *
+ * @returns 被回收的 Execution 数量。
+ */
+export function reclaimOrphanExecutions(store: KingdomStore, kingdomId: string): number {
+  const orphans = store.listLiveExecutions(kingdomId)
+  if (orphans.length === 0) return 0
+
+  const collector = new EventCollector(store, kingdomId)
+  for (const orphan of orphans) {
+    const reclaimed = store.transitionExecution(orphan, 'ABORTED', {
+      detail: '插件重载/宿主重启时回收：one-shot 执行无法跨越插件生命周期',
+    })
+    collector.emit('SESSION_STOPPED',
+      { role: 'WORKER', id: orphan.worker_binding_id },
+      { type: 'execution', id: reclaimed.execution_id },
+      {
+        task_id: orphan.task_id,
+        attempt_no: orphan.attempt_no,
+        reason: 'reclaimed-on-load',
+        previous_state: orphan.state,
+        last_heartbeat_at: orphan.heartbeat_at,
+      })
+  }
+  return orphans.length
+}
+
 // ── plan（CHANCELLOR）───────────────────────────────────────────
 
 export interface PlanTaskInput {
@@ -338,7 +381,7 @@ export async function startTask(
   const collector = new EventCollector(store, ctx.kingdomId)
   let task = status === 'ASSIGNED' ? store.transitionTask(loaded.task, 'RUNNING') : loaded.task
 
-  const attemptNo = store.maxAttemptNo(task.task_id) + 1
+  const attemptNo = store.nextAttemptNo(task.task_id)
   const previous = store.latestWorkerResult(task.task_id)
   const reworkReason = attemptNo > 1 ? lastReworkReason(store, ctx.kingdomId, task.task_id) : undefined
 
@@ -377,6 +420,42 @@ export async function startTask(
 
   const outcome = await executor.execute(task, context)
 
+  // 结算写入必须整体成功。最常见的失败原因是**执行期间插件被卸载**
+  // （热重载 / DSH 退出）导致 SQLite 连接已关闭。此时把裸 SQLite 错误
+  // 换成可行动的说明：数据没有半写，残留的 Execution 会在下次加载时被回收。
+  try {
+    return settleExecution(store, ctx, collector, role.binding, {
+      task, execution, attemptNo, outcome, executorKind: executor.kind,
+    })
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Worker 执行已结束，但结算写入失败：${reason}\n`
+      + `最可能的原因是本次执行期间插件被卸载或重载（SQLite 连接已关闭）。\n`
+      + `Execution ${execution.execution_id} 会在插件下次加载时被自动回收为 ABORTED，`
+      + `任务「${task.title}」的治理状态不受影响，可重新 kingdom_start_task。`,
+      { cause: error },
+    )
+  }
+}
+
+/** 把一次执行的结局落库（Claim 到达 / executor 客观失败），并产出结构化结果。 */
+function settleExecution(
+  store: KingdomStore,
+  ctx: CommandContext,
+  collector: EventCollector,
+  reviewer: RoleBindingRow,
+  args: {
+    task: TaskRow
+    execution: ExecutionRow
+    attemptNo: number
+    outcome: Awaited<ReturnType<WorkerExecutor['execute']>>
+    executorKind: string
+  },
+): CommandResultView {
+  const { attemptNo, outcome, executorKind } = args
+  let { task, execution } = args
+
   if (outcome.kind === 'executor-failure') {
     // 宿主观察到的运行事实：executor 没产出合法 Result（裁决 6）。
     execution = store.transitionExecution(execution, 'FAILED', {
@@ -385,18 +464,18 @@ export async function startTask(
     })
     task = store.transitionTask(task, 'FAILED')
     collector.emit('WORKER_EXECUTION_FAILED',
-      { role: 'SUPERVISOR', id: role.binding.binding_id },
+      { role: 'SUPERVISOR', id: reviewer.binding_id },
       { type: 'task', id: task.task_id },
       {
         attempt_no: attemptNo,
         execution_id: execution.execution_id,
         worker_binding_id: task.assigned_binding_id,
         session_id: outcome.sessionId,
-        executor: executor.kind,
+        executor: executorKind,
         reason: outcome.reason,
       })
     collector.emit('SESSION_FAILED',
-      { role: 'SUPERVISOR', id: role.binding.binding_id },
+      { role: 'SUPERVISOR', id: reviewer.binding_id },
       { type: 'execution', id: execution.execution_id },
       { task_id: task.task_id, attempt_no: attemptNo, reason: outcome.reason })
 
@@ -430,7 +509,7 @@ export async function startTask(
       execution_id: execution.execution_id,
       claimed_outcome: claim.outcome,
       session_id: outcome.sessionId,
-      executor: executor.kind,
+      executor: executorKind,
     })
   // Execution 结束 ≠ 任务完成：GUI 收到它只移除人物 Sprite，组织节点保留。
   collector.emit('SESSION_STOPPED',

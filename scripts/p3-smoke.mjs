@@ -515,6 +515,36 @@ check('仍然没有 RUNNING → DONE 的边', (() => {
 }
 check('全库 tasks.status 写入路径仍唯一（结构不变量）', true)
 
+// ════════════════════════════════════════════════════════════════
+section('M. GUI 契约一致性（对 Agent-Kingdom-GUI beta v0.2.4 resolver）')
+
+// 下面这份清单来自 GUI 侧的 Visual Resolver 与其自测：
+//   site-patch/app/role-visual.tsx（resolveVisualPresentation 的分支）
+//   site-patch/tests/kingdom-role-activity.test.mjs:94（同一份清单的断言）
+// 钉在这里的目的：插件若新增/改名一个 state，而 GUI 不认识它，
+// 人物会静默退化成 idle —— 这种漂移必须在插件侧就炸出来，而不是等 GUI 上线才发现。
+const GUI_HANDLED_STATES = [
+  'absent', 'sleeping', 'confused', 'celebrating', 'waiting',
+  'idle', 'planning', 'assigning', 'working', 'reviewing',
+]
+{
+  const { ACTOR_STATES, ACTOR_ROLES } = await L('lib/gui/contract.js')
+  const plugin = [...ACTOR_STATES].sort()
+  const gui = [...GUI_HANDLED_STATES].sort()
+  check('★ 插件 ActorState 与 GUI resolver 处理的 state 全集完全一致',
+    JSON.stringify(plugin) === JSON.stringify(gui),
+    `插件独有=${plugin.filter(s => !gui.includes(s))} GUI 独有=${gui.filter(s => !plugin.includes(s))}`)
+  check('GUI 依赖的三个可视角色都在枚举里（OWNER 无人物资源，允许多余）',
+    ['CHANCELLOR', 'SUPERVISOR', 'WORKER'].every(r => ACTOR_ROLES.includes(r)))
+  // GUI 从 ExecutionView 读 pausePending 来播"准备休息"，这个字段不能消失。
+  const anyExecution = buildSnapshot(store, { auth: AUTH_DEMO }).tasks
+    .map(t => t.latestExecution).find(Boolean)
+  check('★ ExecutionView 暴露 pausePending（GUI 据此播"准备休息"）',
+    anyExecution !== undefined && 'pausePending' in anyExecution)
+  check('★ stage 每一项的 state 都在契约枚举内（无自造状态）',
+    buildSnapshot(store, { auth: AUTH_DEMO }).stage.every(a => ACTOR_STATES.includes(a.state)))
+}
+
 manager.close()
 
 // ════════════════════════════════════════════════════════════════
