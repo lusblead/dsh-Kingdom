@@ -586,6 +586,21 @@ export function apply(ctx: Context, config: Config): void {
     revision: requireKingdom() ? store.revision(requireKingdom()!) : 0,
   })
 
+  /** 把 Phase-1 风格（返回字符串）的领地/角色操作包装成 CommandResultView（M2：GUI 写层）。 */
+  const plainResult = (text: string, kId: string): CommandResultView => {
+    const failed = text.startsWith('错误：')
+    return {
+      ok: !failed,
+      errorCode: failed ? 'INVALID_INPUT' : null,
+      message: text,
+      task: null,
+      execution: null,
+      emittedEvents: [],
+      allowedActions: [],
+      revision: store.revision(kId),
+    }
+  }
+
   /** GUI 写命令的分发。GUI 仍然经插件执行命令，绝不直接写 SQLite。 */
   async function runGuiCommand(name: string, payload: Record<string, unknown>): Promise<CommandResultView> {
     const kingdomId = requireKingdom()
@@ -600,6 +615,40 @@ export function apply(ctx: Context, config: Config): void {
     const cmd = commandContext(kingdomId, principal)
 
     switch (name) {
+      case 'territory.create':
+        return plainResult(createTerritory(store, {
+          kingdomId,
+          name: str('name'),
+          workspacePath: opt('workspace_path'),
+          summary: opt('summary'),
+        }), kingdomId)
+      case 'binding.bind':
+        return plainResult(bindRole(store, {
+          kingdomId,
+          roleType: str('role_type'),
+          roleName: opt('role_name'),
+          sessionId: opt('session_id'),
+          modelName: opt('model_name'),
+          agentName: opt('agent_name'),
+          sessionMeta: opt('session_meta'),
+        }), kingdomId)
+      case 'binding.unbind':
+        return plainResult(unbindRole(store, {
+          kingdomId,
+          roleType: opt('role_type'),
+          bindingId: opt('binding_id'),
+          reason: opt('reason'),
+        }), kingdomId)
+      case 'binding.session':
+        return plainResult(rebindSession(store, {
+          kingdomId,
+          roleType: opt('role_type'),
+          bindingId: opt('binding_id'),
+          sessionId: opt('session_id'),
+          modelName: opt('model_name'),
+          agentName: opt('agent_name'),
+          sessionMeta: opt('session_meta'),
+        }), kingdomId)
       case 'plan':
         return planTask(store, cmd, {
           title: str('title'),
