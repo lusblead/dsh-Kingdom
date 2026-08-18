@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dev dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (tsc build + node --test)
+        run: npm test
+
+      - name: Phase 2 smoke (isolated temp DB, fake executor)
+        run: node scripts/p2-smoke.mjs
+
+      - name: Phase 3 (GUI adapter) smoke
+        run: node scripts/p3-smoke.mjs
+
+      - name: Hotplug audit (effect lifecycle)
+        run: node scripts/hotplug-audit.mjs
+
+      - name: Package check
+        run: npm pack --dry-run

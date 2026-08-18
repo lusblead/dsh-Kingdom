@@ -410,7 +410,9 @@ section('J. P1-9：最低角色鉴权')
 section('K. P0-4：本地 GUI HTTP 通道')
 
 {
-  const PORT = 34817
+  // 默认 34817 与真实实例的 GUI 网关端口相同：本地若有真实实例在跑会撞端口，
+  // 用 P3_SMOKE_PORT 覆盖（如 P3_SMOKE_PORT=35123 node scripts/p3-smoke.mjs）。
+  const PORT = Number(process.env.P3_SMOKE_PORT) || 34817
   const stop = startGuiServer({
     snapshot: () => buildSnapshot(store, { auth: AUTH_DEMO }),
     taskDetail: id => buildTaskDetail(store, KID, id),
