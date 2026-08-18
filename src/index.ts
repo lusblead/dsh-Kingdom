@@ -9,7 +9,8 @@
  * - /kingdom init（幂等：无则初始化，有则接入）
  * - /kingdom status（真实状态）
  * - 工具：kingdom_status / kingdom_create_territory / kingdom_list_territories /
- *   kingdom_bind_role / kingdom_list_bindings
+ *   kingdom_delete_territory（v0.5.1：有任务拒绝 / force 级联）/ kingdom_bind_role /
+ *   kingdom_list_bindings
  *
  * Phase 2 能力（Worker Claim Bridge → 治理闭环）：
  * - 工具：kingdom_plan_task / kingdom_assign_task / kingdom_start_task /
@@ -26,7 +27,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { KingdomManager } from './core/kingdom.js'
 import { bindRole, listBindings, rebindSession, unbindRole } from './core/binding.js'
-import { createTerritory, listTerritories } from './core/territory.js'
+import { createTerritory, deleteTerritory, listTerritories } from './core/territory.js'
 import {
   abortExecution,
   assignTask,
@@ -225,6 +226,33 @@ export function apply(ctx: Context, config: Config): void {
       return listTerritories(store, kingdomId)
     },
   })), 'dsh-kingdom: list-territories tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_delete_territory',
+    description: '删除领地（真实用户反馈 #1）。治理语义：领地下存在任务（任意状态）时默认拒绝；确认级联删除请传 force=true（未终态任务统一标记 FAILED、活跃执行终止、TERRITORY_DELETED 事件留痕；DONE/FAILED 终态任务不篡改）',
+    parameters: {
+      territory_id: { type: 'string', description: '领地 id（与 name 二选一，优先）' },
+      name: { type: 'string', description: '领地名（与 territory_id 二选一）' },
+      force: { type: 'boolean', description: 'true = 级联删除（领地下有任务时必需）' },
+      reason: { type: 'string', description: '删除原因（可选，记入 TERRITORY_DELETED 事件）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { territory_id?: string; name?: string; force?: boolean; reason?: string }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      if (!args.territory_id && !args.name) return '错误：请提供 territory_id 或 name 指定要删除的领地。'
+      return deleteTerritory(store, {
+        kingdomId,
+        territoryId: args.territory_id,
+        name: args.name,
+        force: args.force,
+        reason: args.reason,
+      })
+    },
+  })), 'dsh-kingdom: delete-territory tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_bind_role',
@@ -626,6 +654,14 @@ export function apply(ctx: Context, config: Config): void {
           name: str('name'),
           workspacePath: opt('workspace_path'),
           summary: opt('summary'),
+        }), kingdomId)
+      case 'territory.delete':
+        return plainResult(deleteTerritory(store, {
+          kingdomId,
+          territoryId: opt('territory_id'),
+          name: opt('name'),
+          force: payload.force === true,
+          reason: opt('reason'),
         }), kingdomId)
       case 'binding.bind':
         return plainResult(bindRole(store, {

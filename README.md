@@ -104,11 +104,15 @@ dsh plugin --profile web add ./dsh-kingdom-0.4.0.tgz
 | 阶段 | 工具 |
 |---|---|
 | 王国基础 | `kingdom_init` · `kingdom_status` |
-| 领地 | `kingdom_create_territory` · `kingdom_list_territories` |
+| 领地 | `kingdom_create_territory` · `kingdom_list_territories` · `kingdom_delete_territory` |
 | 角色 | `kingdom_bind_role` · `kingdom_unbind_role` · `kingdom_bind_session` · `kingdom_list_bindings` |
 | 任务治理 | `kingdom_plan_task` · `kingdom_assign_task` · `kingdom_start_task` · `kingdom_review_task` · `kingdom_list_tasks` |
 | 执行控制 | `kingdom_execution_control` |
 | GUI（可选） | `kingdom_snapshot` · `kingdom_task_detail` |
+
+> **领地删除（v0.5.1）**：`kingdom_delete_territory`（网关 `territory.delete`、GUI 操作台删除按钮）遵循治理语义——
+> 领地下存在任务（任意状态）时**默认拒绝**；传 `force=true` 才级联删除：未终态任务统一标记 `FAILED`、
+> 活跃执行终止，`TERRITORY_DELETED` / `TASK_FAILED` 事件留痕；`DONE`/`FAILED` 终态任务不篡改。
 
 ---
 
@@ -180,7 +184,7 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
 ### 操作台能力
 
 - 读面：Snapshot / 任务详情 / 事件流（每 2.5s 轮询，revision 防回退）；
-- 写面（经网关执行，非演示预览）：初始化王国、创建领地、绑定/解绑/换会话（含 model/agent 身份）、规划任务、派发、验收 ACCEPT/REWORK/FAIL、执行暂停/恢复/终止；
+- 写面（经网关执行，非演示预览）：初始化王国、创建/删除领地（含级联语义确认）、绑定/解绑/换会话（含 model/agent 身份）、规划任务、派发、验收 ACCEPT/REWORK/FAIL、执行暂停/恢复/终止；
 - 写命令要求 `X-Kingdom-Client` 头（CORS 预检，防简单表单式 CSRF）；
 - **`start` 保持诚实边界**：启动 Worker 需要活的委派父 Agent，只能在 DSH 会话内用 `kingdom_start_task` 触发，GUI 不伪造执行；
 - 鉴权强度由快照 `auth.trustLevel` 如实声明（`local-demo` / `session-verified`），GUI 必须展示。

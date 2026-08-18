@@ -43,7 +43,7 @@ const CLIENT_HEADER = 'x-kingdom-client'
 
 const COMMANDS = new Set([
   'init',
-  'territory.create',
+  'territory.create', 'territory.delete',
   'binding.bind', 'binding.unbind', 'binding.session',
   'plan', 'assign', 'start', 'review',
   'execution.pause', 'execution.resume', 'execution.abort',

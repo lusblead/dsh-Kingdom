@@ -6,6 +6,11 @@
  *   REVIEW → RUNNING 表示 REWORK（同一 Worker Binding，attempt_no + 1）
  * 不引入 PLANNED。
  *
+ * v0.5.1 治理例外（领地删除级联，Owner 裁决 2026-08-18）：
+ *   CREATED / ASSIGNED → FAILED 仅限 deleteTerritory(force=true) 的级联终止路径，
+ *   未开工任务随领地删除统一标记 FAILED（附级联原因事件）。DONE/FAILED 是
+ *   不可篡改的终态事实，级联不触碰。
+ *
  * REVIEW 语义 = “Worker 已提交一个可供 Supervisor 审查的 Result Claim，
  * 但该 Claim 尚未成为任务完成事实”。这是 Phase 2 的核心治理不变量：
  * **Claim ≠ Fact**。
@@ -27,10 +32,11 @@ export type TaskStatus = (typeof TASK_STATUSES)[number]
  * - RUNNING → FAILED：executor 客观失败（宿主观察到的运行事实，非 Worker 自述，裁决 6）。
  * - REVIEW  → DONE / RUNNING / FAILED：Supervisor 的 ACCEPT / REWORK / FAIL 决定。
  * - DONE / FAILED 为 Phase 2 终态（裁决 6）。
+ * - CREATED / ASSIGNED → FAILED：v0.5.1 领地删除级联例外（见文件头），仅级联路径使用。
  */
 export const TASK_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
-  CREATED: ['ASSIGNED'],
-  ASSIGNED: ['RUNNING'],
+  CREATED: ['ASSIGNED', 'FAILED'],
+  ASSIGNED: ['RUNNING', 'FAILED'],
   RUNNING: ['REVIEW', 'FAILED'],
   REVIEW: ['DONE', 'RUNNING', 'FAILED'],
   DONE: [],

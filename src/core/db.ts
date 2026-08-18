@@ -403,6 +403,11 @@ export class KingdomStore {
     return row
   }
 
+  /** v0.5.1：删除领地行。治理守卫（任务存在时拒绝/级联）由上层 territory.ts 负责。 */
+  deleteTerritoryRow(territoryId: string): void {
+    this.db.prepare('DELETE FROM territories WHERE territory_id = ?').run(territoryId)
+  }
+
   // ── role_bindings ───────────────────────────────────────────
 
   listBindings(kingdomId: string): RoleBindingRow[] {
