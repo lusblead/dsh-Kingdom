@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-kingdom — 独立 dsh 插件：会话内初始化/接入本地王国。
+ * dsh-kingdom — 独立 dsh 插件：会话内初始化/接入本地王国。
  *
  * 规范：
  * - 资源注册必须挂 ctx.effect（热重载/卸载自动清理）。
@@ -46,7 +46,7 @@ import type { AuthView, CommandResultView } from './gui/contract.js'
 import { DshSubagentExecutor, type SubagentsLike } from './worker/dsh-subagent.js'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 
-export const name = '@dsh-external/dsh-kingdom'
+export const name = 'dsh-kingdom'
 export const inject = ['tools', 'commands']
 
 export interface Config {

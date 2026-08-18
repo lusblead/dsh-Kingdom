@@ -57,10 +57,18 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 2. 安装
 
-从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-external-dsh-kingdom-0.3.1.tgz`，然后：
+**方式 A：npm（推荐）**
 
 ```bash
-dsh plugin --profile web add ./dsh-external-dsh-kingdom-0.3.1.tgz
+dsh plugin --profile web add dsh-kingdom
+```
+
+**方式 B：从 GitHub Releases 下载 tgz**
+
+从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-0.3.1.tgz`，然后：
+
+```bash
+dsh plugin --profile web add ./dsh-kingdom-0.3.1.tgz
 ```
 
 > 安装时会打印 5 条 peer dependency warning——**这是预期的**（这些包由 DSH 运行时提供），不是失败。
