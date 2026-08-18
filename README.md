@@ -155,8 +155,11 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
 
 | 角色 | 地址 | 用途 |
 |---|---|---|
-| 前端页面 | **在线页面：https://agent-governance-ui.luyus704.chatgpt.site**（无需部署，打开即用）；或本地 `vite dev` / Release 附带的 `dsh-kingdom-gui-*.zip` 自托管 | 你打开的页面 |
+| 前端页面 | **本地自托管**：Release 附带的 `dsh-kingdom-gui-*.zip`（解压后 `cd server && npx wrangler dev`，浏览器打开提示的地址）；开发时可 `vite dev` | 你打开的页面 |
 | 后端数据网关 | `http://127.0.0.1:<guiPort>`（仅本机回环） | 填进**前端页面的连接框**，不要当页面打开 |
+
+> **前端是纯本地组件**：界面、网关、数据全部在你自己的机器上，不需要任何云端服务。
+> （早期实验性的云端页面 `agent-governance-ui.luyus704.chatgpt.site` 已停止维护，不再提供。）
 
 ### 三步用上 GUI（含"没有 GUI"的解法）
 
@@ -177,10 +180,10 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
 ```
 
 2. **重启 DSH**（让 guiPort 生效；`/kingdom help` 会显示网关地址）。
-3. **打开前端页面**（在线页面或本地自托管）→ 连接框填入 `http://127.0.0.1:34817` → 看到王国与操作台。
+3. **本地打开前端页面**：从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-gui-*.zip` → 解压 → 在 `server` 目录运行 `npx wrangler dev` → 浏览器打开提示的地址（默认 `http://localhost:8787`）→ 连接框填入 `http://127.0.0.1:34817` → 看到王国与操作台。
 
 > 默认安装**没有 GUI 是预期的**（`guiPort=0` 关闭、前端独立分发）：agent 说"没有 GUI"时，
-> 按上面三步开启即可。离线/内网用户可从 Release 下载 `dsh-kingdom-gui-*.zip`（prebuilt-dist）自托管。
+> 按上面三步开启即可。整个过程在本地完成，离线/内网环境同样可用（Release 自带 prebuilt-dist，无需联网下载前端）。
 
 ### 操作台能力
 
