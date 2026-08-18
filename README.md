@@ -144,6 +144,45 @@ Worker 交回结果 ──→ 这是一条 Claim（自述），只进 REVIEW
 
 ---
 
+## 🎛 GUI（王国操作台，可选）
+
+GUI 是**独立的前端**，与插件的**后端数据网关**分离：
+
+| 角色 | 地址 | 用途 |
+|---|---|---|
+| 前端页面 | 由 GUI 部署方提供（本地 `vite dev` / `prebuilt-dist` 静态托管 / 已部署站点） | 你打开的页面 |
+| 后端数据网关 | `http://127.0.0.1:<guiPort>`（仅本机回环） | 填进**前端页面的连接框**，不要当页面打开 |
+
+### 开启网关
+
+在 profile 的 `cordis.patch.yml` 为 dsh-kingdom 配置端口（整段替换，需重复默认键）：
+
+```yaml
+- id: dsh-kingdom
+  name: dsh-kingdom
+  config:
+    kingdomName: My Kingdom
+    ownerName: ""
+    workerProvider: spawn
+    guiPort: 34817        # 0=关闭（默认）；只绑 127.0.0.1
+    guiToken: ""          # 可选：设置后请求需 Authorization: Bearer
+    guiAllowOrigins:
+      - "*"
+    authMode: declarative
+```
+
+重启 DSH 后，在前端页面连接框填入 `http://127.0.0.1:34817`。
+
+### 操作台能力
+
+- 读面：Snapshot / 任务详情 / 事件流（每 2.5s 轮询，revision 防回退）；
+- 写面（经网关执行，非演示预览）：初始化王国、创建领地、绑定/解绑/换会话（含 model/agent 身份）、规划任务、派发、验收 ACCEPT/REWORK/FAIL、执行暂停/恢复/终止；
+- 写命令要求 `X-Kingdom-Client` 头（CORS 预检，防简单表单式 CSRF）；
+- **`start` 保持诚实边界**：启动 Worker 需要活的委派父 Agent，只能在 DSH 会话内用 `kingdom_start_task` 触发，GUI 不伪造执行；
+- 鉴权强度由快照 `auth.trustLevel` 如实声明（`local-demo` / `session-verified`），GUI 必须展示。
+
+---
+
 ## 🗺 路线图
 
 | 版本 | 内容 | 状态 |
