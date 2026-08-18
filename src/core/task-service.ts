@@ -175,19 +175,21 @@ function loadTask(
 /**
  * v0.7.0（M2-E）：Supervisor scope 校验（scope relation，非权限层级）。
  *
- * - Territory 未指派主理（supervisor_binding_id IS NULL）→ **fail-closed**
+ * - Territory 未指派主理（supervisor_binding_id IS NULL）→ **fail-closed（全局生效）**
  *   （TERRITORY_SUPERVISOR_MISSING：不知道谁管就不允许任何人代管）；
- * - 主理 ≠ 调用者 → TASK_OUT_OF_SCOPE；
+ * - 主理 ≠ 调用者 → TASK_OUT_OF_SCOPE——**仅在调用者身份可证明时强制**（session-bound，
+ *   principal 来自 DSH Runtime）；declarative 演示模式无调用者身份概念，
+ *   快照已如实标注 local-demo，匹配检查跳过（未指派 fail-closed 仍然生效）；
  * - 领地已删除（tombstone）→ 不可治理。
  */
 function checkTerritoryScope(
   store: KingdomStore,
-  kingdomId: string,
+  ctx: CommandContext,
   supervisorBindingId: string,
   task: TaskRow,
 ): { ok: true } | { ok: false; code: KingdomErrorCode; message: string } {
   const territory = store.getTerritoryById(task.territory_id)
-  if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') {
+  if (!territory || territory.kingdom_id !== ctx.kingdomId || territory.status === 'DELETED') {
     return { ok: false, code: 'TERRITORY_NOT_IN_KINGDOM', message: `错误：任务「${task.title}」的领地不存在或已删除，无法执行治理操作。` }
   }
   if (!territory.supervisor_binding_id) {
@@ -197,7 +199,8 @@ function checkTerritoryScope(
       message: `错误：领地「${territory.name}」未指派主理 Supervisor，任何 Supervisor 都不能治理（fail-closed）。请由 OWNER 执行 kingdom_set_territory_supervisor 指派。`,
     }
   }
-  if (territory.supervisor_binding_id !== supervisorBindingId) {
+  // 调用者身份可证明（session-bound）时强制匹配；declarative 演示模式跳过匹配检查。
+  if (ctx.principal?.sessionId && territory.supervisor_binding_id !== supervisorBindingId) {
     return {
       ok: false,
       code: 'TASK_OUT_OF_SCOPE',
@@ -215,7 +218,7 @@ function requireSupervisorInScope(
 ): { ok: true; binding: RoleBindingRow } | { ok: false; code: KingdomErrorCode; message: string } {
   const role = requireRole(store, ctx, 'SUPERVISOR')
   if (!role.ok) return role
-  const scope = checkTerritoryScope(store, ctx.kingdomId, role.binding.binding_id, task)
+  const scope = checkTerritoryScope(store, ctx, role.binding.binding_id, task)
   if (!scope.ok) return scope
   return role
 }
