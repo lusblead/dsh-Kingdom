@@ -4,6 +4,7 @@
 
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
+[![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.5.1-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.0--rc.5-orange)](#compatibility)
