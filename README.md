@@ -4,7 +4,7 @@
 
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
-[![Version](https://img.shields.io/badge/version-0.3.2-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.0--rc.5-orange)](#compatibility)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#requirements)
@@ -43,7 +43,9 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 | 👷 **Worker 独立执行** | 每次执行在独立 DSH 会话（one-shot subagent）进行，结果结构化返回 |
 | 🔁 **返工留痕** | REWORK 后同一 Worker 新会话重做，每次尝试（attempt）都有记录 |
 | 💾 **重启恢复** | 全部状态存本地 SQLite，关掉 DSH 再开，王国原样还在 |
-| 🎭 **GUI 就绪**（可选） | 结构化快照 + 本地通道（默认关闭），为可视化界面预留接口 |
+| 🔄 **换届与会话归属**（v0.4） | `kingdom_unbind_role` 解绑 / `kingdom_bind_session` 把角色绑到**独立会话**；`session-bound` 模式下只有被绑定会话能行使职权 |
+| 🪪 **会话身份预留字段**（v0.4） | 角色可携带 `model_name` / `agent_name` / `session_meta`（JSON 扩展槽）——现在不必填，未来完整会话逐步填满 |
+| 🎭 **GUI 就绪**（可选） | 结构化快照 + 本地数据网关（默认关闭），前端页面由 GUI 部署方提供 |
 
 ---
 
@@ -65,10 +67,10 @@ dsh plugin --profile web add dsh-kingdom
 
 **方式 B：从 GitHub Releases 下载 tgz**
 
-从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-0.3.2.tgz`，然后：
+从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-0.4.0.tgz`，然后：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-0.3.2.tgz
+dsh plugin --profile web add ./dsh-kingdom-0.4.0.tgz
 ```
 
 > 安装时会打印 5 条 peer dependency warning——**这是预期的**（这些包由 DSH 运行时提供），不是失败。
@@ -103,7 +105,7 @@ dsh plugin --profile web add ./dsh-kingdom-0.3.2.tgz
 |---|---|
 | 王国基础 | `kingdom_init` · `kingdom_status` |
 | 领地 | `kingdom_create_territory` · `kingdom_list_territories` |
-| 角色 | `kingdom_bind_role` · `kingdom_list_bindings` |
+| 角色 | `kingdom_bind_role` · `kingdom_unbind_role` · `kingdom_bind_session` · `kingdom_list_bindings` |
 | 任务治理 | `kingdom_plan_task` · `kingdom_assign_task` · `kingdom_start_task` · `kingdom_review_task` · `kingdom_list_tasks` |
 | 执行控制 | `kingdom_execution_control` |
 | GUI（可选） | `kingdom_snapshot` · `kingdom_task_detail` |
@@ -149,6 +151,7 @@ Worker 交回结果 ──→ 这是一条 Claim（自述），只进 REVIEW
 | 0.1.x | 王国基础：初始化/领地/角色绑定/重启恢复 | ✅ 已发布 |
 | 0.2.x | 任务治理闭环：plan/assign/execute/review + **Claim ≠ Fact** | ✅ 已发布 |
 | 0.3.x | 执行生命周期 + GUI 适配层 + 热插拔加固 | ✅ 已发布 |
+| 0.4.x | **换届与会话归属**：unbind/bind_session、会话身份预留字段、session-bound 强制校验、init 引导 | ✅ 已发布 |
 | 未来 | 多 Worker、Handoff、GUI 正式版、完整治理后端 | 🚧 规划中 |
 
 ---
