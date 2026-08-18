@@ -43,9 +43,9 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-commands": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-commands": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
     "cordis": ">=4.0.0-rc <5",
     "schemastery": "^3.18.0"
   },
