@@ -22,6 +22,12 @@ import { KingdomStore, RoleBindingRow } from './db.js'
 export const ROLE_TYPES = ['OWNER', 'CHANCELLOR', 'SUPERVISOR', 'WORKER'] as const
 export type RoleType = (typeof ROLE_TYPES)[number]
 
+/**
+ * v0.7.0（M2）：Singleton 是 Domain Policy，不是 API 偶然限制。
+ * OWNER / CHANCELLOR 只允许一个 ACTIVE 绑定；SUPERVISOR / WORKER 允许 N 个。
+ */
+export const SINGLETON_ROLES: readonly RoleType[] = ['OWNER', 'CHANCELLOR']
+
 /** 会话身份预留字段（v0.4）。现在可空，未来完整会话会逐步填满。 */
 export interface SessionIdentity {
   /** DSH 会话 id（绑定即“角色属于这个独立会话”）。 */
@@ -208,13 +214,15 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
   const agentName = input.agentName?.trim() || null
   const sessionMeta = normalizeSessionMeta(input.sessionMeta)
 
-  // 同角色已存在：v0.4 起提示改用 kingdom_bind_session 重绑（或先解绑再绑）
+  // Singleton 是 Domain Policy（v0.7.0 M2）：OWNER/CHANCELLOR 拒绝第二个 ACTIVE；
+  // SUPERVISOR/WORKER 允许多绑定（getBindingsByRole 供派发/scope 使用）。
   const existing = store.getBindingByRole(input.kingdomId, roleType)
-  if (existing) {
+  if (existing && SINGLETON_ROLES.includes(roleType as RoleType)) {
     return `角色 ${roleType} 已有绑定（${existing.role_name}，session=${existing.session_id ?? '未绑定 session'}` +
       `${existing.model_name ? `，model=${existing.model_name}` : ''}` +
       `${existing.agent_name ? `，agent=${existing.agent_name}` : ''}）。` +
-      `如需更换会话/身份，用 kingdom_bind_session（或先 kingdom_unbind_role 再绑定）。`
+      `（${roleType} 是单席位角色，同一时间只允许一个 ACTIVE 绑定。` +
+      `如需更换会话/身份，用 kingdom_bind_session；如需换届，用 kingdom_unbind_role 退任后重绑。）`
   }
 
   const now = new Date().toISOString()
@@ -229,6 +237,9 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
     agent_name: agentName,
     session_meta: sessionMeta,
     execution_profile_json: null,
+    status: 'ACTIVE',
+    retired_at: null,
+    retired_reason: null,
     principal_id: null,
     created_at: now,
     updated_at: now,
@@ -262,10 +273,10 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
 }
 
 /**
- * v0.4：解绑（换届通道）。
- * - OWNER 受保护：王国需要常驻 Owner，解绑直接拒绝。
- * - 被解绑角色若已被任务引用（assigned_binding_id），任务保留引用、
- *   展示层显示为“未指派”；相关治理操作会因缺绑定而明确报错（ROLE_BINDING_MISSING）。
+ * v0.4：解绑（换届通道）；v0.7.0（M2）：**tombstone 退任**（不再物理删除）。
+ * - OWNER 受保护：王国需要常驻 Owner，退任直接拒绝。
+ * - 退任 = ACTIVE→RETIRED（+ retired_at/reason）：历史引用（task_assignments/executions/
+ *   事件 actor/领地主理）永远可解析；治理操作因缺 ACTIVE 绑定明确报错。
  */
 export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: AdminAuth): string {
   const admin = requireAdmin(store, input.kingdomId, auth)
@@ -282,12 +293,16 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
   if (binding.role_type === 'OWNER') {
     return `错误：OWNER 是王国的常驻所有者身份，不允许解绑。如需更换 Owner 请重建王国或等待未来版本。`
   }
-  store.deleteBinding(binding.binding_id)
+  if (binding.status === 'RETIRED') {
+    return `角色 ${binding.role_type}（${binding.role_name}）已处于 RETIRED 状态，无需重复退任。`
+  }
+  const reason = input.reason?.trim() ?? null
+  store.retireBinding(binding.binding_id, reason)
   store.appendEvent({
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'ROLE_UNBOUND',
-    // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被罢免的绑定。
+    // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被退任的绑定。
     actor_role: admin.owner ? 'OWNER' : binding.role_type,
     actor_id: admin.owner?.binding_id ?? null,
     target_type: 'binding',
@@ -296,12 +311,13 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
       role_type: binding.role_type,
       role_name: binding.role_name,
       session_id: binding.session_id,
-      reason: input.reason?.trim() ?? null,
+      reason,
+      status: 'RETIRED',
     }),
     created_at: new Date().toISOString(),
   })
-  return `已解绑角色 ${binding.role_type}（${binding.role_name}，session=${binding.session_id ?? '未绑定'}）。` +
-    `该角色现在空缺，可重新 kingdom_bind_role。`
+  return `角色 ${binding.role_type}（${binding.role_name}，session=${binding.session_id ?? '未绑定'}）已退任（RETIRED）` +
+    `${reason ? `，原因：${reason}` : ''}。历史记录仍可追溯；该角色席位现在空缺，可重新 kingdom_bind_role。`
 }
 
 /**

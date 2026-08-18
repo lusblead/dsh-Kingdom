@@ -95,7 +95,7 @@ function fakeRuntime(subagents: SubagentsLike) {
 
 // ── Schema v2 migration ────────────────────────────────────────────
 
-test('Schema v2：v1 旧库开库收敛（schema_version=2 + 全部预期列）', () => {
+test('Schema v3：v1 旧库开库收敛（schema_version=3 + 全部预期列/表）', () => {
   const dir = join(process.cwd(), '.m1c-test')
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
@@ -123,7 +123,7 @@ test('Schema v2：v1 旧库开库收敛（schema_version=2 + 全部预期列）'
 
   const store = new KingdomStore(dbPath)
   const v = store.db.prepare('SELECT schema_version FROM kingdoms').get() as { schema_version: number }
-  assert.equal(v.schema_version, 2)
+  assert.equal(v.schema_version, 3)
   const bindingCols = new Set(
     (store.db.prepare('PRAGMA table_info(role_bindings)').all() as { name: string }[]).map(c => c.name),
   )
@@ -137,7 +137,13 @@ test('Schema v2：v1 旧库开库收敛（schema_version=2 + 全部预期列）'
   // 幂等：重复打开不再迁移
   store.close()
   const again = new KingdomStore(dbPath)
-  assert.equal((again.db.prepare('SELECT schema_version FROM kingdoms').get() as { schema_version: number }).schema_version, 2)
+  assert.equal((again.db.prepare('SELECT schema_version FROM kingdoms').get() as { schema_version: number }).schema_version, 3)
+  // v3 表与索引
+  const names = new Set((again.db.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table','index')`).all() as { name: string }[]).map(r => r.name))
+  assert.ok(names.has('task_assignments'))
+  assert.ok(names.has('one_active_assignment_per_task'))
+  const bCols = new Set((again.db.prepare('PRAGMA table_info(role_bindings)').all() as { name: string }[]).map(c => c.name))
+  assert.ok(bCols.has('status') && bCols.has('retired_at') && bCols.has('retired_reason'))
   again.close()
   rmSync(dir, { recursive: true, force: true })
 })

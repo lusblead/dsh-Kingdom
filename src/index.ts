@@ -27,7 +27,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { KingdomManager } from './core/kingdom.js'
 import { bindRole, listBindings, rebindSession, setExecutionProfile, unbindRole } from './core/binding.js'
-import { createTerritory, deleteTerritory, listTerritories } from './core/territory.js'
+import { createTerritory, deleteTerritory, listTerritories, setTerritorySupervisor } from './core/territory.js'
 import {
   abortExecution,
   assignTask,
@@ -201,7 +201,7 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { name: string; workspace_path?: string; summary?: string }) {
+    async execute(args: { name: string; workspace_path?: string; summary?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init 或说“初始化王国”。'
       return createTerritory(store, {
@@ -209,6 +209,9 @@ export function apply(ctx: Context, config: Config): void {
         name: args.name,
         workspacePath: args.workspace_path,
         summary: args.summary,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
       })
     },
   })), 'dsh-kingdom: create-territory tool')
@@ -241,7 +244,7 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { territory_id?: string; name?: string; force?: boolean; reason?: string }) {
+    async execute(args: { territory_id?: string; name?: string; force?: boolean; reason?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       if (!args.territory_id && !args.name) return '错误：请提供 territory_id 或 name 指定要删除的领地。'
@@ -251,9 +254,37 @@ export function apply(ctx: Context, config: Config): void {
         name: args.name,
         force: args.force,
         reason: args.reason,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
       })
     },
   })), 'dsh-kingdom: delete-territory tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_set_territory_supervisor',
+    description: '设置/解除领地主理 Supervisor（Topology Administration，session-bound 下仅 OWNER 可执行）。null 解除主理 → fail-closed（无 Supervisor 可治理该领地）；指派必须是 ACTIVE SUPERVISOR 绑定',
+    parameters: {
+      territory_id: { type: 'string', required: true, description: '领地 id' },
+      supervisor_binding_id: { type: 'string', description: 'ACTIVE SUPERVISOR 绑定 id；传 null 解除主理' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { territory_id: string; supervisor_binding_id?: string | null }, exec: { agent?: { session?: { id?: string } } | null }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      return setTerritorySupervisor(store, {
+        kingdomId,
+        territoryId: args.territory_id,
+        supervisorBindingId: args.supervisor_binding_id === undefined ? null : args.supervisor_binding_id,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
+      })
+    },
+  })), 'dsh-kingdom: set-territory-supervisor tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_bind_role',
@@ -526,23 +557,25 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_review_task',
-    description: '审查 Worker 提交的结果并裁定 ACCEPT/REWORK/FAIL（Supervisor 职权）。这是任务能变成 DONE 的唯一路径',
+    description: '审查 Worker 提交的结果并裁定（Supervisor 职权，须在任务领地的主理范围内）。这是任务能变成 DONE 的唯一路径：ACCEPT（→DONE）/ REWORK（→RUNNING 同 Worker）/ FAIL（→FAILED）/ HANDOFF（→RUNNING 转交新 Worker，需 to_binding_id + reason）',
     parameters: {
       task_id: { type: 'string', required: true, description: '任务 id（状态需为 REVIEW）' },
-      decision: { type: 'string', required: true, description: 'ACCEPT（接受→DONE）/ REWORK（返工→RUNNING）/ FAIL（判失败→FAILED）' },
-      reason: { type: 'string', description: '裁定理由；REWORK 与 FAIL 必填' },
+      decision: { type: 'string', required: true, description: 'ACCEPT / REWORK / FAIL / HANDOFF' },
+      reason: { type: 'string', description: '裁定理由；REWORK/FAIL/HANDOFF 必填' },
+      to_binding_id: { type: 'string', description: 'HANDOFF 专用：目标 Worker binding id（ACTIVE）' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { task_id: string; decision: string; reason?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
+    async execute(args: { task_id: string; decision: string; reason?: string; to_binding_id?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       return reviewTask(store, commandContext(kingdomId, sessionPrincipal(exec)), {
         taskId: args.task_id,
         decision: args.decision,
         reason: args.reason,
+        to_binding_id: args.to_binding_id,
       }).message
     },
   })), 'dsh-kingdom: review-task tool')

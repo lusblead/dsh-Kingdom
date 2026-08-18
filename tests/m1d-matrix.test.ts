@@ -54,7 +54,8 @@ const ctx = (sessionId: string | null) => ({
 function seedTerritory(store: KingdomStore): void {
   store.insertTerritory({
     territory_id: 't-1', kingdom_id: KID, name: '矩阵领', workspace_path: null, summary: null,
-    supervisor_binding_id: null, status: 'ACTIVE', created_at: new Date().toISOString(),
+    supervisor_binding_id: 'b-supervisor', status: 'ACTIVE', deleted_at: null, deleted_reason: null,
+    created_at: new Date().toISOString(),
   })
 }
 

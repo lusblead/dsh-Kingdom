@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, TerritoryRow } from './db.js'
 import { asExecutionState, isLiveExecutionState } from './execution.js'
+import { requireAdmin, type AdminAuth } from './binding.js'
 
 export interface CreateTerritoryInput {
   kingdomId: string
@@ -31,7 +32,9 @@ export interface DeleteTerritoryInput {
   reason?: string
 }
 
-export function createTerritory(store: KingdomStore, input: CreateTerritoryInput): string {
+export function createTerritory(store: KingdomStore, input: CreateTerritoryInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
   const name = input.name.trim()
   if (!name) return '错误：领地名称不能为空。'
   const existing = store.getTerritoryByName(input.kingdomId, name)
@@ -46,6 +49,8 @@ export function createTerritory(store: KingdomStore, input: CreateTerritoryInput
     summary: input.summary?.trim() || null,
     supervisor_binding_id: null,
     status: 'ACTIVE',
+    deleted_at: null,
+    deleted_reason: null,
     created_at: now,
   }
   store.insertTerritory(territory)
@@ -72,17 +77,67 @@ export function listTerritories(store: KingdomStore, kingdomId: string): string 
 }
 
 /**
- * 删除领地（v0.5.1）。
- *
- * 治理语义（Owner 裁决 2026-08-18）：
- * - 无任务：直接删行 + `TERRITORY_DELETED` 留痕；
- * - 有任务且未 force：拒绝，返回 `错误：` 前缀（上层据此判定失败）；
- * - 有任务且 force：未终态任务经 `transitionTask` 统一标记 FAILED（逐条
- *   `TASK_FAILED` 事件，payload 携带原状态与级联原因），活跃 Execution 转 ABORTED，
- *   终态任务（DONE/FAILED）不篡改；随后删行 + `TERRITORY_DELETED` 留痕
- *   （payload 携带完整任务清单：task_id/title/原状态/最终状态）。
+ * v0.7.0（M2）：设置 Territory 主理 Supervisor（Topology Administration Plane）。
+ * - session-bound 下仅真实 OWNER 可执行（requireAdmin）；
+ * - supervisorBindingId=null → 未指派 → fail-closed（TERRITORY_SUPERVISOR_MISSING，无 Supervisor 可治理）；
+ * - 指派必须是当前王国的 ACTIVE SUPERVISOR 绑定。
  */
-export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput): string {
+export function setTerritorySupervisor(
+  store: KingdomStore,
+  input: { kingdomId: string; territoryId: string; supervisorBindingId: string | null },
+  auth?: AdminAuth,
+): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
+  const territory = store.getTerritoryById(input.territoryId)
+  if (!territory || territory.kingdom_id !== input.kingdomId) {
+    return `错误：领地不存在（id=${input.territoryId}）。`
+  }
+  if (territory.status === 'DELETED') {
+    return `错误：领地「${territory.name}」已删除（tombstone），不能修改主理。`
+  }
+  if (input.supervisorBindingId !== null) {
+    const supervisor = store.getBindingById(input.supervisorBindingId)
+    if (!supervisor || supervisor.kingdom_id !== input.kingdomId) {
+      return `错误：找不到当前王国的绑定 ${input.supervisorBindingId}。`
+    }
+    if (supervisor.role_type !== 'SUPERVISOR' || supervisor.status !== 'ACTIVE') {
+      return `错误：绑定 ${supervisor.role_name} 不是 ACTIVE 的 SUPERVISOR，不能作为领地主理。`
+    }
+  }
+  store.updateTerritorySupervisor(territory.territory_id, input.supervisorBindingId)
+  store.appendEvent({
+    event_id: randomUUID(),
+    kingdom_id: input.kingdomId,
+    event_type: 'TERRITORY_SUPERVISOR_UPDATED',
+    actor_role: admin.owner ? 'OWNER' : null,
+    actor_id: admin.owner?.binding_id ?? null,
+    target_type: 'territory',
+    target_id: territory.territory_id,
+    payload_json: JSON.stringify({
+      name: territory.name,
+      supervisor_binding_id: input.supervisorBindingId,
+      unassigned: input.supervisorBindingId === null,
+    }),
+    created_at: new Date().toISOString(),
+  })
+  return input.supervisorBindingId === null
+    ? `领地「${territory.name}」已解除主理（未指派 Supervisor → fail-closed：无 Supervisor 可治理该领地）。`
+    : `领地「${territory.name}」主理 Supervisor 已设为 ${store.getBindingById(input.supervisorBindingId)!.role_name}。`
+}
+
+/**
+ * 删除领地（v0.5.1 语义 + v0.7.0 tombstone + Admin Plane）。
+ *
+ * 治理语义（Owner 裁决 2026-08-18 + M2 修订）：
+ * - 删除 = **tombstone**（status→DELETED，不物理删行，历史任务归属永远可解析）；
+ * - session-bound 下仅真实 OWNER 可执行（Topology Administration Plane）；
+ * - 有任务且未 force：拒绝；有任务且 force：未终态任务统一标记 FAILED、
+ *   活跃 Execution ABORTED、终态不篡改；`TERRITORY_DELETED` 留痕（payload 含任务清单）。
+ */
+export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
   let territory = input.territoryId ? store.getTerritoryById(input.territoryId) : null
   if (territory && territory.kingdom_id !== input.kingdomId) territory = null // 越界 id 视同不存在
   if (!territory && input.name) territory = store.getTerritoryByName(input.kingdomId, input.name.trim())
@@ -135,13 +190,13 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
     cascade.push({ task_id: task.task_id, title: task.title, original_status: original, final_status: updated.status })
   }
 
-  store.deleteTerritoryRow(territory.territory_id)
+  store.tombstoneTerritoryRow(territory.territory_id, input.reason ?? null)
   store.appendEvent({
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_DELETED',
-    actor_role: null,
-    actor_id: null,
+    actor_role: admin.owner ? 'OWNER' : null,
+    actor_id: admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
     payload_json: JSON.stringify({
@@ -149,6 +204,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
       workspace_path: territory.workspace_path,
       force,
       reason: input.reason ?? null,
+      status: 'DELETED',
       task_count: tasks.length,
       aborted_executions: abortedExecutions,
       tasks: cascade,

@@ -26,15 +26,16 @@ import {
 /**
  * 记录在 kingdoms.schema_version 上的值。
  *
- * v0.6.0（M1-C）正式引入 Schema v2（用户裁决）：
- * - v1：0.x–0.5.x 全部版本，幂等 DDL 收敛（worker_results/executions/events.seq/session_meta 均 additive）；
- * - v2：role_bindings.execution_profile_json + executions 执行证据列（executor_kind/provider/
- *   provider_source/requested_model/resolved_model/model_source/execution_profile_json），
- *   引入**事务化幂等迁移**（ensureSchemaV2）：PRAGMA gate → ADD COLUMN → verify → version bump，
- *   失败 ROLLBACK。新库直接建 v2，旧库开库即收敛 v1→v2。
- * 未来 v3 同理（Versioned + transactional + idempotent ADD COLUMN，不重建表）。
+ * - v1：0.x–0.5.x（幂等 DDL 收敛）；
+ * - v2：v0.6.0 执行证据列（M1-C）；
+ * - v3：v0.7.0（M2 Organization Scale）——
+ *   role_bindings tombstone（status/retired_at/retired_reason）、
+ *   territories tombstone（deleted_at/deleted_reason）、
+ *   task_assignments（权威派遣历史 + one-active 唯一索引）、
+ *   Territory supervisor backfill（1 个 ACTIVE Supervisor → NULL scope 领地自动接管）。
+ * 迁移均为 Versioned + transactional + idempotent ADD COLUMN / CREATE TABLE（不重建表）。
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS kingdoms (
@@ -129,6 +130,25 @@ CREATE TABLE IF NOT EXISTS executions (
 );
 
 CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id);
+
+CREATE TABLE IF NOT EXISTS task_assignments (
+  assignment_id          TEXT PRIMARY KEY,
+  task_id                TEXT NOT NULL,
+  territory_id           TEXT NOT NULL,
+  worker_binding_id      TEXT NOT NULL,
+  assigned_by            TEXT NOT NULL,
+  assigned_at            TEXT NOT NULL,
+  ended_at               TEXT,
+  end_reason             TEXT,
+  previous_assignment_id TEXT,
+  handoff_reason         TEXT,
+  created_at             TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_assignment_per_task
+  ON task_assignments(task_id) WHERE ended_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS task_assignments_task_idx ON task_assignments(task_id);
 `
 
 export interface KingdomRow {
@@ -146,8 +166,39 @@ export interface TerritoryRow {
   name: string
   workspace_path: string | null
   summary: string | null
+  /**
+   * v0.7.0（M2）：Territory 主理 Supervisor（scope relation）。
+   * NULL = 未指派 → **fail-closed**（无 Supervisor 可治理，TERRITORY_SUPERVISOR_MISSING）。
+   */
   supervisor_binding_id: string | null
+  /** ACTIVE | ARCHIVED | DELETED（v0.7.0：DELETED 为 tombstone，不物理删行）。 */
   status: string
+  /** v0.7.0 tombstone 字段。 */
+  deleted_at: string | null
+  deleted_reason: string | null
+  created_at: string
+}
+
+/**
+ * v0.7.0（M2-B）：权威任务派遣历史（Assignment Ledger）。
+ * tasks.assigned_binding_id 是当前投影；本表是可追溯历史。
+ */
+export interface TaskAssignmentRow {
+  assignment_id: string
+  task_id: string
+  territory_id: string
+  worker_binding_id: string
+  /** 谁决定派发（Supervisor binding_id）。 */
+  assigned_by: string
+  assigned_at: string
+  /** 关闭时间（HANDOFF / task-terminal 时写入）。 */
+  ended_at: string | null
+  /** 'handoff' | 'task-terminal'（REWORK 不关闭 Assignment）。 */
+  end_reason: string | null
+  /** 前序派遣（链表，须同 task、已关闭、非自身）。 */
+  previous_assignment_id: string | null
+  /** Supervisor 的转交理由（handoff 时）。 */
+  handoff_reason: string | null
   created_at: string
 }
 
@@ -172,6 +223,13 @@ export interface RoleBindingRow {
    * 执行解析只读本字段。非法 JSON 视为未配置。
    */
   execution_profile_json: string | null
+  /**
+   * v0.7.0（M2）：Binding tombstone——退任（unbind）从物理删除改为 ACTIVE→RETIRED，
+   * 历史引用（task_assignments/executions/events/territories.supervisor_binding_id）永远可解析。
+   */
+  status: 'ACTIVE' | 'RETIRED'
+  retired_at: string | null
+  retired_reason: string | null
   principal_id: string | null
   created_at: string
   updated_at: string
@@ -312,6 +370,7 @@ export class KingdomStore {
     this.ensureEventSequence()
     this.ensureSessionProfileColumns()
     this.ensureSchemaV2()
+    this.ensureSchemaV3()
   }
 
   /**
@@ -377,6 +436,80 @@ export class KingdomStore {
       }
       for (const column of executionColumns) {
         if (!afterExecutions.has(column)) throw new Error(`Schema v2 migration failed: executions.${column} missing`)
+      }
+      // 注意：写本迁移的目标版本 2，而不是全局 SCHEMA_VERSION（v3 迁移的入口判断依赖它）。
+      this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(2)
+      this.db.exec('COMMIT')
+    } catch (error: unknown) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /**
+   * v0.7.0（M2 Organization Scale）：Schema v3 迁移。
+   *
+   * 1. role_bindings tombstone：status（ACTIVE|RETIRED）/ retired_at / retired_reason；
+   * 2. territories tombstone：deleted_at / deleted_reason（status 已有列，语义扩展 DELETED）；
+   * 3. task_assignments 表与索引（SCHEMA_SQL 已建，这里 verify + 旧库兜底）；
+   * 4. Territory supervisor backfill：恰好 1 个 ACTIVE Supervisor 时，
+   *    把所有 supervisor_binding_id IS NULL 的 ACTIVE Territory 自动接管（v2 兼容，老用户无感）；
+   *    0 个 ACTIVE Supervisor → 保持 NULL（fail-closed：无主理则无人可治理）。
+   * 5. verify 全部预期列/表/索引 → UPDATE schema_version=3 → COMMIT（失败 ROLLBACK）。
+   */
+  private ensureSchemaV3(): void {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(schema_version), 0) AS v FROM kingdoms')
+      .get() as unknown as { v: number } | undefined
+    if ((row?.v ?? 0) >= SCHEMA_VERSION) return
+
+    const bindingColumns = ['status', 'retired_at', 'retired_reason'] as const
+    const territoryColumns = ['deleted_at', 'deleted_reason'] as const
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const tableColumns = (table: string): Set<string> => new Set(
+        (this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map(c => c.name),
+      )
+      const bindings = tableColumns('role_bindings')
+      for (const column of bindingColumns) {
+        if (!bindings.has(column)) this.db.exec(`ALTER TABLE role_bindings ADD COLUMN ${column} TEXT`)
+      }
+      const territories = tableColumns('territories')
+      for (const column of territoryColumns) {
+        if (!territories.has(column)) this.db.exec(`ALTER TABLE territories ADD COLUMN ${column} TEXT`)
+      }
+      // 旧库兜底：status 列缺省值统一为 ACTIVE（新增列默认 NULL → 归一化为 ACTIVE）
+      this.db.exec(`UPDATE role_bindings SET status = 'ACTIVE' WHERE status IS NULL`)
+
+      // backfill：恰好 1 个 ACTIVE Supervisor → NULL scope 领地自动接管（0 个 → fail-closed 保持 NULL）
+      const supervisorCount = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM role_bindings WHERE role_type = 'SUPERVISOR' AND status = 'ACTIVE'`)
+        .get() as unknown as { n: number }
+      if (supervisorCount.n === 1) {
+        this.db.exec(`
+          UPDATE territories
+             SET supervisor_binding_id = (
+               SELECT binding_id FROM role_bindings
+                WHERE role_type = 'SUPERVISOR' AND status = 'ACTIVE' LIMIT 1
+             )
+           WHERE supervisor_binding_id IS NULL AND status = 'ACTIVE'
+        `)
+      }
+
+      // verify：全部预期列/表/索引存在，缺失即失败（fail-loud）
+      const afterBindings = tableColumns('role_bindings')
+      const afterTerritories = tableColumns('territories')
+      for (const column of bindingColumns) {
+        if (!afterBindings.has(column)) throw new Error(`Schema v3 migration failed: role_bindings.${column} missing`)
+      }
+      for (const column of territoryColumns) {
+        if (!afterTerritories.has(column)) throw new Error(`Schema v3 migration failed: territories.${column} missing`)
+      }
+      const tables = this.db.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table','index')`).all() as unknown as { name: string }[]
+      const names = new Set(tables.map(t => t.name))
+      for (const required of ['task_assignments', 'one_active_assignment_per_task', 'task_assignments_task_idx']) {
+        if (!names.has(required)) throw new Error(`Schema v3 migration failed: ${required} missing`)
       }
       this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(SCHEMA_VERSION)
       this.db.exec('COMMIT')
@@ -447,17 +580,18 @@ export class KingdomStore {
 
   listTerritories(kingdomId: string): TerritoryRow[] {
     return this.db
-      .prepare('SELECT * FROM territories WHERE kingdom_id = ? ORDER BY created_at')
+      .prepare(`SELECT * FROM territories WHERE kingdom_id = ? AND status != 'DELETED' ORDER BY created_at`)
       .all(kingdomId) as unknown as TerritoryRow[]
   }
 
   getTerritoryByName(kingdomId: string, name: string): TerritoryRow | null {
     const rows = this.db
-      .prepare('SELECT * FROM territories WHERE kingdom_id = ? AND name = ?')
+      .prepare(`SELECT * FROM territories WHERE kingdom_id = ? AND name = ? AND status != 'DELETED'`)
       .all(kingdomId, name) as unknown as TerritoryRow[]
     return rows[0] ?? null
   }
 
+  /** 任意状态取领地（历史解析；含 DELETED tombstone）。 */
   getTerritoryById(territoryId: string): TerritoryRow | null {
     const rows = this.db
       .prepare('SELECT * FROM territories WHERE territory_id = ?')
@@ -490,6 +624,65 @@ export class KingdomStore {
     this.db.prepare('DELETE FROM territories WHERE territory_id = ?').run(territoryId)
   }
 
+  /**
+   * v0.7.0（M2）：Territory tombstone——ACTIVE → DELETED（不物理删行），
+   * 历史任务/Assignment/Event 的 territory_id 永远可解析。
+   */
+  tombstoneTerritoryRow(territoryId: string, reason: string | null): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(`UPDATE territories SET status = 'DELETED', deleted_at = ?, deleted_reason = ? WHERE territory_id = ?`)
+      .run(now, reason ?? null, territoryId)
+  }
+
+  /** v0.7.0（M2）：设置 Territory 主理 Supervisor（scope relation；NULL=未指派=fail-closed）。 */
+  updateTerritorySupervisor(territoryId: string, supervisorBindingId: string | null): void {
+    this.db.prepare('UPDATE territories SET supervisor_binding_id = ? WHERE territory_id = ?').run(supervisorBindingId, territoryId)
+  }
+
+  // ── task_assignments（v0.7.0 M2-B Assignment Ledger）──────────
+
+  insertTaskAssignment(row: TaskAssignmentRow): TaskAssignmentRow {
+    this.db
+      .prepare(
+        `INSERT INTO task_assignments
+           (assignment_id, task_id, territory_id, worker_binding_id, assigned_by, assigned_at,
+            ended_at, end_reason, previous_assignment_id, handoff_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.assignment_id, row.task_id, row.territory_id, row.worker_binding_id, row.assigned_by, row.assigned_at,
+        row.ended_at, row.end_reason, row.previous_assignment_id, row.handoff_reason, row.created_at,
+      )
+    return row
+  }
+
+  /** 当前 active assignment（partial unique index 保证至多一条）。 */
+  getActiveAssignmentForTask(taskId: string): TaskAssignmentRow | null {
+    const rows = this.db
+      .prepare(`SELECT * FROM task_assignments WHERE task_id = ? AND ended_at IS NULL LIMIT 1`)
+      .all(taskId) as unknown as TaskAssignmentRow[]
+    return rows[0] ?? null
+  }
+
+  /** 关闭当前 active assignment（handoff / task-terminal）。 */
+  closeActiveAssignment(taskId: string, endReason: string): TaskAssignmentRow | null {
+    const active = this.getActiveAssignmentForTask(taskId)
+    if (!active) return null
+    const now = new Date().toISOString()
+    this.db
+      .prepare(`UPDATE task_assignments SET ended_at = ?, end_reason = ? WHERE assignment_id = ?`)
+      .run(now, endReason, active.assignment_id)
+    return { ...active, ended_at: now, end_reason: endReason }
+  }
+
+  /** 按任务列出派遣历史（升序）。 */
+  listTaskAssignments(taskId: string): TaskAssignmentRow[] {
+    return this.db
+      .prepare(`SELECT * FROM task_assignments WHERE task_id = ? ORDER BY created_at`)
+      .all(taskId) as unknown as TaskAssignmentRow[]
+  }
+
   // ── role_bindings ───────────────────────────────────────────
 
   listBindings(kingdomId: string): RoleBindingRow[] {
@@ -500,11 +693,33 @@ export class KingdomStore {
 
   getBindingByRole(kingdomId: string, roleType: string): RoleBindingRow | null {
     const rows = this.db
-      .prepare('SELECT * FROM role_bindings WHERE kingdom_id = ? AND role_type = ?')
+      .prepare(`SELECT * FROM role_bindings WHERE kingdom_id = ? AND role_type = ? AND status = 'ACTIVE'`)
       .all(kingdomId, roleType) as unknown as RoleBindingRow[]
     return rows[0] ?? null
   }
 
+  /**
+   * v0.7.0（M2）：按角色列出 **ACTIVE** 绑定（多 Worker/多 Supervisor）。
+   * Singleton（OWNER/CHANCELLOR）是 Domain Policy，本 API 不再隐含假设。
+   */
+  getBindingsByRole(kingdomId: string, roleType: string): RoleBindingRow[] {
+    return this.db
+      .prepare(`SELECT * FROM role_bindings WHERE kingdom_id = ? AND role_type = ? AND status = 'ACTIVE' ORDER BY created_at`)
+      .all(kingdomId, roleType) as unknown as RoleBindingRow[]
+  }
+
+  /**
+   * v0.7.0（M2）：Binding tombstone——ACTIVE → RETIRED（历史引用永远可解析）。
+   * unbind 语义从物理删除升级为退任。
+   */
+  retireBinding(bindingId: string, reason: string | null): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(`UPDATE role_bindings SET status = 'RETIRED', retired_at = ?, retired_reason = ?, updated_at = ? WHERE binding_id = ?`)
+      .run(now, reason ?? null, now, bindingId)
+  }
+
+  /** 按 id 取绑定（**任意状态**——历史解析用；ACTIVE 过滤由调用方语义决定）。 */
   getBindingById(bindingId: string): RoleBindingRow | null {
     const rows = this.db
       .prepare('SELECT * FROM role_bindings WHERE binding_id = ?')
@@ -517,8 +732,9 @@ export class KingdomStore {
       .prepare(
         `INSERT INTO role_bindings
            (binding_id, kingdom_id, role_type, role_name, runtime_type,
-            session_id, model_name, agent_name, session_meta, principal_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            session_id, model_name, agent_name, session_meta, execution_profile_json,
+            status, retired_at, retired_reason, principal_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.binding_id,
@@ -530,6 +746,10 @@ export class KingdomStore {
         row.model_name ?? null,
         row.agent_name ?? null,
         row.session_meta ?? null,
+        row.execution_profile_json ?? null,
+        row.status ?? 'ACTIVE',
+        row.retired_at ?? null,
+        row.retired_reason ?? null,
         row.principal_id,
         row.created_at,
         row.updated_at,
@@ -621,13 +841,37 @@ export class KingdomStore {
   }
 
   /**
+   * v0.7.0（M2）：外层事务包装——HANDOFF 等**原子治理操作**（多步写 + 事件）整体提交/回滚。
+   * appendEvent 的内层 BEGIN 在事务中会抛错，由 appendEvent 的嵌套容忍逻辑接管（见下）。
+   */
+  withImmediateTransaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = fn()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error: unknown) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /**
    * 追加事件并分配单调 seq。
    *
    * 「读 MAX(seq) + INSERT」放在 IMMEDIATE 事务里，避免并发写出重复序号
    * （SQLite 会串行化写事务）。序号在**全库**范围内单调，跨王国也不会回退。
+   *
+   * v0.7.0（M2）：支持嵌套——已在 withImmediateTransaction 外层事务中时，
+   * BEGIN/COMMIT 自动跳过（外层统一提交/回滚），保证 HANDOFF 等原子操作不半写。
    */
   appendEvent(row: Omit<EventRow, 'seq'> & { seq?: number }): EventRow {
-    this.db.exec('BEGIN IMMEDIATE')
+    let outer = false
+    try {
+      this.db.exec('BEGIN IMMEDIATE')
+    } catch {
+      outer = true // 已在外层事务中（withImmediateTransaction）
+    }
     try {
       const next = this.db
         .prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events')
@@ -651,10 +895,10 @@ export class KingdomStore {
           row.created_at,
           seq,
         )
-      this.db.exec('COMMIT')
+      if (!outer) this.db.exec('COMMIT')
       return { ...row, seq }
     } catch (error: unknown) {
-      this.db.exec('ROLLBACK')
+      if (!outer) this.db.exec('ROLLBACK')
       throw error
     }
   }

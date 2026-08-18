@@ -172,6 +172,54 @@ function loadTask(
   return { ok: true, task }
 }
 
+/**
+ * v0.7.0（M2-E）：Supervisor scope 校验（scope relation，非权限层级）。
+ *
+ * - Territory 未指派主理（supervisor_binding_id IS NULL）→ **fail-closed**
+ *   （TERRITORY_SUPERVISOR_MISSING：不知道谁管就不允许任何人代管）；
+ * - 主理 ≠ 调用者 → TASK_OUT_OF_SCOPE；
+ * - 领地已删除（tombstone）→ 不可治理。
+ */
+function checkTerritoryScope(
+  store: KingdomStore,
+  kingdomId: string,
+  supervisorBindingId: string,
+  task: TaskRow,
+): { ok: true } | { ok: false; code: KingdomErrorCode; message: string } {
+  const territory = store.getTerritoryById(task.territory_id)
+  if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') {
+    return { ok: false, code: 'TERRITORY_NOT_IN_KINGDOM', message: `错误：任务「${task.title}」的领地不存在或已删除，无法执行治理操作。` }
+  }
+  if (!territory.supervisor_binding_id) {
+    return {
+      ok: false,
+      code: 'TERRITORY_SUPERVISOR_MISSING',
+      message: `错误：领地「${territory.name}」未指派主理 Supervisor，任何 Supervisor 都不能治理（fail-closed）。请由 OWNER 执行 kingdom_set_territory_supervisor 指派。`,
+    }
+  }
+  if (territory.supervisor_binding_id !== supervisorBindingId) {
+    return {
+      ok: false,
+      code: 'TASK_OUT_OF_SCOPE',
+      message: `错误：任务「${task.title}」属于领地「${territory.name}」（由其他 Supervisor 主理），超出当前 Supervisor 的治理范围。`,
+    }
+  }
+  return { ok: true }
+}
+
+/** SUPERVISOR 角色 + Territory scope 组合校验。 */
+function requireSupervisorInScope(
+  store: KingdomStore,
+  ctx: CommandContext,
+  task: TaskRow,
+): { ok: true; binding: RoleBindingRow } | { ok: false; code: KingdomErrorCode; message: string } {
+  const role = requireRole(store, ctx, 'SUPERVISOR')
+  if (!role.ok) return role
+  const scope = checkTerritoryScope(store, ctx.kingdomId, role.binding.binding_id, task)
+  if (!scope.ok) return scope
+  return role
+}
+
 // ── 加载期回收（热插拔正确性）──────────────────────────────────
 
 /**
@@ -288,51 +336,78 @@ export interface AssignTaskInput {
   workerBindingId?: string
 }
 
-/** CREATED → ASSIGNED。 */
+/** CREATED → ASSIGNED（v0.7.0：scope 校验 + Multi-Worker 选择规则 + Assignment Ledger）。 */
 export function assignTask(
   store: KingdomStore,
   ctx: CommandContext,
   input: AssignTaskInput,
 ): CommandResultView {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-
   const loaded = loadTask(store, ctx.kingdomId, input.taskId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
+
   const status = asTaskStatus(loaded.task.status)
   if (status !== 'CREATED') {
     return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
       `错误：任务当前状态为 ${status}，只有 CREATED 的任务可以派发。`)
   }
 
-  let worker: RoleBindingRow | null
+  // Multi-Worker 选择规则（v0.7.0 裁决）：显式指定永远按指定；省略时 0/1/N 分流。
+  let worker: RoleBindingRow
   if (input.workerBindingId?.trim()) {
-    worker = store.getBindingById(input.workerBindingId.trim())
+    worker = store.getBindingById(input.workerBindingId.trim())!
     if (!worker || worker.kingdom_id !== ctx.kingdomId) {
       return fail(store, ctx.kingdomId, 'WORKER_BINDING_INVALID',
         `错误：找不到当前王国的绑定 ${input.workerBindingId}。`)
     }
-    if (worker.role_type !== 'WORKER') {
+    if (worker.role_type !== 'WORKER' || worker.status !== 'ACTIVE') {
       return fail(store, ctx.kingdomId, 'WORKER_BINDING_INVALID',
-        `错误：绑定 ${worker.role_name} 的角色是 ${worker.role_type}，不是 WORKER。`)
+        `错误：绑定 ${worker.role_name} 不是 ACTIVE 的 WORKER。`)
     }
   } else {
-    worker = store.getBindingByRole(ctx.kingdomId, 'WORKER')
-    if (!worker) {
+    const activeWorkers = store.getBindingsByRole(ctx.kingdomId, 'WORKER')
+    if (activeWorkers.length === 0) {
       return fail(store, ctx.kingdomId, 'WORKER_BINDING_INVALID',
-        '错误：当前王国没有 WORKER 角色绑定。请先 kingdom_bind_role(role_type="WORKER")。')
+        '错误：当前王国没有 ACTIVE 的 WORKER 角色绑定。请先 kingdom_bind_role(role_type="WORKER")。')
     }
+    if (activeWorkers.length > 1) {
+      return fail(store, ctx.kingdomId, 'WORKER_AMBIGUOUS',
+        `错误：当前有 ${activeWorkers.length} 个 ACTIVE Worker（${activeWorkers.map(w => w.role_name).join('、')}），`
+        + '必须显式指定 worker_binding_id 才能派发。')
+    }
+    worker = activeWorkers[0]!
   }
 
   const task = store.transitionTask(loaded.task, 'ASSIGNED', { assigned_binding_id: worker.binding_id })
+  // v0.7.0（M2-B）：Assignment Ledger——首派创建（previous=null；one-active 唯一索引防双 active）。
+  const now = new Date().toISOString()
+  const assignment = store.insertTaskAssignment({
+    assignment_id: randomUUID(),
+    task_id: task.task_id,
+    territory_id: task.territory_id,
+    worker_binding_id: worker.binding_id,
+    assigned_by: role.binding.binding_id,
+    assigned_at: now,
+    ended_at: null,
+    end_reason: null,
+    previous_assignment_id: null,
+    handoff_reason: null,
+    created_at: now,
+  })
   const collector = new EventCollector(store, ctx.kingdomId)
   collector.emit('TASK_ASSIGNED',
     { role: 'SUPERVISOR', id: role.binding.binding_id },
     { type: 'task', id: task.task_id },
-    { worker_binding_id: worker.binding_id, worker_role_name: worker.role_name })
+    {
+      worker_binding_id: worker.binding_id,
+      worker_role_name: worker.role_name,
+      assignment_id: assignment.assignment_id,
+      territory_id: task.territory_id,
+    })
 
   return succeed(store, ctx.kingdomId,
-    `已把任务「${task.title}」派给 ${worker.role_name}（状态 ASSIGNED）。`
+    `已把任务「${task.title}」派给 ${worker.role_name}（状态 ASSIGNED，assignment=${assignment.assignment_id}）。`
     + '\n下一步：kingdom_start_task 触发 Worker 执行。',
     task, null, collector)
 }
@@ -362,11 +437,10 @@ export async function startTask(
   ctx: CommandContext,
   input: StartTaskInput,
 ): Promise<CommandResultView> {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-
   const loaded = loadTask(store, ctx.kingdomId, input.taskId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const status = asTaskStatus(loaded.task.status)
   if (status !== 'ASSIGNED' && status !== 'RUNNING') {
     return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
@@ -605,32 +679,36 @@ export interface ReviewTaskInput {
   taskId: string
   decision: string
   reason?: string
+  /** HANDOFF 专用：目标 Worker binding id。 */
+  to_binding_id?: string
 }
 
 /**
- * Supervisor 审查 Worker Claim，把 Claim 转成组织事实。
+ * Supervisor 审查 Worker Claim，把 Claim 转成组织事实（v0.7.0：scope + HANDOFF + Ledger 关闭）。
  *
- * - ACCEPT → DONE（+ TASK_ACCEPTED；不新增 task_reviews 表，裁决 4）
- * - REWORK → RUNNING（同一 Worker Binding；下一次 start 会以 attempt+1 起新 Execution）
- * - FAIL   → FAILED（终态；只有这里能把 Worker 的失败 Claim 变成组织事实）
+ * - ACCEPT → DONE（+ TASK_ACCEPTED；关闭 active assignment: task-terminal）
+ * - REWORK → RUNNING（同一 Worker Binding，**Assignment 保持 ACTIVE**；新 Execution attempt）
+ * - FAIL   → FAILED（终态；关闭 active assignment: task-terminal）
+ * - HANDOFF → 关闭 Assignment A + 创建 Assignment B + REVIEW→RUNNING（原子事务）
  */
 export function reviewTask(
   store: KingdomStore,
   ctx: CommandContext,
   input: ReviewTaskInput,
 ): CommandResultView {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
+  const loaded = loadTask(store, ctx.kingdomId, input.taskId)
+  if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
 
   const decision = input.decision.trim().toUpperCase()
-  if (!(decision in REVIEW_DECISION_TARGET)) {
+  const isHandoff = decision === 'HANDOFF'
+  if (!isHandoff && !(decision in REVIEW_DECISION_TARGET)) {
     return fail(store, ctx.kingdomId, 'INVALID_DECISION',
-      `错误：decision 必须是 ACCEPT / REWORK / FAIL 之一，收到 "${input.decision}"。`)
+      `错误：decision 必须是 ACCEPT / REWORK / FAIL / HANDOFF 之一，收到 "${input.decision}"。`)
   }
-  const verdict = decision as ReviewDecision
+  const verdict = isHandoff ? 'HANDOFF' : decision as ReviewDecision
 
-  const loaded = loadTask(store, ctx.kingdomId, input.taskId)
-  if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
   const status = asTaskStatus(loaded.task.status)
   if (status !== 'REVIEW') {
     return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
@@ -642,13 +720,88 @@ export function reviewTask(
   const reason = input.reason?.trim() || null
   if (verdict !== 'ACCEPT' && !reason) {
     return fail(store, ctx.kingdomId, 'REASON_REQUIRED',
-      `错误：${verdict} 必须给出 reason（Worker 返工/失败需要可追溯的理由）。`)
+      `错误：${verdict} 必须给出 reason（Worker 返工/失败/转交需要可追溯的理由）。`)
   }
 
-  const task = store.transitionTask(loaded.task, REVIEW_DECISION_TARGET[verdict])
+  // ── HANDOFF：治理事件（原子事务，任一步失败全部回滚）──
+  if (isHandoff) {
+    const toBindingId = input.to_binding_id?.trim()
+    if (!toBindingId) {
+      return fail(store, ctx.kingdomId, 'INVALID_INPUT',
+        '错误：HANDOFF 必须指定 to_binding_id（目标 Worker）。')
+    }
+    const target = store.getBindingById(toBindingId)
+    if (!target || target.kingdom_id !== ctx.kingdomId) {
+      return fail(store, ctx.kingdomId, 'WORKER_BINDING_INVALID',
+        `错误：找不到当前王国的绑定 ${toBindingId}。`)
+    }
+    if (target.role_type !== 'WORKER' || target.status !== 'ACTIVE') {
+      return fail(store, ctx.kingdomId, 'WORKER_BINDING_INVALID',
+        `错误：绑定 ${target.role_name} 不是 ACTIVE 的 WORKER，不能作为 Handoff 目标。`)
+    }
+    const active = store.getActiveAssignmentForTask(input.taskId)
+    if (!active) {
+      return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
+        '错误：任务没有 active assignment，无法 Handoff。')
+    }
+    if (active.worker_binding_id === target.binding_id) {
+      return fail(store, ctx.kingdomId, 'INVALID_INPUT',
+        '错误：Handoff 目标 Worker 与当前派发的 Worker 相同（不是转交）。')
+    }
+
+    try {
+      return store.withImmediateTransaction(() => {
+        const now = new Date().toISOString()
+        store.closeActiveAssignment(input.taskId, 'handoff')
+        const task = store.transitionTask(loaded.task, 'RUNNING', { assigned_binding_id: target.binding_id })
+        const assignment = store.insertTaskAssignment({
+          assignment_id: randomUUID(),
+          task_id: task.task_id,
+          territory_id: task.territory_id,
+          worker_binding_id: target.binding_id,
+          assigned_by: role.binding.binding_id,
+          assigned_at: now,
+          ended_at: null,
+          end_reason: null,
+          previous_assignment_id: active.assignment_id,
+          handoff_reason: reason,
+          created_at: now,
+        })
+        const collector = new EventCollector(store, ctx.kingdomId)
+        collector.emit('TASK_HANDED_OFF',
+          { role: 'SUPERVISOR', id: role.binding.binding_id },
+          { type: 'task', id: task.task_id },
+          {
+            from_assignment_id: active.assignment_id,
+            from_worker_binding_id: active.worker_binding_id,
+            to_assignment_id: assignment.assignment_id,
+            to_worker_binding_id: target.binding_id,
+            handoff_reason: reason,
+            reviewed_attempt_no: attemptNo,
+          })
+        return succeed(store, ctx.kingdomId,
+          `已 HANDOFF：任务「${task.title}」从 ${store.getBindingById(active.worker_binding_id)?.role_name ?? active.worker_binding_id}`
+          + ` 转交 ${target.role_name}（理由：${reason}），回到 RUNNING。\n`
+          + `Assignment ${active.assignment_id} 已关闭，新 Assignment ${assignment.assignment_id} 生效（previous 链可追溯）。\n`
+          + '下一步：kingdom_start_task 由新 Worker 以 attempt+1 继续执行。',
+          task, null, collector)
+      })
+    } catch (error: unknown) {
+      return fail(store, ctx.kingdomId, 'INVALID_INPUT',
+        `错误：HANDOFF 事务失败，已回滚：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // isHandoff 分支已 return；此处 verdict 必为三种 ReviewDecision。
+  const task = store.transitionTask(loaded.task, REVIEW_DECISION_TARGET[verdict as ReviewDecision])
   const eventType = verdict === 'ACCEPT'
     ? 'TASK_ACCEPTED'
     : verdict === 'REWORK' ? 'TASK_REWORK_REQUESTED' : 'TASK_FAILED'
+
+  // 终态（ACCEPT/FAIL）：关闭 active assignment（task-terminal）；REWORK 保持 ACTIVE。
+  if (verdict === 'ACCEPT' || verdict === 'FAIL') {
+    store.closeActiveAssignment(input.taskId, 'task-terminal')
+  }
 
   const collector = new EventCollector(store, ctx.kingdomId)
   collector.emit(eventType,
@@ -670,7 +823,7 @@ export function reviewTask(
         task, null, collector)
     case 'REWORK':
       return succeed(store, ctx.kingdomId,
-        `已判 REWORK（理由：${reason}）。任务「${task.title}」回到 **RUNNING**，保持同一 Worker Binding。\n`
+        `已判 REWORK（理由：${reason}）。任务「${task.title}」回到 **RUNNING**，保持同一 Worker Binding（Assignment 保持 ACTIVE）。\n`
         + `下一步：再次 kingdom_start_task，将以 attempt_no=${attemptNo + 1} 起一个**新的** Execution 与 subagent session。\n`
         + '注意：此刻还没有新的 Execution，Worker 处于等待状态，并不在工作。',
         task, null, collector)
@@ -718,11 +871,10 @@ export function pauseExecution(
   ctx: CommandContext,
   input: ExecutionCommandInput,
 ): CommandResultView {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
   if (!isLiveExecutionState(state) || state === 'PAUSED') {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
@@ -760,11 +912,10 @@ export function resumeExecution(
   ctx: CommandContext,
   input: ExecutionCommandInput,
 ): CommandResultView {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
   if (state !== 'PAUSED' && loaded.execution.pause_requested_at === null) {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
@@ -801,11 +952,10 @@ export function abortExecution(
   ctx: CommandContext,
   input: ExecutionCommandInput,
 ): CommandResultView {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
   if (!isLiveExecutionState(state)) {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',

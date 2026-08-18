@@ -99,29 +99,37 @@ function territoryNames(store: KingdomStore): string[] {
   return store.listTerritories(KID).map(t => t.name)
 }
 
+/** declarative 演示模式（Topology Admin 在 declarative 下保持现状）。 */
+const demoAuth = () => ({ mode: 'declarative' as const, principalSessionId: null })
+
 test('领地不存在：按 id 与按 name 均返回错误', () => {
   const store = makeStore()
-  const byId = deleteTerritory(store, { kingdomId: KID, territoryId: 'no-such-id' })
+  const byId = deleteTerritory(store, { kingdomId: KID, territoryId: 'no-such-id' }, demoAuth())
   assert.match(byId, /^错误：领地不存在/)
-  const byName = deleteTerritory(store, { kingdomId: KID, name: '不存在的领地' })
+  const byName = deleteTerritory(store, { kingdomId: KID, name: '不存在的领地' }, demoAuth())
   assert.match(byName, /^错误：领地不存在/)
 })
 
-test('无任务：删除成功，行消失，TERRITORY_DELETED 留痕', () => {
+test('无任务：删除成功（tombstone DELETED），TERRITORY_DELETED 留痕，历史可解析', () => {
   const store = makeStore()
   const t = seedTerritory(store)
-  const result = deleteTerritory(store, { kingdomId: KID, territoryId: t.id })
+  const result = deleteTerritory(store, { kingdomId: KID, territoryId: t.id }, demoAuth())
   assert.match(result, /^已删除领地「研发领」/)
   assert.deepEqual(territoryNames(store), [])
+  // v0.7.0 tombstone：行不物理删除，历史归属永远可解析
+  const tomb = store.getTerritoryById(t.id)!
+  assert.equal(tomb.status, 'DELETED')
+  assert.ok(tomb.deleted_at)
 
   const events = eventsOf(store, 'TERRITORY_DELETED')
   assert.equal(events.length, 1)
   const payload = JSON.parse(events[0]!.payload_json) as {
-    name: string; force: boolean; task_count: number; tasks: unknown[]
+    name: string; force: boolean; task_count: number; tasks: unknown[]; status: string
   }
   assert.equal(payload.name, '研发领')
   assert.equal(payload.force, false)
   assert.equal(payload.task_count, 0)
+  assert.equal(payload.status, 'DELETED')
   assert.deepEqual(payload.tasks, [])
 })
 
@@ -131,7 +139,7 @@ test('有任务且未 force：拒绝删除，领地与任务状态原样保留�
   seedTask(store, t.id, 'CREATED')
   seedTask(store, t.id, 'DONE')
 
-  const result = deleteTerritory(store, { kingdomId: KID, territoryId: t.id })
+  const result = deleteTerritory(store, { kingdomId: KID, territoryId: t.id }, demoAuth())
   assert.match(result, /^错误：领地「研发领」下还有 2 个任务/)
   assert.deepEqual(territoryNames(store), ['研发领'])
   const tasks = store.listTasks(KID, { territoryId: t.id })
@@ -156,7 +164,7 @@ test('force 级联：未终态统一 FAILED、终态不篡改、活跃执行 ABO
     territoryId: t.id,
     force: true,
     reason: '测试级联',
-  })
+  }, demoAuth())
   assert.match(result, /^已删除领地「研发领」/)
   assert.match(result, /其中 4 个未终态任务标记 FAILED、2 个终态任务原样保留/)
   assert.match(result, /终止 1 条活跃执行/)
@@ -213,21 +221,21 @@ test('按 name 删除；id 与 name 同时给出时 id 优先', () => {
   const store = makeStore()
   const t = seedTerritory(store, '按名删除领')
 
-  const byName = deleteTerritory(store, { kingdomId: KID, name: '按名删除领' })
+  const byName = deleteTerritory(store, { kingdomId: KID, name: '按名删除领' }, demoAuth())
   assert.match(byName, /^已删除领地「按名删除领」/)
   assert.deepEqual(territoryNames(store), [])
 
   const t2 = seedTerritory(store, 'id 优先领')
   // 故意给一个错误 name + 正确 id：id 应获胜
-  const byId = deleteTerritory(store, { kingdomId: KID, territoryId: t2.id, name: '错误名字' })
+  const byId = deleteTerritory(store, { kingdomId: KID, territoryId: t2.id, name: '错误名字' }, demoAuth())
   assert.match(byId, /^已删除领地「id 优先领」/)
   assert.deepEqual(territoryNames(store), [])
 })
 
 test('createTerritory 产物可按 name 删除（真实路径冒烟）', () => {
   const store = makeStore()
-  createTerritory(store, { kingdomId: KID, name: '临时领' })
-  const result = deleteTerritory(store, { kingdomId: KID, name: '临时领' })
+  createTerritory(store, { kingdomId: KID, name: '临时领' }, demoAuth())
+  const result = deleteTerritory(store, { kingdomId: KID, name: '临时领' }, demoAuth())
   assert.match(result, /^已删除领地「临时领」/)
   assert.deepEqual(territoryNames(store), [])
 })

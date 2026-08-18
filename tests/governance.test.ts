@@ -90,7 +90,7 @@ test('管理面授权：declarative 演示模式保持现状（本地可信演�
   const rebind = rebindSession(store, { kingdomId: KID, roleType: 'CHANCELLOR', sessionId: 's2' }, declarative())
   assert.match(rebind, /^角色 CHANCELLOR/)
   const unbind = unbindRole(store, { kingdomId: KID, roleType: 'CHANCELLOR' }, declarative())
-  assert.match(unbind, /^已解绑角色 CHANCELLOR/)
+  assert.match(unbind, /^角色 CHANCELLOR.*已退任/)
 })
 
 test('管理面授权：session-bound 下 OWNER 解绑/改绑，事件 actor 记 OWNER', () => {
@@ -104,11 +104,15 @@ test('管理面授权：session-bound 下 OWNER 解绑/改绑，事件 actor 记
   assert.equal(e1.actor_id, 'binding-owner')
   assert.equal(e1.target_id, workerBindingId)
   const unbind = unbindRole(store, { kingdomId: KID, roleType: 'WORKER', reason: '换届' }, boundAuth(OWNER_SESSION))
-  assert.match(unbind, /^已解绑角色 WORKER/)
+  assert.match(unbind, /^角色 WORKER.*已退任/)
   const e2 = store.listEvents(KID, 50).find(e => e.event_type === 'ROLE_UNBOUND')!
   assert.equal(e2.actor_role, 'OWNER')
   assert.equal(e2.actor_id, 'binding-owner')
   assert.equal(e2.target_id, workerBindingId)
+  // v0.7.0 tombstone：绑定行保留为 RETIRED，历史可解析
+  const retired = store.getBindingById(workerBindingId)!
+  assert.equal(retired.status, 'RETIRED')
+  assert.ok(retired.retired_at)
 })
 
 test('GUI 写命令守卫：session-bound fail-closed，declarative 放行', () => {
