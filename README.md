@@ -5,7 +5,7 @@
 ```
 下载插件 tgz
   ↓
-dsh plugin --profile web add dsh-external-dsh-kingdom-0.3.0.tgz
+dsh plugin --profile web add dsh-external-dsh-kingdom-0.3.1.tgz
   ↓
 （重新）启动 DSH
   ↓
@@ -14,12 +14,18 @@ dsh plugin --profile web add dsh-external-dsh-kingdom-0.3.0.tgz
 开始拥有一个王国
 ```
 
+## Requirements
+
+- **DeepSeek Harness（dsh）**：测试版本 `0.1.0-rc.5`（checkout commit `47f94385`）
+- **Node.js**：`>= 22.19`（内置 `node:sqlite`，插件零原生依赖）
+- **模型 API key**：`kingdom_start_task`（Worker 执行）依赖宿主 `subagents` 服务与可用模型
+
 ## 安装（正式方式，无需 dev_inject）
 
 发布产物是预构建 tgz（已编译 lib/ + bundle patch 声明），用户本机**不需要** bash、WSL、junction、DSH checkout 或 tsc：
 
 ```bash
-dsh plugin --profile web add ./dsh-external-dsh-kingdom-0.3.0.tgz
+dsh plugin --profile web add ./dsh-external-dsh-kingdom-0.3.1.tgz
 ```
 
 安装后：
@@ -45,6 +51,27 @@ dsh plugin --profile web add ./dsh-external-dsh-kingdom-0.3.0.tgz
 > Phase 2 的 Worker 执行依赖宿主的 `subagents` 服务（base bundle 默认注册 `spawn` / `fork` provider）。
 > 本插件对它只做**结构化**调用、不 import 其类型，因此没有第 6 条 peer；
 > 宿主若未提供该服务，`kingdom_start_task` 会明确报错，其余工具不受影响。
+
+## 配置
+
+所有配置经 `schemastery` 校验（非法配置在加载期直接报错，不静默 fallback），
+通过 profile 的 `cordis.patch.yml` 覆盖：
+
+```yaml
+# 你的 ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: dsh-kingdom
+  config:
+    kingdomName: My Kingdom      # 初始化时的王国名（默认 "My Kingdom"）
+    ownerName: ''                # 显式 Owner 名（默认取 OS 用户名）
+    workerProvider: spawn        # Worker subagent provider（默认 spawn）
+    guiPort: 0                   # GUI HTTP 通道端口；0 = 关闭（默认），只绑 127.0.0.1
+    guiToken: ''                 # 可选 bearer token；设置后 GUI 请求需 Authorization 头
+    guiAllowOrigins: []          # 允许的 CORS origin（写命令另有 X-Kingdom-Client 强制预检）
+    authMode: declarative        # declarative（默认）| session-bound
+```
+
+> 原则（官方规范）：任何部署环境可能不同的值都应是配置而非硬编码；
+> 非法配置在插件加载阶段报错，而不是静默降级。
 
 ## 使用
 
@@ -211,8 +238,29 @@ node scripts/hotplug-audit.mjs                   # 热插拔审计（25 断言�
 npm pack                                         # 产出可分发 tgz
 ```
 
+## Compatibility
+
+- **Tested with**: `@deepseek-ai/dsh` `0.1.0-rc.5`（checkout commit `47f94385`）
+- Node `v24.11.1` 实测（`node:sqlite` 内置）
+- 安装时 5 条 peer dependency warning 是**预期行为**（见「安装」章节），不是失败。
+- DSH 官方仍标记为 Developer Preview，可能发生 breaking changes；升级 DSH 后建议重跑 `node scripts/p3-smoke.mjs` + `node scripts/hotplug-audit.mjs` 验证。
+
+## Security
+
+- **数据本地**：全部状态在 `<DSH_HOME>/kingdom/kingdom.db`（SQLite），无网络上报。
+- **GUI 通道默认关闭**：`guiPort` 默认 `0`（不监听）；启用时只绑 `127.0.0.1`，可选 bearer token，写命令强制 CORS 预检（`X-Kingdom-Client` 头挡表单式 CSRF）。
+- **GUI 经插件执行命令**，不直接写 SQLite；权限判定在 Core。
+- **Owner 是声明性本地身份**（UUID + OS 用户名），不是签名认证——当前阶段的刻意设计，安全认证后置。
+- **鉴权诚实度**：默认 `authMode: declarative` 只校验"角色绑定存在"，不验证调用者就是该角色；Snapshot 的 `auth.trustLevel` 如实报 `local-demo`，GUI 必须显著标注「本地可信演示权限」。可选 `session-bound` 模式校验调用方 session 与 binding 一致。
+- **无任意 SQL 工具**：Agent 只能经 `kingdom_*` 工具 + Core 写入；`transition()` 是唯一改 `tasks.status` 的路径。
+
+## License
+
+[BSD-3-Clause](LICENSE)
+
 ## 版本
 
+- 0.3.1 — 热插拔生命周期加固（在途 Worker 执行不丢数据、孤儿 Execution 回收、GUI 端口重绑/自愈、HMR 重叠安全）+ hotplug-audit（27 断言）+ p3-smoke 扩至 113。
 - 0.3.0 — Phase 3：GUI 适配。结构化 Snapshot / Task Detail / 命令结果；
   独立 Execution 生命周期（第 7 张表）；事件单调 `seq` 与 `revision`；
   本地 HTTP 通道（默认关闭）；暂停/恢复/终止与 `SESSION_*` 事件；
@@ -221,3 +269,22 @@ npm pack                                         # 产出可分发 tgz
   + Worker one-shot subagent 执行 + **Claim ≠ Fact** 不变量；零 migration；
   加固：README peer 说明、领地防御性 UNIQUE 索引、死代码清理。
 - 0.1.0 — Phase 1：init/status + Territory/Binding CRUD + 可安装 bundle（Clean Install Golden Path 通过）
+
+## Architecture（简）
+
+```text
+L3  Conversation Layer（文字会话，主要 UI）
+    自然语言 → kingdom_* 工具 → Kingdom Core
+
+L2  Kingdom Core
+    Kingdom / Territory / RoleBinding / Task / WorkerResult / Execution / Event
+    TaskStateMachine（transition() 唯一状态写入路径）
+    WorkerExecutor 接口（Core 不直接依赖 subagents）
+
+L1  DSH Plugin Adapter
+    ctx.tools.register（工具） / ctx.commands（/kingdom）
+    DshSubagentExecutor（ctx.subagents.start one-shot Worker 执行）
+    GUI 本地通道（默认关闭，可选）
+
+存储  <DSH_HOME>/kingdom/kingdom.db（SQLite，7 表，零 migration）
+```

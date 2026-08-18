@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-kingdom",
-  "version": "0.3.0",
-  "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ GUI 结构化接口与 Execution 生命周期",
+  "version": "0.3.1",
+  "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -18,6 +18,25 @@
     "cordis.patch.yml"
   ],
   "license": "BSD-3-Clause",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "kingdom",
+    "governance",
+    "multi-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lusblead/dsh-Kingdom.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lusblead/dsh-Kingdom/issues"
+  },
+  "homepage": "https://github.com/lusblead/dsh-Kingdom#readme",
+  "engines": {
+    "node": ">=22.19"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
