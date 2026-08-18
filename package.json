@@ -1,6 +1,6 @@
 {
   "name": "dsh-kingdom",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期",
   "type": "module",
   "main": "./lib/index.js",
