@@ -63,7 +63,7 @@ if ($SkipTests) {
   Check "P2 tsc typecheck" ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
   & npx tsc -p tsconfig.json 2>&1 | Out-Null
   $testOut = & node --test tests/*.test.ts 2>&1 | Out-String
-  Check "P2 node --test 全绿" ($testOut -match '^ℹ pass \d+' -and $testOut -notmatch 'fail [1-9]') (($testOut -split "`n" | Select-String '^ℹ (pass|fail) ' | ForEach-Object { $_.Line.Trim() }) -join ' | ')
+  Check "P2 node --test 全绿" ($testOut -match 'ℹ pass \d+' -and $testOut -notmatch 'ℹ fail [1-9]') (($testOut -split "`n" | Select-String '^ℹ (pass|fail) ' | ForEach-Object { $_.Line.Trim() }) -join ' | ')
 }
 
 # 3) npm pack
