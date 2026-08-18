@@ -34,6 +34,33 @@ DONE 只有 REVIEW + ACCEPT 一条路径）。
 |---|---|---|
 | #1668 | ✅ MERGED（fkysly，98e97739） | 正式收录，entry 已进 main |
 | #1562 | ✅ CLOSED（2026-08-18T13:19:26Z） | 重复提交，superseded by #1668；留言感谢评审并引用 Claim ≠ Fact |
+| #1562 维护者回复 | ✅ 维护者正式确认（关闭确认 + 第二次背书） | 见 §2.1 |
+
+### 2.1 维护者对关闭的正式回复（2026-08-18，第二次正向背书）
+
+fkysly 在 #1562 上回复我们关闭时的留言：
+
+> Closing this one — lusblead/dsh-Kingdom is already on the list, merged via #1668,
+> so there is nothing left for this PR to land. Your plugin is listed; only this
+> duplicate PR is going away.
+>
+> The description that stands is the longer one from #1668, which names the
+> bind/unbind/session mechanics and the local GUI console explicitly.
+>
+> **If you would rather have different wording, open a PR that edits
+> data/plugins/lusblead__dsh-Kingdom.yml and I will take it — editing the entry
+> is the supported path now that both READMEs are generated from that file.**
+>
+> Thanks for the submission, and for src/core/task-service.ts enforcing
+> Claim ≠ Fact in code rather than only in the README. A Worker claim moving a
+> task to REVIEW while only a Supervisor ACCEPT reaches DONE is the kind of
+> thing I can actually verify, which is worth more than a paragraph asserting it.
+
+**要点**：
+- 市场侧完全收口：#1668 MERGED + #1562 维护者确认关闭，长版描述生效；
+- **描述修改的受支持路径**（新信息）：编辑 `data/plugins/lusblead__dsh-Kingdom.yml` 开 PR（两个 README 均由该文件生成）；
+- **第二次明确背书**："A Worker claim moving a task to REVIEW while only a Supervisor ACCEPT
+  reaches DONE is the kind of thing I can actually verify"——代码级可核验的治理语义再次被外部认可。
 
 ## 3. 关联
 
