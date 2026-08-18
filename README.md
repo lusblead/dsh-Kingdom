@@ -143,13 +143,10 @@ Worker 交回结果 ──→ 这是一条 Claim（自述），只进 REVIEW
 | 0.3.x | 执行生命周期 + GUI 适配层 + 热插拔加固 | ✅ 已发布 |
 | 未来 | 多 Worker、Handoff、GUI 正式版、完整治理后端 | 🚧 规划中 |
 
-完整变更见 [CHANGELOG.md](CHANGELOG.md)。
-
 ---
 
 ## 📖 文档
 
-- [CHANGELOG.md](CHANGELOG.md) — 版本历史
 - [LICENSE](LICENSE) — BSD-3-Clause
 
 ## 🤝 参与贡献
