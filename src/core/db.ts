@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS role_bindings (
   role_name    TEXT NOT NULL,
   runtime_type TEXT NOT NULL DEFAULT 'dsh',
   session_id   TEXT,
+  model_name   TEXT,
+  agent_name   TEXT,
+  session_meta TEXT,
   principal_id TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
@@ -152,6 +155,14 @@ export interface RoleBindingRow {
   role_name: string
   runtime_type: string
   session_id: string | null
+  /**
+   * v0.4：会话身份预留字段（现在不必每次填写，但 schema 与工具面已留位）。
+   * 模型名（如 deepseek-v4-pro / gpt-5.6）、agent 工具名（如 codex / dsh）、
+   * 以及通用扩展槽 session_meta（JSON 字符串，承载 provider/版本/runtime 等任意未来字段）。
+   */
+  model_name: string | null
+  agent_name: string | null
+  session_meta: string | null
   principal_id: string | null
   created_at: string
   updated_at: string
@@ -273,6 +284,24 @@ export class KingdomStore {
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(SCHEMA_SQL)
     this.ensureEventSequence()
+    this.ensureSessionProfileColumns()
+  }
+
+  /**
+   * v0.4：给 role_bindings 补会话身份预留列（model_name / agent_name / session_meta）。
+   *
+   * 与 ensureEventSequence 同款幂等增量迁移：`PRAGMA table_info` 做存在性 gate，
+   * `ALTER TABLE ... ADD COLUMN` 缺啥补啥，重复执行无副作用、O(1) 元数据操作。
+   * 旧库（0.3.x）开库瞬间收敛到 v0.4 结构，不重建表、不丢数据。
+   */
+  private ensureSessionProfileColumns(): void {
+    const columns = this.db.prepare('PRAGMA table_info(role_bindings)').all() as unknown as { name: string }[]
+    const names = new Set(columns.map(c => c.name))
+    for (const column of ['model_name', 'agent_name', 'session_meta'] as const) {
+      if (!names.has(column)) {
+        this.db.exec(`ALTER TABLE role_bindings ADD COLUMN ${column} TEXT`)
+      }
+    }
   }
 
   /**
@@ -400,8 +429,9 @@ export class KingdomStore {
     this.db
       .prepare(
         `INSERT INTO role_bindings
-           (binding_id, kingdom_id, role_type, role_name, runtime_type, session_id, principal_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (binding_id, kingdom_id, role_type, role_name, runtime_type,
+            session_id, model_name, agent_name, session_meta, principal_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.binding_id,
@@ -410,6 +440,9 @@ export class KingdomStore {
         row.role_name,
         row.runtime_type,
         row.session_id,
+        row.model_name ?? null,
+        row.agent_name ?? null,
+        row.session_meta ?? null,
         row.principal_id,
         row.created_at,
         row.updated_at,
@@ -417,10 +450,49 @@ export class KingdomStore {
     return row
   }
 
-  updateBindingSession(bindingId: string, sessionId: string | null, updatedAt: string): void {
+  /**
+   * v0.4：更新一条绑定的会话身份（session_id + 预留字段）。
+   *
+   * 语义：`undefined` = 保持不变；`null` = 显式清空；字符串 = 覆盖。
+   * 这是「角色真正属于某个独立会话」的写入通道（Phase 2 设计意图的落地）。
+   */
+  updateBindingProfile(
+    bindingId: string,
+    patch: {
+      sessionId?: string | null
+      modelName?: string | null
+      agentName?: string | null
+      sessionMeta?: string | null
+    },
+    updatedAt: string,
+  ): void {
+    const sets: string[] = []
+    const params: (string | null)[] = []
+    const put = (column: string, key: 'sessionId' | 'modelName' | 'agentName' | 'sessionMeta'): void => {
+      if (patch[key] === undefined) return
+      sets.push(`${column} = ?`)
+      params.push(patch[key] ?? null)
+    }
+    put('session_id', 'sessionId')
+    put('model_name', 'modelName')
+    put('agent_name', 'agentName')
+    put('session_meta', 'sessionMeta')
+    if (sets.length === 0) return
+    sets.push('updated_at = ?')
+    params.push(updatedAt, bindingId)
     this.db
-      .prepare('UPDATE role_bindings SET session_id = ?, updated_at = ? WHERE binding_id = ?')
-      .run(sessionId, updatedAt, bindingId)
+      .prepare(`UPDATE role_bindings SET ${sets.join(', ')} WHERE binding_id = ?`)
+      .run(...params)
+  }
+
+  /** 兼容旧调用面：仅换 session（委托给 updateBindingProfile）。 */
+  updateBindingSession(bindingId: string, sessionId: string | null, updatedAt: string): void {
+    this.updateBindingProfile(bindingId, { sessionId }, updatedAt)
+  }
+
+  /** v0.4：解绑（换届通道）。治理上由调用方决定谁可解绑；OWNER 由上层保护。 */
+  deleteBinding(bindingId: string): void {
+    this.db.prepare('DELETE FROM role_bindings WHERE binding_id = ?').run(bindingId)
   }
 
   // ── events ──────────────────────────────────────────────────

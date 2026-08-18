@@ -23,9 +23,9 @@
  */
 import type { Context } from 'cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 import { KingdomManager } from './core/kingdom.js'
-import { bindRole, listBindings } from './core/binding.js'
+import { bindRole, listBindings, rebindSession, unbindRole } from './core/binding.js'
 import { createTerritory, listTerritories } from './core/territory.js'
 import {
   abortExecution,
@@ -114,6 +114,34 @@ export function apply(ctx: Context, config: Config): void {
   const commandContext = (kingdomId: string, principal?: Principal): CommandContext =>
     ({ kingdomId, auth: authView, ...principal ? { principal } : {} })
 
+  /**
+   * v0.4：从工具执行上下文提取「调用方会话」注入 principal。
+   * 配合 `authMode: session-bound`（requireRole 校验 principal.sessionId 与
+   * binding.session_id 一致），让角色真正属于某个独立会话可被强制校验；
+   * declarative 模式下 principal 仅是告知属性，不影响放行。
+   */
+  const sessionPrincipal = (exec: { agent?: { session?: { id?: string } } | null }): Principal | undefined => {
+    const id = exec?.agent?.session?.id
+    return typeof id === 'string' && id.length > 0 ? { sessionId: id } : undefined
+  }
+
+  // ── init 引导（首次初始化后给出组织方式；重点：角色应绑到独立会话，勿默认代跑）──
+  // 地址语义（问题修复 v0.4.1）：
+  //   · 后端数据网关 = 本插件 HTTP 通道（如 http://127.0.0.1:<guiPort>）——
+  //     这是**填进前端页面连接框的地址**，不是要打开的页面。
+  //   · 前端页面 = GUI 前端（vite dev http://localhost:5173，或部署站点）——
+  //     由 GUI 部署方提供，插件不硬编码也不冒充。
+  const gatewayUrl = config.guiPort > 0 ? `http://127.0.0.1:${config.guiPort}` : '（未开启，可配置 guiPort 后获得）'
+  const guiLine = `后端数据网关：${gatewayUrl} —— 把它填入 GUI 前端的连接框；前端页面地址由 GUI 部署方提供（本地开发如 vite，或已部署站点），不要把网关地址当页面打开`
+  const initGuidance = '\n\n接下来把王国组织起来。**重要：不要把全部角色默认安在当前会话身上——角色应绑定到各自的独立会话**：\n'
+    + `① 绑定角色到独立会话（推荐）：用 kingdom_bind_session 为 CHANCELLOR / SUPERVISOR / WORKER 分别绑定具名 dsh 会话（可顺带填 model_name / agent_name）；`
+    + `配 authMode=session-bound 后，只有被绑定的那个会话才能行使该角色职权。\n`
+    + '② 快速演示（不推荐长期用）：会话纯文字逐步创建 —— 由当前会话代行各角色（角色席位 sessionId 为空，属本地演示兜底）。\n'
+    + `GUI（可选）：${guiLine}`
+  /** 首次初始化返回带引导文案；再次接入保持简洁。 */
+  const initResultText = (result: ReturnType<typeof manager.init>): string =>
+    result.action === 'initialized' ? `${result.detail}${initGuidance}` : result.detail
+
   // ── 加载期回收：清掉上一个插件生命周期留下的孤儿 Execution ──────
   //
   // Worker 是 one-shot in-process subagent，生命周期绑在插件 fiber 上，
@@ -142,7 +170,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     async execute() {
       const result = manager.init()
-      return result.detail
+      return initResultText(result)
     },
   })), 'dsh-kingdom: init tool')
 
@@ -200,17 +228,27 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_bind_role',
-    description: '绑定一个角色（OWNER/CHANCELLOR/SUPERVISOR/WORKER）到 DSH 会话，Role 与 Session 解耦',
+    description: '绑定一个角色（OWNER/CHANCELLOR/SUPERVISOR/WORKER）到 DSH 会话，Role 与 Session 解耦；可携带会话身份预留字段（模型名/agent 名/扩展元数据，可不填）',
     parameters: {
       role_type: { type: 'string', required: true, description: '角色：OWNER/CHANCELLOR/SUPERVISOR/WORKER' },
       role_name: { type: 'string', description: '角色名，如 Worker-01' },
       session_id: { type: 'string', description: '绑定的 dsh session id（可选）' },
+      model_name: { type: 'string', description: '会话身份预留：模型名，如 deepseek-v4-pro / gpt-5.6（可选）' },
+      agent_name: { type: 'string', description: '会话身份预留：agent 工具名，如 codex / dsh（可选）' },
+      session_meta: { type: 'string', description: '会话身份预留：任意扩展字段的 JSON 对象字符串（可选）' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { role_type: string; role_name?: string; session_id?: string }) {
+    async execute(args: {
+      role_type: string
+      role_name?: string
+      session_id?: string
+      model_name?: string
+      agent_name?: string
+      session_meta?: string
+    }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       return bindRole(store, {
@@ -218,9 +256,73 @@ export function apply(ctx: Context, config: Config): void {
         roleType: args.role_type,
         roleName: args.role_name,
         sessionId: args.session_id,
+        modelName: args.model_name,
+        agentName: args.agent_name,
+        sessionMeta: args.session_meta,
       })
     },
   })), 'dsh-kingdom: bind-role tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_unbind_role',
+    description: '解绑一个角色（换届通道）：按 role_type 或 binding_id 移除绑定。OWNER 受保护不可解绑。解绑后该角色空缺，可重新绑定',
+    parameters: {
+      role_type: { type: 'string', description: '角色：CHANCELLOR/SUPERVISOR/WORKER（与 binding_id 二选一）' },
+      binding_id: { type: 'string', description: '绑定 id（与 role_type 二选一）' },
+      reason: { type: 'string', description: '换届原因（会记入事件，可追溯）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { role_type?: string; binding_id?: string; reason?: string }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      return unbindRole(store, {
+        kingdomId,
+        roleType: args.role_type,
+        bindingId: args.binding_id,
+        reason: args.reason,
+      })
+    },
+  })), 'dsh-kingdom: unbind-role tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_bind_session',
+    description: '把角色绑定到（或改绑到）某个独立 DSH 会话，并更新会话身份预留字段（模型名/agent 名/扩展元数据）。null 清空、缺省不变。配合 authMode=session-bound 时按调用方会话校验身份',
+    parameters: {
+      role_type: { type: 'string', description: '角色：OWNER/CHANCELLOR/SUPERVISOR/WORKER（与 binding_id 二选一）' },
+      binding_id: { type: 'string', description: '绑定 id（与 role_type 二选一）' },
+      session_id: { type: 'string', description: '目标 dsh session id；传 null 清空' },
+      model_name: { type: 'string', description: '模型名，如 deepseek-v4-pro / gpt-5.6；传 null 清空' },
+      agent_name: { type: 'string', description: 'agent 工具名，如 codex / dsh；传 null 清空' },
+      session_meta: { type: 'string', description: '任意扩展字段的 JSON 对象字符串；传 null 清空' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: {
+      role_type?: string
+      binding_id?: string
+      session_id?: string | null
+      model_name?: string | null
+      agent_name?: string | null
+      session_meta?: string | null
+    }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      return rebindSession(store, {
+        kingdomId,
+        roleType: args.role_type,
+        bindingId: args.binding_id,
+        sessionId: args.session_id === undefined ? undefined : args.session_id,
+        modelName: args.model_name === undefined ? undefined : args.model_name,
+        agentName: args.agent_name === undefined ? undefined : args.agent_name,
+        sessionMeta: args.session_meta === undefined ? undefined : args.session_meta,
+      })
+    },
+  })), 'dsh-kingdom: bind-session tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_list_bindings',
@@ -262,10 +364,10 @@ export function apply(ctx: Context, config: Config): void {
       description?: string
       acceptance_criteria?: string
       territory_id?: string
-    }) {
+    }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return planTask(store, commandContext(kingdomId), {
+      return planTask(store, commandContext(kingdomId, sessionPrincipal(exec)), {
         title: args.title,
         description: args.description,
         acceptanceCriteria: args.acceptance_criteria,
@@ -285,10 +387,10 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { task_id: string; worker_binding_id?: string }) {
+    async execute(args: { task_id: string; worker_binding_id?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return assignTask(store, commandContext(kingdomId), {
+      return assignTask(store, commandContext(kingdomId, sessionPrincipal(exec)), {
         taskId: args.task_id,
         workerBindingId: args.worker_binding_id,
       }).message
@@ -325,7 +427,7 @@ export function apply(ctx: Context, config: Config): void {
         parent: exec.agent,
         signal: exec.signal,
       })
-      const result = await startTask(store, executor, commandContext(kingdomId), { taskId: args.task_id })
+      const result = await startTask(store, executor, commandContext(kingdomId, sessionPrincipal(exec)), { taskId: args.task_id })
       return result.message
     },
   })), 'dsh-kingdom: start-task tool')
@@ -342,10 +444,10 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { task_id: string; decision: string; reason?: string }) {
+    async execute(args: { task_id: string; decision: string; reason?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return reviewTask(store, commandContext(kingdomId), {
+      return reviewTask(store, commandContext(kingdomId, sessionPrincipal(exec)), {
         taskId: args.task_id,
         decision: args.decision,
         reason: args.reason,
@@ -433,11 +535,11 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { execution_id: string; action: string; reason?: string }) {
+    async execute(args: { execution_id: string; action: string; reason?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       const input = { executionId: args.execution_id, reason: args.reason }
-      const cmd = commandContext(kingdomId)
+      const cmd = commandContext(kingdomId, sessionPrincipal(exec))
       switch (args.action.trim().toLowerCase()) {
         case 'pause': return pauseExecution(store, cmd, input).message
         case 'resume': return resumeExecution(store, cmd, input).message
@@ -544,7 +646,7 @@ export function apply(ctx: Context, config: Config): void {
       switch (sub ?? '') {
         case 'init': {
           const result = manager.init()
-          return { kind: 'success', text: result.detail }
+          return { kind: 'success', text: initResultText(result) }
         }
         case 'status': {
           return { kind: 'success', text: store.statusSummary() }
@@ -558,10 +660,13 @@ export function apply(ctx: Context, config: Config): void {
           return {
             kind: 'success',
             text: [
-              'dsh-Kingdom v0.3（Phase 3：GUI 适配）',
-              '/kingdom init    初始化或接入本地王国（幂等）',
+              'dsh-Kingdom v0.4（换届 + 会话归属）',
+              '/kingdom init    初始化或接入本地王国（幂等；首次初始化后会给出创建方式二选一）',
               '/kingdom status  查看王国真实状态',
               '/kingdom reset   重新扫描接入（不删除数据）',
+              '组织王国：先为角色绑定独立会话（kingdom_bind_session），不要默认由当前会话代跑全部角色',
+              '换届与归属：kingdom_unbind_role 解绑；kingdom_bind_session 绑定/更换角色会话（含 model/agent 预留字段）',
+              'GUI：前端页面由 GUI 部署方提供；后端网关 http://127.0.0.1:<guiPort> 填入前端连接框（默认关闭，配置 guiPort 开启）',
               '也可用自然语言：初始化王国 / 创建领地 / 绑定角色 / 规划任务 / 派发任务 / 审查结果',
               '',
               '任务闭环：plan → assign → start（Worker 执行）→ review（ACCEPT/REWORK/FAIL）',

@@ -1,7 +1,7 @@
 {
   "name": "dsh-kingdom",
-  "version": "0.3.2",
-  "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期",
+  "version": "0.4.0",
+  "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD（v0.4 支持解绑与角色↔独立会话归属）+ Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期 + 本地 GUI 通道",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -47,7 +47,7 @@
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
     "cordis": ">=4.0.0-rc <5",
-    "schemastery": "^3.18.0"
+    "@deepseek-ai/schemastery": "^3.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

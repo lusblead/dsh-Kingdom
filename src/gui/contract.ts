@@ -118,6 +118,10 @@ export interface BindingView {
   roleName: string
   runtimeType: string
   sessionId: string | null
+  /** v0.4：会话身份预留字段（模型名 / agent 工具名 / 扩展槽），可空。 */
+  modelName: string | null
+  agentName: string | null
+  sessionMeta: Record<string, unknown> | null
   createdAt: string
 }
 

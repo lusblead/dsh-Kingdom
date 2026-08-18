@@ -74,6 +74,9 @@ export function toBindingView(row: RoleBindingRow): BindingView {
     roleName: row.role_name,
     runtimeType: row.runtime_type,
     sessionId: row.session_id,
+    modelName: row.model_name,
+    agentName: row.agent_name,
+    sessionMeta: row.session_meta ? parseJson(row.session_meta) : null,
     createdAt: row.created_at,
   }
 }
