@@ -43,7 +43,7 @@ import {
 } from './core/task-service.js'
 import { buildSnapshot, buildTaskDetail, toEventView } from './gui/snapshot.js'
 import { startGuiServer } from './gui/server.js'
-import type { AuthView, CommandResultView } from './gui/contract.js'
+import { guiWriteGuard, type AuthView, type CommandResultView } from './gui/contract.js'
 import { DshSubagentExecutor, type SubagentsLike } from './worker/dsh-subagent.js'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 
@@ -276,7 +276,7 @@ export function apply(ctx: Context, config: Config): void {
       model_name?: string
       agent_name?: string
       session_meta?: string
-    }) {
+    }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       return bindRole(store, {
@@ -287,6 +287,9 @@ export function apply(ctx: Context, config: Config): void {
         modelName: args.model_name,
         agentName: args.agent_name,
         sessionMeta: args.session_meta,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
       })
     },
   })), 'dsh-kingdom: bind-role tool')
@@ -303,7 +306,7 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { role_type?: string; binding_id?: string; reason?: string }) {
+    async execute(args: { role_type?: string; binding_id?: string; reason?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       return unbindRole(store, {
@@ -311,6 +314,9 @@ export function apply(ctx: Context, config: Config): void {
         roleType: args.role_type,
         bindingId: args.binding_id,
         reason: args.reason,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
       })
     },
   })), 'dsh-kingdom: unbind-role tool')
@@ -337,7 +343,7 @@ export function apply(ctx: Context, config: Config): void {
       model_name?: string | null
       agent_name?: string | null
       session_meta?: string | null
-    }) {
+    }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
       return rebindSession(store, {
@@ -348,6 +354,9 @@ export function apply(ctx: Context, config: Config): void {
         modelName: args.model_name === undefined ? undefined : args.model_name,
         agentName: args.agent_name === undefined ? undefined : args.agent_name,
         sessionMeta: args.session_meta === undefined ? undefined : args.session_meta,
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
       })
     },
   })), 'dsh-kingdom: bind-session tool')
@@ -642,10 +651,18 @@ export function apply(ctx: Context, config: Config): void {
     }
     const str = (key: string): string => typeof payload[key] === 'string' ? payload[key] : ''
     const opt = (key: string): string | undefined => typeof payload[key] === 'string' ? payload[key] : undefined
-    const principal: Principal | undefined = typeof payload.session_id === 'string'
-      ? { sessionId: payload.session_id }
-      : undefined
-    const cmd = commandContext(kingdomId, principal)
+    // v0.5.2（M1-B/P0-B）：GUI 写命令**不再信任 HTTP payload 里的 session_id**——
+    // principal 只能来自 DSH Runtime 证明（工具面 sessionPrincipal），
+    // 网关面永远无 principal。session-bound 下所有写命令 fail-closed（SESSION_AUTH_REQUIRED）。
+    const cmd = commandContext(kingdomId, undefined)
+
+    const guard = guiWriteGuard(authView.mode)
+    if (!guard.allowed) {
+      return guiFailure(guard.code,
+        '该操作需要由已绑定角色的真实 DSH Session 发起。'
+        + 'GUI 当前没有可信 DSH Principal，因此拒绝代行。'
+        + '请在 DSH 会话中调用对应 kingdom_* 工具完成此操作。')
+    }
 
     switch (name) {
       case 'territory.create':

@@ -68,7 +68,52 @@ export interface RebindSessionInput extends SessionIdentity {
   bindingId?: string
 }
 
-export function bindRole(store: KingdomStore, input: BindRoleInput): string {
+/**
+ * v0.5.2：Trusted Governance Administration Plane 的授权输入。
+ *
+ * 管理面（任命/罢免/改绑/换届）的调用者身份只允许来自 DSH Runtime
+ * （工具面经 `sessionPrincipal(exec)` 注入），**绝不允许调用参数自报**。
+ * - `declarative`（本地演示）：不校验调用者（snapshot 如实标注 local-demo）；
+ * - `session-bound`（真实权限边界）：只有 OWNER binding 关联的真实会话可执行。
+ */
+export interface AdminAuth {
+  mode: 'declarative' | 'session-bound'
+  /** 调用方会话（来自 DSH Runtime 证明，工具面注入）。 */
+  principalSessionId?: string | null
+}
+
+/**
+ * v0.5.2 管理面守卫：组织管理（bind/unbind/rebind）在 session-bound 模式下
+ * 仅 OWNER 真实会话可执行；OWNER 未绑定会话时 fail-closed（不猜、不放行）。
+ */
+export function requireAdmin(
+  store: KingdomStore,
+  kingdomId: string,
+  auth?: AdminAuth,
+): { ok: true; owner: RoleBindingRow | null } | { ok: false; message: string } {
+  if (!auth || auth.mode !== 'session-bound') {
+    return { ok: true, owner: null } // declarative：本地可信演示权限，保持现状
+  }
+  const owner = store.getBindingByRole(kingdomId, 'OWNER')
+  if (!owner) {
+    return { ok: false, message: '错误：当前王国没有 OWNER 绑定，组织管理无法验证管理者身份。' }
+  }
+  if (!owner.session_id) {
+    return {
+      ok: false,
+      message: '错误：OWNER 绑定未关联会话，session-bound 模式下无法验证管理者身份。'
+        + '请先用真实 OWNER 会话执行 kingdom_bind_session(role_type="OWNER", session_id=<该会话>) 后重试。',
+    }
+  }
+  if (auth.principalSessionId !== owner.session_id) {
+    return { ok: false, message: '错误：组织管理（任命/罢免/改绑）只有 OWNER 会话可以执行，当前调用者被拒绝。' }
+  }
+  return { ok: true, owner }
+}
+
+export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
   const roleType = input.roleType.trim().toUpperCase()
   if (!ROLE_TYPES.includes(roleType as RoleType)) {
     return `错误：role_type 必须是 ${ROLE_TYPES.join(' / ')} 之一。`
@@ -107,12 +152,15 @@ export function bindRole(store: KingdomStore, input: BindRoleInput): string {
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'ROLE_BOUND',
-    actor_role: roleType,
-    actor_id: null,
+    // v0.5.2 审计修正：actor = 实际操作者（session-bound 下为可信 OWNER）；
+    // declarative 演示模式无可信 principal，保留被操作角色作兼容标注。
+    actor_role: admin.owner ? 'OWNER' : roleType,
+    actor_id: admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: null,
     payload_json: JSON.stringify({
       role_name: roleName,
+      role_type: roleType,
       session_id: sessionId,
       model_name: modelName,
       agent_name: agentName,
@@ -134,7 +182,9 @@ export function bindRole(store: KingdomStore, input: BindRoleInput): string {
  * - 被解绑角色若已被任务引用（assigned_binding_id），任务保留引用、
  *   展示层显示为“未指派”；相关治理操作会因缺绑定而明确报错（ROLE_BINDING_MISSING）。
  */
-export function unbindRole(store: KingdomStore, input: UnbindRoleInput): string {
+export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
   const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
   if (binding === null) {
     if (input.bindingId?.trim()) {
@@ -152,8 +202,9 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput): string 
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'ROLE_UNBOUND',
-    actor_role: binding.role_type,
-    actor_id: null,
+    // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被罢免的绑定。
+    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_id: admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
     payload_json: JSON.stringify({
@@ -173,7 +224,9 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput): string 
  * - `undefined` = 保持不变；`null` = 显式清空；字符串/对象 = 覆盖。
  * - 这是「角色真正属于某一个独立会话」的写入通道。
  */
-export function rebindSession(store: KingdomStore, input: RebindSessionInput): string {
+export function rebindSession(store: KingdomStore, input: RebindSessionInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
   const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
   if (binding === null) {
     if (input.bindingId?.trim()) {
@@ -207,8 +260,9 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput): s
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'BINDING_PROFILE_UPDATED',
-    actor_role: binding.role_type,
-    actor_id: null,
+    // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被改绑的绑定。
+    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_id: admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
     payload_json: JSON.stringify({

@@ -40,15 +40,19 @@ $dirty = @($status | Where-Object { $_ -notmatch '^\?\? \.agent/' }).Count
 Check "P0 工作树干净（仅 .agent/ 未跟踪）" ($dirty -eq 0) ($status -join ' | ')
 if ($script:dry) { $script:dry = $false } # 预检后的步骤才真正跳过
 
-# 1) 版本 bump（package.json + README 版本引用同步）
+# 1) 版本 bump（package.json + README 版本引用同步；已就绪则幂等跳过）
 $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-Check "P1 当前版本 $($pkg.version) ≠ 目标 $Version" ($pkg.version -ne $Version) "from $($pkg.version) to $Version"
-if (-not $DryRun) {
-  $old = $pkg.version
-  (Get-Content package.json -Raw).Replace('"version": "' + $old + '"', '"version": "' + $Version + '"') | Set-Content package.json -Encoding UTF8 -NoNewline
-  # README 同步（badge / tgz 下载路径等显式旧版本号）
-  (Get-Content README.md -Raw).Replace($old, $Version) | Set-Content README.md -Encoding UTF8 -NoNewline
-  Check "P1 README 版本引用已同步" ((Select-String README.md -Pattern $old -SimpleMatch | Measure-Object).Count -eq 0) "replaced $old → $Version"
+if ($pkg.version -eq $Version) {
+  Check "P1 版本已就绪（$Version，跳过 bump）" $true "from $($pkg.version) to $Version"
+} else {
+  Check "P1 当前版本 $($pkg.version) ≠ 目标 $Version" $true "from $($pkg.version) to $Version"
+  if (-not $DryRun) {
+    $old = $pkg.version
+    (Get-Content package.json -Raw).Replace('"version": "' + $old + '"', '"version": "' + $Version + '"') | Set-Content package.json -Encoding UTF8 -NoNewline
+    # README 同步（badge / tgz 下载路径等显式旧版本号）
+    (Get-Content README.md -Raw).Replace($old, $Version) | Set-Content README.md -Encoding UTF8 -NoNewline
+    Check "P1 README 版本引用已同步" ((Select-String README.md -Pattern $old -SimpleMatch | Measure-Object).Count -eq 0) "replaced $old → $Version"
+  }
 }
 
 # 2) 测试（tsc + node --test；GUI 测试在独立 GUI 包维护）
@@ -69,11 +73,16 @@ if (-not $DryRun) {
   Check "P3 npm pack 产出 $Version tgz" (Test-Path $tgz) $packOut.Trim().Split("`n")[-1]
 }
 
-# 4) git commit + tag + push
+# 4) git commit + tag + push（bump 已就绪且无额外变更时跳过 commit）
 if (-not $DryRun) {
   & git add package.json README.md 2>&1 | Out-Null
-  & git commit -m "chore: release v$Version" 2>&1 | Out-Null
-  Check "P4 commit" ($LASTEXITCODE -eq 0) "chore: release v$Version"
+  $staged = (& git diff --cached --name-only 2>&1 | Measure-Object).Count
+  if ($staged -gt 0) {
+    & git commit -m "chore: release v$Version" 2>&1 | Out-Null
+    Check "P4 commit" ($LASTEXITCODE -eq 0) "chore: release v$Version"
+  } else {
+    Check "P4 commit（无待提交变更，跳过）" $true "clean"
+  }
   & git tag "v$Version" 2>&1 | Out-Null
   & git push origin main --tags 2>&1 | Out-Null
   Check "P4 push + tag v$Version" ($LASTEXITCODE -eq 0) "origin main + v$Version"

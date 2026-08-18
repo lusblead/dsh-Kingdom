@@ -73,12 +73,22 @@ export function toBindingView(row: RoleBindingRow): BindingView {
     roleType: row.role_type,
     roleName: row.role_name,
     runtimeType: row.runtime_type,
-    sessionId: row.session_id,
+    sessionDisplay: maskSessionId(row.session_id),
+    sessionBound: Boolean(row.session_id),
     modelName: row.model_name,
     agentName: row.agent_name,
     sessionMeta: row.session_meta ? parseJson(row.session_meta) : null,
     createdAt: row.created_at,
   }
+}
+
+/**
+ * v0.5.2（M1-B/P0-C）：会话标识脱敏——普通快照只暴露尾部（如 `…8f21`），
+ * 完整 session id 仅保留在审计事件面（events payload），避免身份标识被 UI 面扩散。
+ */
+function maskSessionId(id: string | null): string | null {
+  if (!id) return null
+  return id.length > 8 ? `…${id.slice(-8)}` : `…${id}`
 }
 
 export function toTerritoryView(row: TerritoryRow): TerritoryView {

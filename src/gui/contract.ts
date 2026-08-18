@@ -74,6 +74,7 @@ export type KingdomErrorCode =
   | 'KINGDOM_NOT_INITIALIZED'
   | 'ROLE_BINDING_MISSING'
   | 'UNAUTHORIZED_PRINCIPAL'
+  | 'SESSION_AUTH_REQUIRED'
   | 'TERRITORY_MISSING'
   | 'TERRITORY_AMBIGUOUS'
   | 'TERRITORY_NOT_IN_KINGDOM'
@@ -88,6 +89,19 @@ export type KingdomErrorCode =
   | 'WORKER_EXECUTION_FAILED'
   | 'EXECUTION_NOT_FOUND'
   | 'ILLEGAL_EXECUTION_STATE'
+
+/**
+ * v0.5.2（M1-B/P0-B）：GUI 写命令守卫。
+ *
+ * GUI 网关没有可信 DSH Principal（HTTP payload 的 session_id 一律不再被信任），
+ * 因此 `session-bound` 模式下所有写命令 fail-closed——宁可少一个按钮能用，
+ * 也不能让 GUI 伪造治理身份。`declarative` 是本地可信演示模式，保持可用。
+ */
+export function guiWriteGuard(authMode: string): { allowed: true } | { allowed: false; code: 'SESSION_AUTH_REQUIRED' } {
+  return authMode === 'session-bound'
+    ? { allowed: false, code: 'SESSION_AUTH_REQUIRED' }
+    : { allowed: true }
+}
 
 /** GUI 可以呈现为按钮的下一步动作。 */
 export type AllowedAction =
@@ -117,7 +131,10 @@ export interface BindingView {
   roleType: string
   roleName: string
   runtimeType: string
-  sessionId: string | null
+  /** v0.5.2（M1-B/P0-C）：脱敏后的会话标识（如 …8f21）。完整 session id 只进审计事件面，不出普通快照。 */
+  sessionDisplay: string | null
+  /** 是否已绑定会话（session-bound 模式下该绑定可被验证身份）。 */
+  sessionBound: boolean
   /** v0.4：会话身份预留字段（模型名 / agent 工具名 / 扩展槽），可空。 */
   modelName: string | null
   agentName: string | null
