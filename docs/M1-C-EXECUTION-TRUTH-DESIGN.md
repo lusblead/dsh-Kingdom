@@ -1,205 +1,222 @@
-# M1-C Execution Truth — 设计稿（v0.6.0）
+# M1-C Execution Truth — 设计稿 v2（冻结版）
 
-> 状态：**设计冻结草案**——按用户流程要求，本稿完成并经用户裁决后才动数据库/代码。
-> 范围：ExecutionProfile + ExecutorFactory + Schema 设计。不引入 Multi-Worker、不引入长期 Worker Session。
+> 状态：**已冻结**（用户裁决 2026-08-18：②③通过、①通过但扩展、④否决原方案；追加 ExecutionProfile 治理约束与 options 收紧）。本稿即实现依据，无需二次确认。
+> 范围：ExecutionProfile + ExecutorFactory + Schema v2。不引入 Multi-Worker、不引入长期 Worker Session。
 
 ---
 
 ## 1. 目标（要证明的命题）
 
 ```text
-Task.assigned_binding_id
-        ↓
-Worker Binding
-        ↓
-ExecutionProfile
-        ↓
-ExecutorFactory
-        ↓
-实际 Runtime / Provider / Model
-        ↓
-one-shot Execution
+Task.assigned_binding_id → Worker Binding → ExecutionProfile → ExecutorFactory
+        → 实际 Runtime / Provider / Model → one-shot Execution
 ```
 
-同时保持严格分离：
+严格分离：`Supervisor Session ──→ delegation parent`；`Worker Binding ──→ execution identity/profile`。
 
-```text
-Supervisor Session ──→ delegation parent（血缘/工作区/委派深度）
-Worker Binding    ──→ execution identity/profile（执行能力）
-两者互不混用
-```
+## 2. 施工边界（冻结）
 
-## 2. 施工边界（用户裁决冻结）
+1. ExecutionProfile 是独立领域概念：`provider/model`；`session_id` 只管治理身份。
+2. ExecutorFactory 是唯一执行解析入口；Core 仍只依赖 `WorkerExecutor`。
+3. 优先 Binding profile；缺省回退全局 `workerProvider`，回退产生 `provider_source=global-fallback` 证据。
+4. 每 attempt = 全新 one-shot execution；无长期 Worker Session；无 Multi-Worker。
+5. Execution 保存真实执行证据（结构化列 + 不可变快照 JSON），不只写事件文本。
+6. **requested ≠ resolved 分开**：`requested_model`（请求）→ `resolved_model`（DSH Runtime 解析结果）；远程 seam 不可见时 `null`（= 无证据，不是无模型）。未来 transport telemetry 才引入 `observed_model`（Provider/API 实际观测）。
+7. M1-D 是 v0.6.0 硬 Release Gate（4+1 Session 矩阵 + E1/E2/E3 运行归属实验全 PASS）。
+8. **ExecutionProfile 修改必须走 Trusted Admin Plane**：`kingdom_set_execution_profile`（独立工具，不塞进 bind_session），session-bound 下仅真实 OWNER；Chancellor/Supervisor/Worker/Stranger ❌。
+9. **v1 冻结 `ExecutionProfileV1 { provider?: string; model?: string }`**：无 `options` 透传（未来 reasoning/temperature/tool policy 等逐项进 schema，严格 allowlist）。
+10. **硬不变量：ExecutorFactory MUST NOT read `binding.model_name`**——`model_name` 只做席位/展示元数据，执行配置只读 `execution_profile`；用测试锁定（model_name=Model-A + profile.model=Model-B → requested 必须 Model-B）。
 
-1. **ExecutionProfile 是独立领域概念**：表达 `provider/model/options`；`session_id` 只负责治理身份认证，不是执行配置。
-2. **ExecutorFactory 是唯一执行解析入口**：`startTask` 不理解 DSH provider/model；Core 仍只依赖 `WorkerExecutor` 接口。
-3. **优先 Binding profile，缺省回退全局 `workerProvider`**，回退必须产生 `runtime_source=global-fallback` 证据。
-4. **每 attempt = 全新 one-shot execution**；无长期 Worker Session；无 Multi-Worker。
-5. **Execution 保存真实执行证据**：可事后回答"哪个 Worker / 哪个 provider / 哪个 runtime / 哪个 model / 哪个 session/run 执行了第几次 attempt"——结构化落库，不只写事件文本。
-6. **Binding 自报不成为假事实**：落库的 `requested_model` 与 `observed_model` 分开；DSH 无法证明实际模型时明确记录 requested/observed 差异。
-7. **M1-D 是 v0.6.0 硬 Release Gate**：4+1 Session 对抗矩阵 + 至少两个不同 ExecutionProfile 的运行归属实验全 PASS 才发布。
+## 3. DSH seam 事实（不变，见 v1 稿）
 
-## 3. DSH seam 事实核查（决定设计的硬约束）
-
-| 事实 | 出处 | 设计含义 |
-|---|---|---|
-| `SubagentStartRequest.agentOptions?: AgentOptions`，`continuation.ts:414` 取 `agentOptions?.model ?? parent.options.model` | dsh-subagent types.ts:119 / continuation.ts | **requested model 可传递**（agentOptions.model），缺省继承 Supervisor |
-| 子 agent 的 provider/model 默认继承 parent（`child-agent.ts:60-78`） | dsh-subagent | 未指定时"实际执行者=Supervisor 的运行时"——这正是 M1-C 要消除的隐式行为 |
-| `SubagentResult` 只有 output/structured/stopReason（types.ts:219-238） | dsh-subagent | **run 结果不含 model** → observed 不能从 result 拿 |
-| in-process run 的 `SubagentRun.localAgent: Agent | undefined`，其 `options.model` 是解析后模型（含继承） | types.ts:261 | **observed_model 来源**：in-process（spawn/fork）可读 `run.localAgent.options.model`；remote provider 时 undefined → 诚实记 null |
-| `descriptor.agentModel`（child 日志持久化） | descriptor.ts:77/112 | 未来审计可查（插件不直接读，留给 DSH 面） |
+- `agentOptions.model` 可传递 requested model（缺省继承 Supervisor）；`SubagentResult` 不含 model；in-process `run.localAgent.options.model` = DSH 解析后的有效模型 → **resolved_model**；remote 时 null。
 
 ## 4. Domain 模型
 
-### 4.1 ExecutionProfile（Binding 上的执行配置，独立领域概念）
+### 4.1 ExecutionProfileV1（冻结）
 
 ```ts
-/** Worker Binding 的执行配置（v1 简化：结构化 JSON 挂 Binding，不做 Profile registry）。 */
-export interface ExecutionProfile {
-  /** subagent provider 名（dsh base 默认 spawn/fork）。缺省 → 回退全局 workerProvider。 */
-  provider?: string
-  /** requested model（传给子 agent 的 agentOptions.model）。缺省 → 继承父 Agent（Supervisor）。 */
-  model?: string
-  /** 扩展槽（v1 预留：maxTokens 等 AgentOptions 子集；DSH 不支持的能力由 Factory 拒绝并 fail 明确）。 */
-  options?: Record<string, unknown>
+/** v1：只表达执行能力的两维（provider/model）。无 options 透传。 */
+export interface ExecutionProfileV1 {
+  provider?: string   // subagent provider 名（spawn/fork）；缺省 → 全局 workerProvider（fallback 证据）
+  model?: string      // requested model（agentOptions.model）；缺省 → 继承父 Agent（parent-inherited 证据）
 }
 ```
 
-- **不混用**：`session_id` = 治理身份；`model_name/agent_name/session_meta`（v0.4 预留字段）= 席位身份展示元数据；**执行配置只读 `execution_profile`**。
-- v1 不建独立 `execution_profiles` 表（用户倾向）；Multi-Worker 阶段再决定是否抽共享 Profile registry。
+- **治理**：修改 profile 唯一入口 = `setExecutionProfile()`（Domain）/ `kingdom_set_execution_profile`（工具），session-bound 下经 `requireAdmin`（仅 OWNER）；declarative 保持演示现状。
+- **不混用**：`session_id`=治理身份；`model_name/agent_name/session_meta`=席位展示元数据（ExecutorFactory 禁止读取，硬不变量）；`execution_profile`=执行配置。
 
-### 4.2 ResolvedExecution（ExecutorFactory 的解析结果 + Execution 的不可变快照）
+### 4.2 ResolvedExecution（Factory 解析结果 + Execution 证据）
 
 ```ts
+export type ProviderSource = 'binding' | 'global-fallback'
+export type ModelSource = 'binding' | 'parent-inherited' | 'unknown'
+
 export interface ResolvedExecution {
-  /** 最终 provider（binding profile 优先，否则全局 workerProvider）。 */
   provider: string
-  /** 证据来源：'binding' | 'global-fallback'。 */
-  runtimeSource: 'binding' | 'global-fallback'
-  /** requested model：profile.model ?? null（null=继承父 Agent，DSH 语义）。 */
-  requestedModel: string | null
+  providerSource: ProviderSource
+  requestedModel: string | null      // profile.model ?? null（null=继承 parent）
+  modelSource: ModelSource           // requestedModel ? 'binding' : 'parent-inherited'
+  // resolvedModel 与完整快照在执行结算时补全（不可变，每节只写一次）
 }
 ```
 
-## 5. Schema 设计（v1，幂等迁移，零破坏）
-
-沿用 `ensureSessionProfileColumns` 的幂等模式（`PRAGMA table_info` gate + `ALTER TABLE ADD COLUMN`，SCHEMA_VERSION 保持 1）。
+## 5. Schema v2（冻结）
 
 ### 5.1 `role_bindings` 加 1 列
 
 | 列 | 类型 | 语义 |
 |---|---|---|
-| `execution_profile_json` | TEXT NULL | ExecutionProfile 的 JSON（v1 简化；不合法 JSON 视为未配置，不猜） |
+| `execution_profile_json` | TEXT NULL | ExecutionProfileV1 的 JSON；非法 JSON = 未配置（不猜） |
 
-### 5.2 `executions` 加 4 列（不可变执行证据快照，创建时写入、结算不改写）
+### 5.2 `executions` 加 7 列（核心证据独立列 = 审计事实）+ 快照 JSON
 
-| 列 | 类型 | 语义 | 回答的问题 |
+| 列 | 类型 | 语义 | 回答 |
 |---|---|---|---|
-| `runtime_source` | TEXT NULL | `binding` / `global-fallback` | 配置来自哪 |
-| `provider` | TEXT NULL | 最终 subagent provider 名 | 用什么执行方式 |
-| `requested_model` | TEXT NULL | profile.model ?? null（null=继承 parent） | 请求了什么模型 |
-| `observed_model` | TEXT NULL | in-process run 的 `localAgent.options.model`；不可得时 null（诚实标注，非"无模型"） | 实际观察到的模型 |
+| `executor_kind` | TEXT NULL | executor.kind（如 `dsh-subagent:spawn`） | 用了哪个 executor |
+| `provider` | TEXT NULL | 最终 provider | 用什么执行方式 |
+| `provider_source` | TEXT NULL | `binding` / `global-fallback` | provider 来自哪 |
+| `requested_model` | TEXT NULL | profile.model ?? null | 请求了什么模型 |
+| `resolved_model` | TEXT NULL | DSH 解析后模型（in-process）；null=seam 无证据 | 实际解析成什么 |
+| `model_source` | TEXT NULL | `binding` / `parent-inherited` / `unknown` | model 来源 |
+| `execution_profile_json` | TEXT NULL | 不可变解析快照（requested/resolved/source 三节） | 未来扩展参数与完整证据 |
 
-> 选 4 列而非单 JSON 列：事后可 SQL 直查（"哪些任务用了 fallback"、"哪个 model 跑了哪些 attempt"），且列本身就是不可变快照（`transitionExecution` 不触碰这几列）。
+快照 JSON 形态（**不是另一个真相源**，关键字段以列为准）：
 
-### 5.3 既有字段已覆盖的证据
+```json
+{
+  "requested": { "provider": "spawn", "model": "gpt-5.6" },
+  "resolved":  { "provider": "spawn", "model": "gpt-5.6" },
+  "source":    { "provider": "binding", "model": "binding" }
+}
+```
 
-`executions.worker_binding_id`（哪个 Worker）、`attempt_no`（第几次）、`session_id`（哪个实际 run/session）、`task_id`——加上 5.2 的 4 列，边界 5 完整可答。
+写入规则：start 时写 requested/source 节 + 列；结算时**一次性**补 resolved 节与 `resolved_model` 列（此后不再改写——`transitionExecution` 不触碰证据列）。
+
+### 5.3 Migration：正式 Schema v2（裁决 ④）
+
+- `SCHEMA_VERSION = 2`（`kingdoms.schema_version`）。
+- **新库**：建表后直接写 2。
+- **旧库 v1→v2**：事务化幂等升级：
+
+```text
+BEGIN IMMEDIATE
+  PRAGMA table_info gate（缺列才 ADD COLUMN）
+  ADD role_bindings.execution_profile_json
+  ADD executions.{executor_kind, provider, provider_source,
+                  requested_model, resolved_model, model_source,
+                  execution_profile_json}
+  verify 全部预期列存在（缺失 → 抛错）
+  UPDATE kingdoms SET schema_version = 2
+COMMIT（失败 ROLLBACK）
+```
+
+- 仍保持"增量、安全、不重建"（不推翻零迁移哲学，升级为 **Versioned + transactional + idempotent ADD COLUMN**）；未来 v2→v3 同理。
 
 ## 6. ExecutorFactory（唯一执行解析入口）
 
-新模块 `src/worker/executor-factory.ts`：
+`src/worker/executor-factory.ts`：
 
 ```ts
-/** 唯一执行解析入口：Binding + 全局配置 → ResolvedExecution + WorkerExecutor。 */
 export function resolveWorkerExecution(
-  store: KingdomStore,
-  ctx: { kingdomId: string },
-  task: TaskRow,                       // 读 task.assigned_binding_id
-  runtime: {
-    subagents: SubagentsLike
-    globalProvider: string             // config.workerProvider
-    parent: unknown                    // exec.agent（delegation parent，永远来自 Supervisor 调用者）
-    signal: AbortSignal
-  },
+  store, ctx, task, runtime: { subagents, globalProvider, parent, signal },
 ): { resolution: ResolvedExecution; executor: WorkerExecutor } | { error: string }
 ```
 
 解析顺序（确定性）：
 
 ```text
-1. task.assigned_binding_id → binding（缺失/非 WORKER → 明确错误 WORKER_BINDING_INVALID）
-2. binding.execution_profile_json 解析
-   ├─ provider 合法（subagents.getProvider 存在）→ runtimeSource='binding'
-   ├─ provider 缺失/非法 → 全局 workerProvider（存在则 runtimeSource='global-fallback'；不存在 → 明确错误）
-3. requestedModel = profile.model ?? null（无验证通道——DSH 无 model 白名单，agentOptions.model 由 DSH 内部校验）
-4. new DshSubagentExecutor({ subagents, provider, model: requestedModel, parent, signal })
-   executor.info = { provider, runtimeSource, requestedModel }   // WorkerExecutor.info
+1. task.assigned_binding_id → binding（缺失/非 WORKER → WORKER_BINDING_INVALID）
+2. profile = parse(binding.execution_profile_json)   // 非法 JSON = 空 profile
+3. provider = profile.provider ?? globalProvider
+   provider_source = profile.provider ? 'binding' : 'global-fallback'
+   （provider 未注册 → 明确错误，不启动 Execution）
+4. requested_model = profile.model ?? null
+   model_source = requested_model ? 'binding' : 'parent-inherited'
+   // 硬不变量：绝不读 binding.model_name
+5. executor = new DshSubagentExecutor({ subagents, provider,
+       model: requested_model, parent, signal })
+   executor.info = { provider, providerSource, requestedModel, modelSource }
 ```
 
-**Core 不动**：`startTask(store, executor, ctx, input)` 仍只依赖 `WorkerExecutor` 接口；执行证据经 `executor.info`（新可选只读字段）落库——信息随执行器携带，Core 不自己解析 provider/model（边界 2）。
+**Core 不动**：`startTask(store, executor, ctx, input)` 仍只依赖 `WorkerExecutor`；证据经 `executor.info`（新只读字段）与 `outcome.resolvedModel` 落库。
 
-**DshSubagentExecutor 扩展**（`src/worker/dsh-subagent.ts`）：
-- options 加 `model?: string` → `subagents.start(provider, { ..., agentOptions: model ? { model } : undefined })`；
-- 结算后提取 `observedModel = run.localAgent?.options?.model ?? null`，并入 `WorkerExecutionOutcome`（新可选字段 `observedModel`）；
-- `kind` 保持 `dsh-subagent:<provider>`（兼容既有事件/展示）。
+**DshSubagentExecutor 扩展**：`model?: string` → `agentOptions: model ? { model } : undefined`；结算后 `resolvedModel = run.localAgent?.options?.model ?? null` 并入 outcome。
 
-## 7. 数据流（startTask 改造点）
+## 7. 数据流
 
 ```text
-kingdom_start_task（工具边界，SUPERVISOR 会话）
-  ├─ sessionPrincipal(exec) → requireRole(SUPERVISOR)      [不变]
-  └─ resolveWorkerExecution(store, ctx, task, {subagents, globalProvider, parent: exec.agent, signal})
-       ├─ 失败 → 明确错误（不启动 Execution）
-       └─ 成功 → startTask(store, executor, ctx, {taskId})
-            ├─ insertExecution(..., runtime_source, provider, requested_model,
-            │                    observed_model: null, worker_binding_id, session_id: null)
-            ├─ SESSION_STARTED / WORKER_EXECUTION_STARTED 事件 payload 增补
-            │     provider / runtime_source / requested_model
-            ├─ executor.execute(task, context) → outcome（含 observedModel）
-            └─ settleExecution 落 worker_results + transitionExecution(COMPLETED/FAILED)
-                 + 结算事件 payload 增补 observed_model
+kingdom_start_task（SUPERVISOR 会话；requireRole 不变）
+  └─ resolveWorkerExecution → startTask
+       ├─ insertExecution(证据列 start 态 + 快照 requested/source 节)
+       ├─ SESSION_STARTED / WORKER_EXECUTION_STARTED payload += provider/provider_source/requested_model/model_source
+       ├─ executor.execute → outcome.resolvedModel
+       └─ settleExecution：落 worker_results + 证据列补 resolved_model + 快照 resolved 节
+            + 结算事件 payload += resolved_model
 ```
 
 ## 8. 事件与审计
 
 | 事件 | payload 增补 |
 |---|---|
-| `SESSION_STARTED` / `WORKER_EXECUTION_STARTED` | `provider`、`runtime_source`、`requested_model` |
-| 结算事件（RESULT_CLAIMED / WORKER_EXECUTION_FAILED 等） | `observed_model`（可空，注明 seam 限制） |
+| SESSION_STARTED / WORKER_EXECUTION_STARTED | `provider`、`provider_source`、`requested_model`、`model_source` |
+| 结算事件（RESULT_CLAIMED / WORKER_EXECUTION_FAILED 等） | `resolved_model`（可空，seam 限制明示） |
+| 新事件 `EXECUTION_PROFILE_UPDATED` | actor=OWNER（实际操作者）、target=binding、payload={role_type, provider, model} |
 
-事件是审计面（完整 id 等照旧）；**结构化证据以 executions 列为准**（边界 5：不只写事件文本）。
+结构化证据以 executions 列为准（边界 5）。
 
-## 9. requested vs observed 语义（边界 6）
+## 9. requested / resolved /（未来 observed）语义
 
 | 字段 | 值 | 语义 |
 |---|---|---|
-| `requested_model` | profile.model / null | 请求了什么（null = 继承父 Agent/Supervisor，DSH 语义） |
-| `observed_model` | `run.localAgent?.options?.model ?? null` | in-process 实际解析到的模型；`null` = seam 未暴露（remote/不可观察），**不是"无模型"** |
+| `requested_model` | profile.model / null | 请求了什么（null=继承父 Agent） |
+| `resolved_model` | `run.localAgent?.options?.model ?? null` | **DSH Runtime 解析后的有效模型**；null=seam 无证据（非"无模型"） |
+| `observed_model` | （未来） | Provider/API transport 实际观测，DSH 提供 telemetry 后引入 |
 
-文档与 GUI 不把 `observed_model=null` 渲染成"没有模型"；README 明确：DSH 子 agent 的模型解析在宿主内部（descriptor.agentModel），插件记录 requested 与可观察的 observed 之差，不臆造事实。
+GUI 三分类展示：**席位标注模型**（model_name）≠ **执行配置模型**（profile.model）≠ **最近实际解析模型**（resolved_model）——不混淆。
 
-## 10. 兼容性与迁移
+## 10. 兼容性
 
-- 两个幂等 `ADD COLUMN`（`ensureExecutionProfileColumns`），旧库开库即收敛，SCHEMA_VERSION 保持 1（非破坏性迁移，沿用零迁移哲学）。
-- 未配置 execution_profile 的既有绑定：自动走 `global-fallback`（行为与 v0.5.x 完全一致，但从此有证据）。
-- `binding.model_name`（v0.4 席位元数据）**不**升级为执行配置——避免"自报变事实"（边界 6）；README 明确两者分工。
-- GUI：角色绑定面板可选增加 execution_profile 编辑（v0.6.0 范围）；BindingView 只读展示 `runtimeSource` 派生信息（不暴露内部配置细节）。
+- 未配置 profile 的绑定：自动 `global-fallback` + `parent-inherited`（行为与 v0.5.x 一致，但从此有证据）——E3。
+- `binding.model_name` 永不参与执行解析（硬不变量 + 测试锁定）。
+- GUI BindingView：只读展示执行配置（不暴露内部细节）。
 
 ## 11. 测试计划
 
-1. **单元（node --test，:memory:）**：
-   - resolveWorkerExecution：binding profile 优先 / fallback 证据 / provider 非法拒绝 / assigned_binding 缺失拒绝；
-   - insertExecution 快照列写入且 transitionExecution 不改写；
-   - DshSubagentExecutor：agentOptions.model 传递（fake subagents 捕获请求）、observedModel 提取（fake run.localAgent）。
-2. **集成（真实王国冒烟，备份含 WAL）**：配置两个 Worker profile（A: spawn+model-A、B: fork+model-B）→ 各自执行 → executions 行与事件证据核对。
-3. **M1-D（v0.6.0 Release Gate，硬性）**：4+1 Session 对抗矩阵（S0-S3+SX，19 行用户矩阵）全 PASS + 运行归属实验（Worker A/B 不同 profile，runtime evidence 证明 executions.provider/requested_model/runtime_source 与绑定一致，且 observed_model 记录诚实）。
+1. **Migration**：v1 旧库打开 → schema_version=2 + 全部预期列存在（事务原子性）。
+2. **setExecutionProfile 治理**：session-bound 下 OWNER-only / 其他角色 DENY / declarative 保持；profile 校验（非法 JSON/未知键拒绝）。
+3. **resolveWorkerExecution**：E1/E2/E3 三 case（见下）；硬不变量（model_name 不被读取）。
+4. **DshSubagentExecutor**：agentOptions.model 传递、resolvedModel 提取（fake）。
+5. **M1-D（Release Gate）**：4+1 Session 矩阵（19 行用户矩阵）+ 运行归属：
 
-## 12. 待用户裁决点
+### E1：Binding 完全指定（必须 PASS）
+```text
+profile {provider=A, model=Model-A}
+→ provider=A, provider_source=binding, requested_model=Model-A,
+  resolved_model=Model-A, model_source=binding
+```
 
-1. **executions 用 4 个独立列**（推荐，可 SQL 直查）还是单 `execution_profile_json` 快照列？
-2. **observed_model 来源**用 in-process `run.localAgent.options.model`（诚实、仅 in-process 可得；remote 记 null）——是否接受该 seam 边界？
-3. **binding.model_name 保持"席位元数据"**（执行配置只看 execution_profile，避免自报变事实）——确认该分工？
-4. 迁移方式沿用幂等 ADD COLUMN（SCHEMA_VERSION 保持 1）——确认？
+### E2：Binding 只指定 Provider（必须如实记录继承）
+```text
+profile {provider=B}，Supervisor=Model-S
+→ provider=B, provider_source=binding, requested_model=null,
+  resolved_model=Model-S, model_source=parent-inherited
+```
 
-裁决通过后：实现 → 测试 → M1-D E2E → v0.6.0 发布（release.ps1 + 知识同步）。
+### E3：完全无 Profile（fallback 证据）
+```text
+profile=null
+→ provider=global workerProvider, provider_source=global-fallback,
+  requested_model=null, model_source=parent-inherited
+```
+
+## 12. 已冻结的裁决记录
+
+| # | 裁决 | 结论 |
+|---|---|---|
+| 1 | 4 列 vs JSON | **双轨**：独立列（核心证据）+ 不可变快照 JSON（扩展参数） |
+| 2 | observed seam | 接受，**改名 `resolved_model`**（DSH 解析结果）；observed 留给未来 telemetry |
+| 3 | model_name 只做席位元数据 | 确认 + **硬不变量**（Factory 禁止读取）+ 测试锁定 |
+| 4 | ADD COLUMN + v1 | **否决**：`SCHEMA_VERSION=2`，正式 v1→v2 事务化迁移 |
+| 追加 | ExecutionProfile 治理 | 修改走 Trusted Admin Plane（独立工具 `kingdom_set_execution_profile`） |
+| 追加 | options | v1 冻结 `{provider?, model?}`，无透传；未来逐项 allowlist 进 schema |

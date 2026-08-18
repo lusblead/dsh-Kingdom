@@ -26,12 +26,15 @@ import {
 /**
  * 记录在 kingdoms.schema_version 上的值。
  *
- * Phase 2 **刻意保持 1**：本插件没有任何按版本号分支的 migration 逻辑，
- * 建表全部幂等，任何 0.2.0 打开的旧库都会在开库瞬间收敛到同一套 6 表结构。
- * 此时把新库标成 2、旧库留在 1，只会制造一个「同结构不同版本号」的假差异。
- * 真正引入破坏性 migration 时再启用这个字段作为 gate。
+ * v0.6.0（M1-C）正式引入 Schema v2（用户裁决）：
+ * - v1：0.x–0.5.x 全部版本，幂等 DDL 收敛（worker_results/executions/events.seq/session_meta 均 additive）；
+ * - v2：role_bindings.execution_profile_json + executions 执行证据列（executor_kind/provider/
+ *   provider_source/requested_model/resolved_model/model_source/execution_profile_json），
+ *   引入**事务化幂等迁移**（ensureSchemaV2）：PRAGMA gate → ADD COLUMN → verify → version bump，
+ *   失败 ROLLBACK。新库直接建 v2，旧库开库即收敛 v1→v2。
+ * 未来 v3 同理（Versioned + transactional + idempotent ADD COLUMN，不重建表）。
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS kingdoms (
@@ -163,6 +166,12 @@ export interface RoleBindingRow {
   model_name: string | null
   agent_name: string | null
   session_meta: string | null
+  /**
+   * v0.6.0（M1-C）：执行配置（ExecutionProfileV1 JSON：{provider?, model?}）。
+   * 与 model_name 严格分工：model_name 只是席位展示元数据，**ExecutorFactory 禁止读取**；
+   * 执行解析只读本字段。非法 JSON 视为未配置。
+   */
+  execution_profile_json: string | null
   principal_id: string | null
   created_at: string
   updated_at: string
@@ -229,6 +238,23 @@ export interface ExecutionRow {
    * `RUNNING` 并带 `pause_requested_at`（GUI 应显示"准备休息"而不是"已睡着"）。
    */
   pause_requested_at: string | null
+  /**
+   * v0.6.0（M1-C）执行证据列（不可变快照：start 时写入，结算时一次性补 resolved_model）。
+   * 回答"哪个 Worker / 哪个 provider / 哪个 model / 哪个 run / 第几次 attempt"。
+   */
+  executor_kind: string | null
+  /** 最终 subagent provider 名。 */
+  provider: string | null
+  /** 'binding' | 'global-fallback'。 */
+  provider_source: string | null
+  /** profile.model ?? null（null=继承父 Agent）。 */
+  requested_model: string | null
+  /** DSH Runtime 解析后的有效模型（in-process 可观察）；null=seam 无证据。 */
+  resolved_model: string | null
+  /** 'binding' | 'parent-inherited' | 'unknown'。 */
+  model_source: string | null
+  /** 不可变执行解析快照 JSON（requested/resolved/source 三节；关键字段以列为准）。 */
+  execution_profile_json: string | null
 }
 
 /** tasks 行（Phase 1 schema，Phase 2 一字未改）。status 语义见 ./task.ts。 */
@@ -285,6 +311,7 @@ export class KingdomStore {
     this.db.exec(SCHEMA_SQL)
     this.ensureEventSequence()
     this.ensureSessionProfileColumns()
+    this.ensureSchemaV2()
   }
 
   /**
@@ -301,6 +328,61 @@ export class KingdomStore {
       if (!names.has(column)) {
         this.db.exec(`ALTER TABLE role_bindings ADD COLUMN ${column} TEXT`)
       }
+    }
+  }
+
+  /**
+   * v0.6.0（M1-C，用户裁决 ④）：正式 Schema v2 迁移。
+   *
+   * Versioned + transactional + idempotent ADD COLUMN：
+   * 1. 读 kingdoms.schema_version 判定是否需要升级（v1 → v2；新库建表后即 v2 无需动）；
+   * 2. BEGIN IMMEDIATE → PRAGMA table_info gate 逐列 ADD COLUMN（缺啥补啥）→
+   *    verify 全部预期列存在（缺失即抛错）→ UPDATE schema_version=2 → COMMIT；
+   * 3. 任一步失败 ROLLBACK，开库即失败（fail-loud，不留下半迁移的库）。
+   *
+   * 仍保持"增量、安全、不重建"：ADD COLUMN 是 O(1) 元数据操作。
+   */
+  private ensureSchemaV2(): void {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(schema_version), 0) AS v FROM kingdoms')
+      .get() as unknown as { v: number } | undefined
+    if ((row?.v ?? 0) >= SCHEMA_VERSION) return
+
+    const bindingColumns = ['execution_profile_json'] as const
+    const executionColumns = [
+      'executor_kind', 'provider', 'provider_source',
+      'requested_model', 'resolved_model', 'model_source',
+      'execution_profile_json',
+    ] as const
+
+    const tableColumns = (table: string): Set<string> => new Set(
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map(c => c.name),
+    )
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const bindings = tableColumns('role_bindings')
+      for (const column of bindingColumns) {
+        if (!bindings.has(column)) this.db.exec(`ALTER TABLE role_bindings ADD COLUMN ${column} TEXT`)
+      }
+      const executions = tableColumns('executions')
+      for (const column of executionColumns) {
+        if (!executions.has(column)) this.db.exec(`ALTER TABLE executions ADD COLUMN ${column} TEXT`)
+      }
+      // verify：全部预期列必须存在，缺失即失败（fail-loud，不静默通过半迁移）
+      const afterBindings = tableColumns('role_bindings')
+      const afterExecutions = tableColumns('executions')
+      for (const column of bindingColumns) {
+        if (!afterBindings.has(column)) throw new Error(`Schema v2 migration failed: role_bindings.${column} missing`)
+      }
+      for (const column of executionColumns) {
+        if (!afterExecutions.has(column)) throw new Error(`Schema v2 migration failed: executions.${column} missing`)
+      }
+      this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(SCHEMA_VERSION)
+      this.db.exec('COMMIT')
+    } catch (error: unknown) {
+      this.db.exec('ROLLBACK')
+      throw error
     }
   }
 
@@ -493,6 +575,11 @@ export class KingdomStore {
   /** 兼容旧调用面：仅换 session（委托给 updateBindingProfile）。 */
   updateBindingSession(bindingId: string, sessionId: string | null, updatedAt: string): void {
     this.updateBindingProfile(bindingId, { sessionId }, updatedAt)
+  }
+
+  /** v0.6.0（M1-C）：执行配置（execution_profile_json）独立写入通道。 */
+  setExecutionProfileJson(bindingId: string, json: string | null): void {
+    this.db.prepare('UPDATE role_bindings SET execution_profile_json = ? WHERE binding_id = ?').run(json, bindingId)
   }
 
   /** v0.4：解绑（换届通道）。治理上由调用方决定谁可解绑；OWNER 由上层保护。 */
@@ -767,8 +854,10 @@ export class KingdomStore {
       .prepare(
         `INSERT INTO executions
            (execution_id, task_id, attempt_no, worker_binding_id, session_id, state, detail,
-            started_at, heartbeat_at, ended_at, pause_requested_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            started_at, heartbeat_at, ended_at, pause_requested_at,
+            executor_kind, provider, provider_source, requested_model, resolved_model, model_source,
+            execution_profile_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.execution_id,
@@ -782,8 +871,33 @@ export class KingdomStore {
         row.heartbeat_at,
         row.ended_at,
         row.pause_requested_at,
+        row.executor_kind,
+        row.provider,
+        row.provider_source,
+        row.requested_model,
+        row.resolved_model,
+        row.model_source,
+        row.execution_profile_json,
       )
     return row
+  }
+
+  /**
+   * v0.6.0（M1-C）：结算时**一次性**补执行证据（resolved_model + 快照 resolved 节）。
+   *
+   * 证据列是不可变快照：start 时写 requested/source，此处只补 resolved——代码上
+   * 全库唯一 UPDATE 证据列的位置，之后不再改写（transitionExecution 不触碰证据列）。
+   */
+  updateExecutionResolvedEvidence(
+    executionId: string,
+    resolvedModel: string | null,
+    profileJson: string | null,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE executions SET resolved_model = ?, execution_profile_json = ? WHERE execution_id = ?`,
+      )
+      .run(resolvedModel, profileJson, executionId)
   }
 
   /**

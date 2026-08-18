@@ -18,7 +18,8 @@ import { randomUUID } from 'node:crypto'
 import { asTaskStatus, REVIEW_DECISION_TARGET, type ReviewDecision } from './task.js'
 import { asExecutionState, isLiveExecutionState } from './execution.js'
 import type { EventRow, ExecutionRow, KingdomStore, RoleBindingRow, TaskRow } from './db.js'
-import type { WorkerContext, WorkerExecutor } from '../worker/executor.js'
+import type { ExecutorInfo, WorkerContext, WorkerExecutor } from '../worker/executor.js'
+import { buildExecutionProfileSnapshot } from '../worker/executor-factory.js'
 import type { AllowedAction, AuthView, CommandResultView, KingdomErrorCode } from '../gui/contract.js'
 import { allowedActionsFor, toEventView, toExecutionView, toTaskView } from '../gui/snapshot.js'
 
@@ -385,7 +386,19 @@ export async function startTask(
   const previous = store.latestWorkerResult(task.task_id)
   const reworkReason = attemptNo > 1 ? lastReworkReason(store, ctx.kingdomId, task.task_id) : undefined
 
-  // ── 建立本轮 Execution（运行事实）──
+  // ── 建立本轮 Execution（运行事实；v0.6.0 携带执行证据列）──
+  const info = executor.info
+  const evidence = {
+    executor_kind: executor.kind,
+    provider: info?.provider ?? null,
+    provider_source: info?.providerSource ?? null,
+    requested_model: info?.requestedModel ?? null,
+    resolved_model: null, // 结算时一次性补全
+    model_source: info?.modelSource ?? null,
+    execution_profile_json: info
+      ? buildExecutionProfileSnapshot(info, null)
+      : null,
+  }
   let execution = store.insertExecution({
     execution_id: randomUUID(),
     task_id: task.task_id,
@@ -398,17 +411,28 @@ export async function startTask(
     heartbeat_at: now(),
     ended_at: null,
     pause_requested_at: null,
+    ...evidence,
   })
   collector.emit('SESSION_STARTED',
     { role: 'SUPERVISOR', id: role.binding.binding_id },
     { type: 'execution', id: execution.execution_id },
-    { task_id: task.task_id, attempt_no: attemptNo, worker_binding_id: task.assigned_binding_id, executor: executor.kind })
+    {
+      task_id: task.task_id, attempt_no: attemptNo, worker_binding_id: task.assigned_binding_id,
+      executor: executor.kind,
+      provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
+      requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
+    })
 
   execution = store.transitionExecution(execution, 'RUNNING')
   collector.emit('WORKER_EXECUTION_STARTED',
     { role: 'SUPERVISOR', id: role.binding.binding_id },
     { type: 'task', id: task.task_id },
-    { attempt_no: attemptNo, execution_id: execution.execution_id, worker_binding_id: task.assigned_binding_id, executor: executor.kind })
+    {
+      attempt_no: attemptNo, execution_id: execution.execution_id, worker_binding_id: task.assigned_binding_id,
+      executor: executor.kind,
+      provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
+      requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
+    })
 
   const context: WorkerContext = {
     task,
@@ -426,6 +450,8 @@ export async function startTask(
   try {
     return settleExecution(store, ctx, collector, role.binding, {
       task, execution, attemptNo, outcome, executorKind: executor.kind,
+      resolvedModel: outcome.resolvedModel ?? null,
+      info,
     })
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
@@ -451,10 +477,23 @@ function settleExecution(
     attemptNo: number
     outcome: Awaited<ReturnType<WorkerExecutor['execute']>>
     executorKind: string
+    resolvedModel: string | null
+    info: ExecutorInfo | undefined
   },
 ): CommandResultView {
-  const { attemptNo, outcome, executorKind } = args
+  const { attemptNo, outcome, executorKind, resolvedModel, info } = args
   let { task, execution } = args
+
+  // v0.6.0（M1-C）：结算时一次性补执行证据（resolved_model + 快照 resolved 节，此后不再改写）。
+  store.updateExecutionResolvedEvidence(
+    execution.execution_id,
+    resolvedModel,
+    buildExecutionProfileSnapshot(info ?? {
+      provider: 'unknown', providerSource: 'global-fallback',
+      requestedModel: null, modelSource: 'unknown',
+    }, resolvedModel),
+  )
+  execution = { ...execution, resolved_model: resolvedModel }
 
   if (outcome.kind === 'executor-failure') {
     // 宿主观察到的运行事实：executor 没产出合法 Result（裁决 6）。
@@ -473,6 +512,11 @@ function settleExecution(
         session_id: outcome.sessionId,
         executor: executorKind,
         reason: outcome.reason,
+        provider: info?.provider ?? null,
+        provider_source: info?.providerSource ?? null,
+        requested_model: info?.requestedModel ?? null,
+        resolved_model: resolvedModel,
+        model_source: info?.modelSource ?? null,
       })
     collector.emit('SESSION_FAILED',
       { role: 'SUPERVISOR', id: reviewer.binding_id },
@@ -510,6 +554,11 @@ function settleExecution(
       claimed_outcome: claim.outcome,
       session_id: outcome.sessionId,
       executor: executorKind,
+      provider: info?.provider ?? null,
+      provider_source: info?.providerSource ?? null,
+      requested_model: info?.requestedModel ?? null,
+      resolved_model: resolvedModel,
+      model_source: info?.modelSource ?? null,
     })
   // Execution 结束 ≠ 任务完成：GUI 收到它只移除人物 Sprite，组织节点保留。
   collector.emit('SESSION_STOPPED',

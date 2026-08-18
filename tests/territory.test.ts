@@ -78,6 +78,14 @@ function seedLiveExecution(store: KingdomStore, taskId: string, state = 'RUNNING
     heartbeat_at: NOW(),
     ended_at: null,
     pause_requested_at: null,
+    // v0.6.0 执行证据列（测试种子不涉及执行解析，全 null）
+    executor_kind: null,
+    provider: null,
+    provider_source: null,
+    requested_model: null,
+    resolved_model: null,
+    model_source: null,
+    execution_profile_json: null,
   }
   store.insertExecution(row)
   return row

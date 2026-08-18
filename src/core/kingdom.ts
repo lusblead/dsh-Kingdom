@@ -92,6 +92,7 @@ export class KingdomManager {
         model_name: null,
         agent_name: null,
         session_meta: null,
+        execution_profile_json: null,
         principal_id: ownerId,
         created_at: now,
         updated_at: now,

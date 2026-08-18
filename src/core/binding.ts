@@ -34,6 +34,90 @@ export interface SessionIdentity {
   sessionMeta?: Record<string, unknown> | string | null
 }
 
+/**
+ * v0.6.0（M1-C）执行配置（v1 冻结）。
+ *
+ * 只表达执行能力的两维；**无 options 透传**（未来 reasoning/temperature/tool policy 等
+ * 逐项 allowlist 进 schema）。与 `model_name`（席位展示元数据）严格分工：
+ * ExecutorFactory 解析执行时**禁止读取** binding.model_name。
+ */
+export interface ExecutionProfileV1 {
+  /** subagent provider 名（spawn/fork）。缺省 → 回退全局 workerProvider（global-fallback 证据）。 */
+  provider?: string
+  /** requested model（传给子 agent 的 agentOptions.model）。缺省 → 继承父 Agent（parent-inherited 证据）。 */
+  model?: string
+}
+
+/** setExecutionProfile 输入。 */
+export interface SetExecutionProfileInput {
+  kingdomId: string
+  /** 二选一：roleType 或 bindingId。 */
+  roleType?: string
+  bindingId?: string
+  /** profile 本体；null = 清空执行配置（回退全局）。 */
+  profile: ExecutionProfileV1 | null
+}
+
+/** 解析 role_bindings.execution_profile_json；非法 JSON = 未配置（不猜）。 */
+export function parseExecutionProfile(json: string | null): ExecutionProfileV1 | null {
+  if (!json) return null
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const profile = parsed as Record<string, unknown>
+    const out: ExecutionProfileV1 = {}
+    if (typeof profile.provider === 'string' && profile.provider.trim().length > 0) out.provider = profile.provider.trim()
+    if (typeof profile.model === 'string' && profile.model.trim().length > 0) out.model = profile.model.trim()
+    return Object.keys(out).length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * v0.6.0（M1-C）：设置/清空角色执行配置（组织资源配置，治理对象）。
+ *
+ * 必须走 Trusted Governance Administration Plane（requireAdmin）：
+ * session-bound 下仅真实 OWNER 会话可执行；declarative 演示模式保持现状。
+ * 独立工具面 `kingdom_set_execution_profile`，不塞进 bind_session
+ * （治理身份 Session 与执行能力 Profile 不混用）。
+ */
+export function setExecutionProfile(store: KingdomStore, input: SetExecutionProfileInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth)
+  if (!admin.ok) return admin.message
+  const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
+  if (binding === null) {
+    return input.bindingId?.trim()
+      ? `错误：找不到绑定 ${input.bindingId.trim()}（请核对 binding_id 是否属于当前王国）。`
+      : `错误：当前王国没有 ${input.roleType?.trim().toUpperCase()} 角色绑定可配置执行环境。`
+  }
+  const json = input.profile === null ? null : JSON.stringify(input.profile)
+  // execution_profile_json 有独立写入通道（不混入 updateBindingProfile 的身份 patch 面）
+  store.setExecutionProfileJson(binding.binding_id, json)
+  const after = store.getBindingById(binding.binding_id)
+  store.appendEvent({
+    event_id: randomUUID(),
+    kingdom_id: input.kingdomId,
+    event_type: 'EXECUTION_PROFILE_UPDATED',
+    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_id: admin.owner?.binding_id ?? null,
+    target_type: 'binding',
+    target_id: binding.binding_id,
+    payload_json: JSON.stringify({
+      role_type: binding.role_type,
+      role_name: binding.role_name,
+      provider: input.profile?.provider ?? null,
+      model: input.profile?.model ?? null,
+      cleared: input.profile === null,
+    }),
+    created_at: new Date().toISOString(),
+  })
+  const desc = input.profile === null
+    ? '执行配置已清空（将回退全局 workerProvider）'
+    : `执行配置已更新：provider=${input.profile.provider ?? '（全局回退）'}，model=${input.profile.model ?? '（继承父 Agent）'}`
+  return `角色 ${binding.role_type}（${binding.role_name}）${desc}。`
+}
+
 /** 把 session_meta 归一化为可入库的 JSON 字符串（非法 JSON 一律落 null，不猜）。 */
 export function normalizeSessionMeta(meta: Record<string, unknown> | string | null | undefined): string | null {
   if (meta === undefined || meta === null) return null
@@ -144,6 +228,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
     model_name: modelName,
     agent_name: agentName,
     session_meta: sessionMeta,
+    execution_profile_json: null,
     principal_id: null,
     created_at: now,
     updated_at: now,

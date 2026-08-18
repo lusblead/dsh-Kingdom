@@ -26,7 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { KingdomManager } from './core/kingdom.js'
-import { bindRole, listBindings, rebindSession, unbindRole } from './core/binding.js'
+import { bindRole, listBindings, rebindSession, setExecutionProfile, unbindRole } from './core/binding.js'
 import { createTerritory, deleteTerritory, listTerritories } from './core/territory.js'
 import {
   abortExecution,
@@ -44,7 +44,8 @@ import {
 import { buildSnapshot, buildTaskDetail, toEventView } from './gui/snapshot.js'
 import { startGuiServer } from './gui/server.js'
 import { guiWriteGuard, type AuthView, type CommandResultView } from './gui/contract.js'
-import { DshSubagentExecutor, type SubagentsLike } from './worker/dsh-subagent.js'
+import type { SubagentsLike } from './worker/dsh-subagent.js'
+import { resolveWorkerExecution } from './worker/executor-factory.js'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 
 export const name = 'dsh-kingdom'
@@ -376,6 +377,54 @@ export function apply(ctx: Context, config: Config): void {
     },
   })), 'dsh-kingdom: list-bindings tool')
 
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_set_execution_profile',
+    description: '设置/清空角色（通常 WORKER）的执行配置 ExecutionProfile {provider, model}——组织资源配置，治理对象：session-bound 下仅真实 OWNER 会话可执行。provider 缺省回退全局 workerProvider；model 缺省继承父 Agent（均留证据）。传空对象或 null 清空配置',
+    parameters: {
+      role_type: { type: 'string', description: '角色：OWNER/CHANCELLOR/SUPERVISOR/WORKER（与 binding_id 二选一）' },
+      binding_id: { type: 'string', description: '绑定 id（与 role_type 二选一）' },
+      provider: { type: 'string', description: 'subagent provider 名（如 spawn/fork）；缺省回退全局 workerProvider' },
+      model: { type: 'string', description: 'requested model（如 deepseek-v4-pro / gpt-5.6）；缺省继承父 Agent' },
+      clear: { type: 'boolean', description: 'true = 清空执行配置（回退全局）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: {
+      role_type?: string
+      binding_id?: string
+      provider?: string
+      model?: string
+      clear?: boolean
+    }, exec: { agent?: { session?: { id?: string } } | null }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      if (!args.role_type && !args.binding_id) return '错误：请提供 role_type 或 binding_id 指定要配置的绑定。'
+      if (args.clear) {
+        return setExecutionProfile(store, { kingdomId, roleType: args.role_type, bindingId: args.binding_id, profile: null }, {
+          mode: config.authMode,
+          principalSessionId: sessionPrincipal(exec)?.sessionId,
+        })
+      }
+      if (!args.provider && !args.model) {
+        return '错误：请至少提供 provider 或 model 之一（或传 clear=true 清空配置）。'
+      }
+      return setExecutionProfile(store, {
+        kingdomId,
+        roleType: args.role_type,
+        bindingId: args.binding_id,
+        profile: {
+          ...args.provider ? { provider: args.provider } : {},
+          ...args.model ? { model: args.model } : {},
+        },
+      }, {
+        mode: config.authMode,
+        principalSessionId: sessionPrincipal(exec)?.sessionId,
+      })
+    },
+  })), 'dsh-kingdom: set-execution-profile tool')
+
   // ── Phase 2：Task 治理闭环（5 个工具）──────────────────────────
   //
   // 注意这里**没有** kingdom_report_result 工具。Worker 是 one-shot subagent，
@@ -458,13 +507,19 @@ export function apply(ctx: Context, config: Config): void {
         return '错误：kingdom_start_task 需要由 Agent 调用（缺少委派父 Agent），无法启动 Worker subagent。'
       }
 
-      const executor = new DshSubagentExecutor({
+      const loadedTask = store.getTask(args.task_id)
+      if (!loadedTask) return `错误：找不到任务 ${args.task_id}。`
+
+      // v0.6.0（M1-C）：唯一执行解析入口——assigned_binding_id → Binding → ExecutionProfile → Executor。
+      const resolved = resolveWorkerExecution(store, loadedTask, {
         subagents,
-        provider: config.workerProvider || 'spawn',
+        globalProvider: config.workerProvider || 'spawn',
         parent: exec.agent,
         signal: exec.signal,
       })
-      const result = await startTask(store, executor, commandContext(kingdomId, sessionPrincipal(exec)), { taskId: args.task_id })
+      if (!resolved.ok) return resolved.error
+
+      const result = await startTask(store, resolved.executor, commandContext(kingdomId, sessionPrincipal(exec)), { taskId: args.task_id })
       return result.message
     },
   })), 'dsh-kingdom: start-task tool')

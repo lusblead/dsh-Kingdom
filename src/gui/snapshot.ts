@@ -35,6 +35,7 @@ import {
 } from '../core/db.js'
 import { asExecutionState, isLiveExecutionState } from '../core/execution.js'
 import { asTaskStatus } from '../core/task.js'
+import { parseExecutionProfile } from '../core/binding.js'
 
 // ── 行 → 视图 ───────────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ export function toEventView(row: EventRow): EventView {
 }
 
 export function toBindingView(row: RoleBindingRow): BindingView {
+  const profile = parseExecutionProfile(row.execution_profile_json)
   return {
     bindingId: row.binding_id,
     roleType: row.role_type,
@@ -78,6 +80,7 @@ export function toBindingView(row: RoleBindingRow): BindingView {
     modelName: row.model_name,
     agentName: row.agent_name,
     sessionMeta: row.session_meta ? parseJson(row.session_meta) : null,
+    executionProfile: profile ? { provider: profile.provider ?? null, model: profile.model ?? null } : null,
     createdAt: row.created_at,
   }
 }

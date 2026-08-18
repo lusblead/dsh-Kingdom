@@ -51,15 +51,37 @@ export interface WorkerContext {
  *
  * 注意这两者的区别就是 Phase 2 的治理核心：Worker 说自己失败了是 Claim（走 REVIEW），
  * 宿主看见 executor 没跑出合法结果是 Fact（直接 FAILED）。
+ *
+ * v0.6.0（M1-C）：两种结局都携带 `resolvedModel`（DSH Runtime 解析后的有效模型；
+ * in-process 可观察，remote/不可观察为 null——seam 无证据，不是"无模型"）。
  */
 export type WorkerExecutionOutcome =
-  | { kind: 'result'; result: StructuredResult; sessionId: string | null }
-  | { kind: 'executor-failure'; reason: string; sessionId: string | null }
+  | { kind: 'result'; result: StructuredResult; sessionId: string | null; resolvedModel?: string | null }
+  | { kind: 'executor-failure'; reason: string; sessionId: string | null; resolvedModel?: string | null }
+
+/**
+ * v0.6.0（M1-C）：执行器解析信息（ExecutorFactory 的解析结果，随 executor 携带）。
+ *
+ * Core 不自己解析 provider/model——信息经本字段从执行器带到落库点。
+ * `resolvedModel` 不在 info 里（执行后才知道），经 outcome 返回。
+ */
+export interface ExecutorInfo {
+  /** 最终 subagent provider 名。 */
+  provider: string
+  /** 'binding' | 'global-fallback'。 */
+  providerSource: 'binding' | 'global-fallback'
+  /** profile.model ?? null（null=继承父 Agent）。 */
+  requestedModel: string | null
+  /** 'binding' | 'parent-inherited' | 'unknown'。 */
+  modelSource: 'binding' | 'parent-inherited' | 'unknown'
+}
 
 /** 薄执行封装。Task Core 只认这一个接口。 */
 export interface WorkerExecutor {
   /** 供事件/诊断使用的执行器标识（如 `dsh-subagent:spawn`）。 */
   readonly kind: string
+  /** v0.6.0：执行解析信息（可选——fake/测试执行器可不提供，落库为 null）。 */
+  readonly info?: ExecutorInfo
   execute(task: TaskRow, ctx: WorkerContext): Promise<WorkerExecutionOutcome>
 }
 

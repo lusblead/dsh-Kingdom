@@ -25,6 +25,7 @@ import {
   buildWorkerPrompt,
   parseStructuredResult,
   WORKER_OUTPUT_SCHEMA,
+  type ExecutorInfo,
   type WorkerContext,
   type WorkerExecutionOutcome,
   type WorkerExecutor,
@@ -52,6 +53,8 @@ export interface SubagentsLike {
     parent: unknown
     signal: AbortSignal
     outputSchema?: unknown
+    /** v0.6.0（M1-C）：requested model（对应 dsh SubagentStartRequest.agentOptions.model）。 */
+    agentOptions?: { model?: string }
   }): Promise<SubagentRunLike>
   getProvider(name: string): unknown
   list(): string[]
@@ -64,12 +67,19 @@ export interface DshSubagentExecutorOptions {
   /** provider 名（dsh base bundle 默认注册 `spawn` / `fork`）。 */
   provider: string
   /**
+   * v0.6.0（M1-C）：requested model（ExecutionProfile.model）。
+   * 传给子 agent 的 `agentOptions.model`（缺省=继承父 Agent/Supervisor）。
+   */
+  model?: string | null
+  /**
    * 发起委派的父 Agent（来自工具执行上下文 `exec.agent`）。
    * in-process provider 从它派生 workspace / 血缘 / 委派深度。
    */
   parent: unknown
   /** 调用方的取消信号（`exec.signal`）。 */
   signal: AbortSignal
+  /** v0.6.0：执行解析信息（ExecutorFactory 提供，随 executor 落库）。 */
+  info?: ExecutorInfo
 }
 
 /**
@@ -96,16 +106,18 @@ function stopReasonFailure(stopReason: string): string | null {
  */
 export class DshSubagentExecutor implements WorkerExecutor {
   readonly kind: string
+  readonly info?: ExecutorInfo
 
   private readonly options: DshSubagentExecutorOptions
 
   constructor(options: DshSubagentExecutorOptions) {
     this.options = options
     this.kind = `dsh-subagent:${options.provider}`
+    this.info = options.info
   }
 
   async execute(task: TaskRow, context: WorkerContext): Promise<WorkerExecutionOutcome> {
-    const { subagents, provider, parent, signal } = this.options
+    const { subagents, provider, model, parent, signal } = this.options
 
     if (subagents.getProvider(provider) === undefined) {
       const available = subagents.list()
@@ -126,6 +138,8 @@ export class DshSubagentExecutor implements WorkerExecutor {
         parent,
         signal,
         outputSchema: WORKER_OUTPUT_SCHEMA,
+        // v0.6.0（M1-C）：requested model → agentOptions（缺省继承父 Agent）。
+        ...model ? { agentOptions: { model } } : {},
       })
     } catch (error: unknown) {
       return {
@@ -137,10 +151,15 @@ export class DshSubagentExecutor implements WorkerExecutor {
 
     // 已发布的 run 必须 dispose 才能达到静默，即使结果路径抛错。
     const sessionId = run.id
+    // v0.6.0：DSH Runtime 解析后的有效模型（in-process 可观察；remote=null，seam 无证据）。
+    const localAgent = (run as { localAgent?: { options?: { model?: string } } | undefined }).localAgent
+    const resolvedModel: string | null = typeof localAgent?.options?.model === 'string'
+      ? localAgent.options.model
+      : null
     try {
       const result = await run.result
       const failure = stopReasonFailure(result.stopReason)
-      if (failure !== null) return { kind: 'executor-failure', sessionId, reason: failure }
+      if (failure !== null) return { kind: 'executor-failure', sessionId, reason: failure, resolvedModel }
 
       const structured = parseStructuredResult(result.structured)
       if (structured === null) {
@@ -148,15 +167,17 @@ export class DshSubagentExecutor implements WorkerExecutor {
           kind: 'executor-failure',
           sessionId,
           reason: 'subagent 正常结束但未交回合法的结构化结果（outputSchema 未满足）',
+          resolvedModel,
         }
       }
-      return { kind: 'result', result: structured, sessionId }
+      return { kind: 'result', result: structured, sessionId, resolvedModel }
     } catch (error: unknown) {
       // run.result 只在 seam 无法表达的基础设施故障时 reject。
       return {
         kind: 'executor-failure',
         sessionId,
         reason: `subagent 运行异常：${error instanceof Error ? error.message : String(error)}`,
+        resolvedModel,
       }
     } finally {
       try {

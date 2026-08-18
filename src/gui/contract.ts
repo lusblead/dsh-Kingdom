@@ -139,6 +139,8 @@ export interface BindingView {
   modelName: string | null
   agentName: string | null
   sessionMeta: Record<string, unknown> | null
+  /** v0.6.0（M1-C）：执行配置（ExecutionProfile {provider?, model?}）只读展示；null=未配置（回退全局）。 */
+  executionProfile: { provider: string | null; model: string | null } | null
   createdAt: string
 }
 
