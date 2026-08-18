@@ -7,3 +7,4 @@ lib/
 .clean-install-home/
 .smoke/
 .p3-smoke/
+internal/
