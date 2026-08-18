@@ -5,7 +5,7 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.0--rc.5-orange)](#compatibility)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#requirements)
@@ -68,10 +68,10 @@ dsh plugin --profile web add dsh-kingdom
 
 **方式 B：从 GitHub Releases 下载 tgz**
 
-从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-0.6.0.tgz`，然后：
+从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-0.7.0.tgz`，然后：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-0.6.0.tgz
+dsh plugin --profile web add ./dsh-kingdom-0.7.0.tgz
 ```
 
 > 安装时会打印 5 条 peer dependency warning——**这是预期的**（这些包由 DSH 运行时提供），不是失败。
