@@ -22,7 +22,7 @@
  * - Worker 的结果只是 Claim（→ REVIEW），不是 Fact。
  * - 无任意 SQL 通道暴露给 Agent。
  */
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { KingdomManager } from './core/kingdom.js'
