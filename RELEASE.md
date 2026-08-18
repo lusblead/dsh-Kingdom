@@ -1,6 +1,25 @@
 # dsh-kingdom 发布手册（固定流水线）
 
-> 目标：任何版本发布走同一条可重复的链，市场侧更新自动可见，无需反复改 Awesome 条目。
+> 目标：任何版本发布走同一条可重复的链，市场侧更新自动可见，无需反复改 Awesome 条目；
+> 每次发布/维护决策变更后，同步三处知识载体，让**后续所有相关会话**都知道（见「知识同步」）。
+
+## 知识同步（让后续会话都知道）
+
+项目状态有两套「会话间知识载体」，任何**发布完成**或**维护决策变更**后都必须同步：
+
+| 载体 | 位置 | 何时更新 | 校验 |
+|---|---|---|---|
+| **Context Pack**（交接文档） | `D:\dsh\kingdom-install-test\.context-relay\packs\` | 每次阶段结束/发布后：`context_relay.py revise` 旧 pack → 更新 claims → finalize → validate → bundle | `validate` 0 error |
+| **工程经验库** | `D:\dsh\kingdom\.agent\PROJECT_EXPERIENCE.md` + Obsidian `projects/dsh-kingdom/ENGINEERING_LESSONS.md` | 新经验/新负知识产生时：`/learn` 增量（新增 PX/EL） | `validate_docs.py --root D:\dsh\kingdom` |
+
+新会话/换模型继续工作时：先读最新 Context Pack（`RESUME.md` → `HANDOFF.md`），再用 `recall_experience.py` 召回经验。
+
+## 关键维护决策（已裁决，勿回退）
+
+- **GUI 是纯本地组件**：界面、网关、数据全在用户机器上运行，不依赖任何云端服务（2026-08-18 裁决）。
+- **云端页面已停止维护**：早期实验性的 `agent-governance-ui.luyus704.chatgpt.site` 不再部署/更新；README、GUI zip 文档中的指路已移除。不要在发布流程里再引入云端部署步骤。
+- **Market 更新自动可见**：已安装用户经 npm latest / GitHub HEAD 双通道自动看到更新（TTL 30 分钟）；版本迭代无需再提 Awesome PR（仅核心定位变化才改 `data/plugins/lusblead__dsh-Kingdom.yml`）。
+- **发布物一致性**：GitHub Release（tgz + GUI zip）→ npm latest → Discussion 3064 公告，三渠道同步。
 
 ## 发布链（一条命令）
 
@@ -88,3 +107,4 @@ Market 的 `Update available` 只回答"有新版吗"；GitHub Release Notes 回
 3. Discussion 3064 出现公告评论
 4. 已安装用户（npm 安装）等待 ≤30 分钟 → dsh-market 显示 Update available
 5. 干净环境安装验证（可选）：`pwsh -File ..\kingdom-install-test\scripts\acceptance-v0X.ps1`
+6. **知识同步**：revise 更新 Context Pack（finalize + validate + bundle）+ `/learn` 经验库增量（validate_docs.py 通过）——让后续会话知道本次发布与任何决策变更
