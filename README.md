@@ -200,7 +200,10 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
 | 0.2.x | 任务治理闭环：plan/assign/execute/review + **Claim ≠ Fact** | ✅ 已发布 |
 | 0.3.x | 执行生命周期 + GUI 适配层 + 热插拔加固 | ✅ 已发布 |
 | 0.4.x | **换届与会话归属**：unbind/bind_session、会话身份预留字段、session-bound 强制校验、init 引导 | ✅ 已发布 |
+| 0.5.x | **领地删除**（拒绝优先 + force 级联 + 事件留痕）、GUI 删除控制、市场收录 | ✅ 已发布 |
 | 未来 | 多 Worker、Handoff、GUI 正式版、完整治理后端 | 🚧 规划中 |
+
+> 已安装用户经 dsh-market 自动看到新版本（Update available）；每个版本的发布说明见 [Releases](https://github.com/lusblead/dsh-Kingdom/releases)（发布流水线见 [RELEASE.md](RELEASE.md)）。
 
 ---
 
