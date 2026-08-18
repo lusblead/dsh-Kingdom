@@ -150,12 +150,12 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
 
 | 角色 | 地址 | 用途 |
 |---|---|---|
-| 前端页面 | 由 GUI 部署方提供（本地 `vite dev` / `prebuilt-dist` 静态托管 / 已部署站点） | 你打开的页面 |
+| 前端页面 | **在线页面：https://agent-governance-ui.luyus704.chatgpt.site**（无需部署，打开即用）；或本地 `vite dev` / Release 附带的 `dsh-kingdom-gui-*.zip` 自托管 | 你打开的页面 |
 | 后端数据网关 | `http://127.0.0.1:<guiPort>`（仅本机回环） | 填进**前端页面的连接框**，不要当页面打开 |
 
-### 开启网关
+### 三步用上 GUI（含"没有 GUI"的解法）
 
-在 profile 的 `cordis.patch.yml` 为 dsh-kingdom 配置端口（整段替换，需重复默认键）：
+1. **开网关**：在 profile 的 `cordis.patch.yml` 为 dsh-kingdom 配置端口（整段替换，需重复默认键）：
 
 ```yaml
 - id: dsh-kingdom
@@ -171,7 +171,11 @@ GUI 是**独立的前端**，与插件的**后端数据网关**分离：
     authMode: declarative
 ```
 
-重启 DSH 后，在前端页面连接框填入 `http://127.0.0.1:34817`。
+2. **重启 DSH**（让 guiPort 生效；`/kingdom help` 会显示网关地址）。
+3. **打开前端页面**（在线页面或本地自托管）→ 连接框填入 `http://127.0.0.1:34817` → 看到王国与操作台。
+
+> 默认安装**没有 GUI 是预期的**（`guiPort=0` 关闭、前端独立分发）：agent 说"没有 GUI"时，
+> 按上面三步开启即可。离线/内网用户可从 Release 下载 `dsh-kingdom-gui-*.zip`（prebuilt-dist）自托管。
 
 ### 操作台能力
 
