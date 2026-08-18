@@ -1,81 +1,97 @@
-# M2 Organization Scale — Scope & Architecture & Schema Design（冻结稿 v1）
+# M2 Organization Scale — 设计冻结稿 v2（APPROVED_WITH_REQUIRED_REVISIONS 已修订）
 
-> 状态：**设计冻结稿（等待 Owner Review）**——按用户裁决只做设计，不改数据库/代码/GUI。
-> v0.6.0 保持稳定基线；冻结通过后再决定 v0.7.0 实现。
-> 命题：**Kingdom 从一条治理链升级为可横向扩展的 Agent 组织。**
+> 状态：**冻结（Owner Review 修订已全部采纳）**。四项核心修订：①未指派 Territory fail-closed
+> ②Binding DELETE→RETIRED tombstone ③Territory topology 纳入 Trusted Admin Plane ④Schema v3
+> 承载历史身份与 scope 真实性。修订完成，**可直接实施**（无需第二轮批准）。v0.6.0 保持稳定基线。
 
 ---
 
-## 1. 阶段划分与依赖（用户裁决，冻结）
+## 1. 阶段划分与依赖（不变）
+
+M2-A Topology → M2-B Ledger → M2-C Multi-Worker → M2-D Handoff → M2-E Scope → M2-F Gate（v0.7.0）。
+
+## 2. 角色基数 + Binding 生命周期（M2-A，修订 ②）
+
+### 2.1 基数（不变）
+
+OWNER×1 / CHANCELLOR×1 / SUPERVISOR×N / WORKER×N。
+API：`getBindingByRole` 弃用 → `getBindingsByRole()`（只返回 ACTIVE）+ `getBindingById()`（任意状态，历史解析）。
+Singleton 是 Domain Policy：`SINGLETON_ROLES = ['OWNER','CHANCELLOR']` 创建第二个 **ACTIVE** 时拒绝；
+SUPERVISOR/WORKER 允许多 ACTIVE。
+
+### 2.2 Binding tombstone（修订 ②，冻结）
 
 ```text
-M2-A Organization Topology     角色基数、Territory 归属/Scope、Binding 生命周期
-  ↓
-M2-B Assignment Ledger         不可变任务派遣历史（Handoff/多人协作的前提）
-  ↓
-M2-C Multi-Worker              多 Worker、不同任务并发、显式选 Worker（无自动调度器）
-  ↓
-M2-D Handoff                   Worker A → Supervisor 裁决 → Worker B（基于 Ledger）
-  ↓
-M2-E Multi-Supervisor + Territory Scope   横向扩展不破坏治理
-  ↓
-M2-F Scale Gate                v0.7.0 Release Gate（多会话/多 Worker/多 Territory 对抗式 E2E）
+role_bindings
+├─ status          ACTIVE | RETIRED   （默认 ACTIVE）
+├─ retired_at
+└─ retired_reason
 ```
 
-## 2. 角色基数（M2-A，冻结）
+- `unbindRole()`：**DELETE → ACTIVE→RETIRED**（+ retired_at/retired_reason；reason 默认 '换届/解职'）；
+- `getBindingsByRole()` / `getBindingByRole()`：只返回 ACTIVE；
+- `getBindingById()`：任意状态——历史引用（task_assignments/executions/events.actor_id/territories.supervisor_binding_id）**始终可解析**（名字/角色/ExecutionProfile/退任时间）；
+- 被引用任务的旧语义保留：展示层对 RETIRED 绑定显示"已退任"，治理操作因缺 ACTIVE 绑定明确报错。
 
-| 角色 | 基数 | 语义 |
-|---|---|---|
-| OWNER | ×1 | 常驻所有者（Trusted Admin Plane 承载者） |
-| CHANCELLOR | ×1 | 规划职权（plan） |
-| SUPERVISOR | ×N | 每个 Supervisor 治理一个/多个 Territory（scope） |
-| WORKER | ×N | 每个 Worker 独立 ExecutionProfile（M1 已就绪） |
+## 3. Territory Scope（M2-A/M2-E，修订 ①③）
 
-**API 迁移**：
+### 3.1 边界不变量（不变）
+
+Role=治理权力、Territory=资源/上下文 scope；绝不变成权限层级。
+
+### 3.2 未指派 Territory fail-closed（修订 ①，冻结）
 
 ```text
-getBindingByRole('WORKER')      → 弃用（singleton 假设）
-getBindingsByRole(roleType)     → 新增（返回数组）
-getBindingById(bindingId)       → 保留（M1 已用）
+有 supervisor_binding_id → 只有该 Supervisor 可治理（scope relation）
+无 supervisor_binding_id → 无 Supervisor 可治理 → TERRITORY_SUPERVISOR_MISSING（fail-closed）
 ```
 
-**Singleton 是 Domain Policy，不是 API 偶然限制**：
-- `bindRole`：OWNER/CHANCELLOR 创建第二个时**拒绝**（现有"同角色已存在"逻辑保留并强化为 policy 常量 `SINGLETON_ROLES = ['OWNER','CHANCELLOR']`）；
-- SUPERVISOR/WORKER：允许 N 个绑定；`getBindingsByRole` 供派发/展示/scope 使用。
+**缺省权限配置绝不扩大权限**（与 M1 fail-closed 原则一致）。
 
-**绑定生命周期**：unbind 语义不变（OWNER 保护）；换届/改绑走 Trusted Admin Plane（M1-B 已收口）。
-
-## 3. Territory Scope Model（M2-A/M2-E，冻结）
-
-### 3.1 边界不变量（用户裁决）
+### 3.3 v2→v3 兼容 backfill（冻结）
 
 ```text
-Role = 治理权力
-Territory = 资源 / 工作上下文 Scope
+迁移时：
+  王国恰好 1 个 ACTIVE Supervisor → 所有 supervisor_binding_id IS NULL 的 Territory 自动 backfill
+  0 个 ACTIVE Supervisor        → 保持 NULL（fail-closed）
 ```
 
-**Territory 绝不重新变成权限层级**：`Supervisor A may govern Territory A` 与
-`Worker B may execute in Territory A` 是 **scope relation**，不是
-`Territory > Supervisor > Worker` 继承树。模型/Agent 工具/Runtime/Role/Territory 保持解耦。
+v2 本就是 singleton Supervisor，老用户升级基本无感；新模型保持"不知道谁管就不允许任何人代管"。
 
-### 3.2 v1 模型（激活既有列）
+### 3.4 Territory tombstone（修订 ④，冻结）
 
-- `territories.supervisor_binding_id`（列已存在，从未写入）→ **激活为 Territory 主理 Supervisor**；
-- Territory 创建时可选指定 supervisor_binding_id；缺省 = 未指派（全局 Supervisor 可治理，见 3.3）；
-- **Supervisor scope**：`requireRole('SUPERVISOR')` 升级为 `requireRoleInScope(territoryId)`——
-  该 Supervisor 必须等于 task.territory 的 supervisor_binding_id（或未指派时任意 Supervisor）；
-- **Worker scope**：v1 不做 worker↔territory 硬绑定——Worker 的执行范围由 Supervisor 的 scope 决定
-  （Supervisor 只能把其 scope 内领地的任务派给 Worker）。这是 scope relation 的最简 v1；
-  worker↔territory 显式归属留 v1.1（若 Scale Gate 暴露需求）。
+```text
+territories.status: ACTIVE | ARCHIVED | DELETED
++ deleted_at
++ deleted_reason
+```
 
-### 3.3 未指派领地的治理
+- `deleteTerritory()`：物理删行 → tombstone（status=DELETED + deleted_at/reason）；force 级联语义保留
+  （未终态任务 FAILED + 活跃执行 ABORTED + 事件留痕）；
+- 历史任务/Assignment/Event 的 territory_id **永远可解析**（"Deleted Territory 仍可解析历史任务归属"）。
 
-未指派 supervisor 的领地 = 任意 SUPERVISOR 可治理（兼容 v0.6 单 Supervisor 迁移路径）；
-指派后：**跨领地拒绝**（新错误码 `TASK_OUT_OF_SCOPE`），换届/改派经 Trusted Admin Plane。
+### 3.5 Topology Administration Plane（修订 ③，冻结）
 
-## 4. Assignment Ledger（M2-B，冻结）
+```text
+Topology Administration（session-bound 下 Trusted OWNER only）:
+├─ territory.create
+├─ territory.delete
+├─ territory.set_supervisor
+├─ binding.bind
+├─ binding.retire（unbind）
+└─ execution_profile.set
 
-### 4.1 新表 `task_assignments`（权威派遣历史）
+日常治理职权（不变）:
+plan（CHANCELLOR）/ assign / start / review（SUPERVISOR scope-aware）
+```
+
+`kingdom_create_territory` / `kingdom_delete_territory` 当前**未接入 requireAdmin**（审计发现）——
+M2 冻结：Territory 是组织拓扑本身，纳入 Trusted Admin Plane；新增 `territory.set_supervisor`
+（修改 Territory 主理 Supervisor，OWNER-only）。
+
+## 4. Assignment Ledger（M2-B，修订 ④ + 补强不变量）
+
+### 4.1 表结构（不变 + 数据库层不变量）
 
 ```sql
 CREATE TABLE IF NOT EXISTS task_assignments (
@@ -83,166 +99,139 @@ CREATE TABLE IF NOT EXISTS task_assignments (
   task_id                TEXT NOT NULL,
   territory_id           TEXT NOT NULL,
   worker_binding_id      TEXT NOT NULL,
-  assigned_by            TEXT NOT NULL,          -- Supervisor binding_id（谁决定派发）
+  assigned_by            TEXT NOT NULL,          -- Supervisor binding_id
   assigned_at            TEXT NOT NULL,
-  ended_at               TEXT,                   -- 关闭时间（handoff/换人/终态）
-  end_reason             TEXT,                   -- 'handoff' | 'rework' | 'task-terminal' | ...
-  previous_assignment_id TEXT,                   -- 前序派遣（链表）
-  handoff_reason         TEXT,                   -- Supervisor 的转交理由（handoff 时）
+  ended_at               TEXT,
+  end_reason             TEXT,                   -- 'handoff' | 'task-terminal'（REWORK 不关闭）
+  previous_assignment_id TEXT,
+  handoff_reason         TEXT,
   created_at             TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_assignment_per_task
+  ON task_assignments(task_id) WHERE ended_at IS NULL;   -- 数据库层堵死双 active
 CREATE INDEX IF NOT EXISTS task_assignments_task_idx ON task_assignments(task_id);
 ```
 
-### 4.2 投影与历史分离
+**数据库层不变量**：一个 Task 最多一个 active assignment（partial unique index）——
+`tasks.assigned_binding_id` 与 Ledger 永远不会出现两个"当前事实"。
+
+### 4.2 Core 事务内不变量（冻结）
+
+`previous_assignment_id` 必须：
+- 属于同一个 `task_id`；
+- 已关闭（ended_at NOT NULL）；
+- 不能指向自身；
+- HANDOFF 时新 assignment 的 worker 与当前 active 不同。
+
+### 4.3 Assignment 生命周期（修订，冻结）
 
 ```text
-tasks.assigned_binding_id  = 当前状态投影（方便查询，语义不变）
-task_assignments           = 权威派遣历史（可答：之前派给谁/谁决定/为什么/几轮）
+REWORK            → Assignment 保持 ACTIVE（同 Worker 新 attempt——不是重新派遣）
+HANDOFF           → 旧 CLOSED（end_reason='handoff'）+ 新 CREATED（previous 链）
+Task terminal     → 当前 CLOSED（end_reason='task-terminal'）
+显式 reassignment → 未来（M2 范围外）
 ```
 
-写入路径：
-- `assignTask`（首派）：创建 assignment（previous=null）；
-- `handoff`（M2-D）：旧 assignment CLOSED（end_reason='handoff', ended_at）→ 新 assignment（previous=旧 id）；
-- 任务终态（DONE/FAILED）：当前 assignment CLOSED（end_reason='task-terminal'）。
+## 5. Multi-Worker（M2-C，裁决 5 修订）
 
-与既有历史面并列（用户确认的结构一致性）：
+### 5.1 并发边界（不变）
+
+✅ 不同任务并发 + 显式派给；❌ 无自动调度/拆分/负载均衡/swarm。
+
+### 5.2 workerBindingId 规则（裁决 5，冻结——不永远必填）
 
 ```text
-Task.status        = 当前治理事实
-Executions         = 运行事实历史
-Worker Results     = Claim 历史
-Assignments        = 派遣事实历史
-Events             = 审计事件流
+0 active Workers                     → WORKER_BINDING_MISSING
+1 active Worker + omitted            → 自动使用唯一 Worker（兼容 v0.6 自然语言体验）
+N > 1 active Workers + omitted       → WORKER_AMBIGUOUS（必须显式指定）
+显式提供                             → 永远按指定 Worker（校验 ACTIVE + 属于当前王国）
 ```
 
-## 5. Multi-Worker（M2-C，冻结）
+`getBindingsByRole('WORKER')` 供 Supervisor 显式选择；同一任务并发守卫保留。
 
-### 5.1 并发边界（用户裁决）
+## 6. HANDOFF（M2-D，裁决 4 批准 + 原子性要求）
 
 ```text
-✅ 支持：不同任务并发执行（每个 Execution 独立 one-shot；每个 Worker 独立 ExecutionProfile）
-✅ 支持：显式派给（Task 1 → Worker A，Task 2 → Worker B）
-❌ 不做：自动调度器 / 任务自动拆分 / load balancing / swarm / 并发冲突解决
+reviewTask(decision='HANDOFF', to_binding_id, reason)
+→ 原子事务：
+    ① 验证 Supervisor scope（task.territory 主理）
+    ② 验证目标 Worker（ACTIVE、属于当前王国、≠当前 assignment worker）
+    ③ 验证当前 active assignment
+    ④ 关闭 Assignment A（end_reason='handoff'）
+    ⑤ 创建 Assignment B（previous=A, handoff_reason=reason）
+    ⑥ 更新 tasks.assigned_binding_id
+    ⑦ REVIEW → RUNNING（既有转移）
+    ⑧ 写 TASK_HANDED_OFF（actor=SUPERVISOR, payload 含新旧 assignment/reason）
+    任一步失败 → 全部 ROLLBACK
 ```
 
-### 5.2 派发面
+Worker B 上下文：原 Task + 验收 + Worker A 最新 Claim + artifacts + risks + handoff reason + Supervisor instruction
+（`buildWorkerPrompt` 扩展，与 REWORK 注入同构）。不新增 Task 状态。
 
-- `assignTask`：**workerBindingId 变必填**（多 Worker 下无默认 Worker）；
-  `getBindingsByRole('WORKER')` 供 Supervisor 选择；校验 worker 属于当前王国（已有）；
-- 同一任务不允许并发执行（现有 latestExecution 活跃守卫保留）；
-- GUI：任务操作区列出候选 Worker（KingdomOpsPanel 的 assign 按钮从单选变下拉选择）。
-
-### 5.3 执行面
-
-- `resolveWorkerExecution` 已按 `assigned_binding_id → binding → ExecutionProfile` 解析（M1 就绪，零改动）；
-- 证据列已按 Execution 行独立记录（M1 就绪）——不同 Worker 并发执行不同任务天然可追溯。
-
-## 6. Handoff（M2-D，冻结）
-
-### 6.1 语义：治理事件，不是赋值操作
+## 7. Schema v3（裁决 6，修订 ④，冻结）
 
 ```text
-Worker A Attempt 1 → Claim/artifacts/risks
-  ↓
-Supervisor 审查 → 裁定 HANDOFF（reason = "需要前端能力"）
-  ↓
-Assignment A CLOSED（end_reason='handoff'）
-Assignment B CREATED（previous=A, handoff_reason=...）
-  ↓
-task: REVIEW → RUNNING（复用既有转移，不新增状态）
-  ↓
-Worker B Attempt 2（上下文见 6.2）
+Schema v3
+├─ task_assignments（表 + one_active_assignment_per_task 唯一索引 + task_idx）
+├─ role_bindings.status / retired_at / retired_reason（tombstone）
+├─ territories.deleted_at / deleted_reason（tombstone；status 已存在，语义扩展 DELETED）
+├─ Territory supervisor backfill（1 ACTIVE Supervisor → NULL scope 领地 backfill；0 → fail-closed）
+└─ SCHEMA_VERSION 2 → 3（事务化幂等迁移，失败 ROLLBACK；新库直接 v3）
 ```
 
-### 6.2 Worker B 的上下文清单（冻结）
+`role_bindings 零 DDL` **取消**（修订 ②）。迁移顺序：加列/建表/索引 → backfill → verify → version bump。
+
+## 8. v0.7.0 Scale Gate（M2-F，裁决 7 扩充）
+
+### 8.1 原有六项（保留）
+
+1. 不同 Worker 不同 ExecutionProfile 同时执行不同任务（并发证据列独立）；
+2. Supervisor A 不能治理 Territory B（TASK_OUT_OF_SCOPE）；
+3. Worker A 不能冒充 Worker B；
+4. Handoff 历史不丢失（Ledger 链 + Claim/Execution 全量可查）；
+5. 换届后旧 Supervisor 失去职权（scope 重算）；
+6. Task/Assignment/Claim/Execution/Review 完整追溯。
+
+### 8.2 新增验收（冻结）
 
 ```text
-原 Task
-验收标准
-Worker A 最新 Claim（summary）
-已有 artifacts
-risks
-Handoff reason
-Supervisor instruction（可选补充）
+Topology
+- Stranger / Worker / Supervisor 创建或删除 Territory → DENY
+- 只有 OWNER 可以改 Territory Supervisor
+
+Scope
+- 未指派 Territory → 所有 Supervisor DENY（TERRITORY_SUPERVISOR_MISSING）
+- Supervisor A → Territory B DENY
+- Supervisor 退任后立即 DENY
+- 新任接管后 PASS
+
+Ledger
+- 一个 Task 不可能出现两个 active assignments（DB 唯一索引 + 测试）
+- REWORK 不产生新 Assignment
+- HANDOFF 关闭旧 + 创建新（previous 链正确）
+- Task terminal 关闭 active Assignment
+
+History
+- Retired Worker 仍能通过历史 Binding 解析（名字/角色/Profile/退任时间）
+- Retired Supervisor 仍能回答"谁当时做了裁决"（events.actor_id 可解析）
+- Deleted Territory 仍可解析历史任务归属
+
+Compatibility
+- v2 单 Supervisor + NULL scope → v3 自动 backfill
+- v0.6 单 Worker assign 不传 worker_binding_id → 仍正常
 ```
 
-实现：`buildWorkerPrompt` 扩展注入 handoff 上下文（与 REWORK 注入同构）；
-事件：`TASK_HANDED_OFF`（actor=SUPERVISOR，target=task，payload 含新旧 assignment、reason）。
+## 9. 裁决记录（Owner Review，2026-08-18）
 
-### 6.3 状态机影响
+| # | 项目 | 裁决 | 状态 |
+|---|---|---|---|
+| 1 | SUPERVISOR/WORKER ×N | 批准，Binding 生命周期必须同时改（tombstone） | ✅ 采纳（§2.2） |
+| 2 | Territory Scope | 有条件批准，未指派 Territory fail-closed（TERRITORY_SUPERVISOR_MISSING）+ backfill | ✅ 采纳（§3.2/3.3） |
+| 3 | Assignment Ledger | 批准 + 补强不变量（one-active 唯一索引 / previous 约束 / REWORK 不关闭） | ✅ 采纳（§4） |
+| 4 | HANDOFF 并入 reviewTask | 批准（原子事务） | ✅ 采纳（§6） |
+| 5 | workerBindingId | 不批准原案 → "多 Worker 时必填"（0/1/N 规则） | ✅ 采纳（§5.2） |
+| 6 | Schema v3 | 批准版本升级，内容扩大（role_bindings tombstone + territory tombstone + backfill） | ✅ 采纳（§7） |
+| 7 | v0.7.0 Gate | 批准 + 增加安全/历史项（Topology/Scope/Ledger/History/Compatibility） | ✅ 采纳（§8.2） |
+| 追加 | Territory 属于 Admin Plane | 冻结（territory.create/delete/set_supervisor + binding + profile 全 OWNER-only） | ✅ 采纳（§3.5） |
 
-不新增 Task 状态：HANDOFF = REVIEW→RUNNING 转移（现有 `TASK_TRANSITIONS.REVIEW` 已含 RUNNING）；
-`reviewTask` 的 decision 集合 `['ACCEPT','REWORK','FAIL']` 扩展 `'HANDOFF'`（+ 新工具或并入 review）。
-设计取舍：并入 `reviewTask(decision='HANDOFF', to_binding_id, reason)` 最贴合"治理事件"语义
-（HANDOFF 是 Supervisor 对 Claim 的裁定之一），不新增独立工具面。
-
-## 7. Schema v3（冻结）
-
-| 变更 | 类型 | 说明 |
-|---|---|---|
-| `task_assignments` 新表 | 建表 | 权威派遣历史（4.1） |
-| `territories.supervisor_binding_id` | 语义激活 | 列已存在（v1 schema），无 DDL |
-| 索引 `task_assignments_task_idx` | 建索引 | IF NOT EXISTS |
-| `SCHEMA_VERSION` 1→2→**3** | 版本 | 复用事务化幂等迁移（ensureSchemaV2 泛化）：
-
-```text
-BEGIN IMMEDIATE
-  CREATE TABLE IF NOT EXISTS task_assignments (...)
-  CREATE INDEX IF NOT EXISTS ...
-  verify 表/列/索引存在（缺失即抛错）
-  UPDATE kingdoms SET schema_version = 3
-COMMIT（失败 ROLLBACK）
-```
-
-- 旧库 v2 → v3 开库即收敛；新库直接 v3；
-- `role_bindings` 零 DDL（多绑定本就允许，只是业务层此前拒绝）。
-
-## 8. v0.7.0 Scale Gate（M2-F，冻结）
-
-### 8.1 验收图（v0.7.0 命题）
-
-```text
-                    OWNER
-                      │
-                 CHANCELLOR
-                      │
-          ┌───────────┴───────────┐
-          │                       │
-    Territory A             Territory B
-          │                       │
-   Supervisor A             Supervisor B
-      │       │                 │
-   Worker A Worker B          Worker C
-      │       │                 │
-    Task 1  Task 2            Task 3
-```
-
-### 8.2 对抗式证明项（全 PASS 才发布 v0.7.0）
-
-1. 不同 Worker 使用不同 ExecutionProfile → **同时执行不同任务**（并发证据列独立）；
-2. Supervisor A **不能治理** Territory B 的任务（`TASK_OUT_OF_SCOPE`）；
-3. Worker A **不能冒充** Worker B（身份矩阵扩展：多 Worker 下的 start/claim 归属）；
-4. Worker A → Worker B Handoff → **历史不丢失**（task_assignments 链 + Claim/Execution 全量可查）；
-5. 换届后旧 Supervisor **失去职权**（scope 重算）；
-6. 所有 Task / Assignment / Claim / Execution / Review → **完整追溯**（四条历史面 + 事件流）。
-
-### 8.3 实验设计（沿用 M1-D 方法论）
-
-- lib 级：多绑定矩阵（2 Supervisor × 2 Territory × 3 Worker × 并发任务）；
-- 真实执行：两个 Worker（不同 ExecutionProfile）**并发**执行两个任务 + 一次真实 Handoff；
-- 迁移：v2 旧库 → v3 收敛验证。
-
-## 9. 待 Owner Review 裁决点
-
-| # | 裁决点 | 推荐 |
-|---|---|---|
-| 1 | SUPERVISOR/WORKER 多绑定放行（singleton 改为 Domain Policy） | 批准 |
-| 2 | Territory Scope v1 = 激活 `territories.supervisor_binding_id`；worker↔territory 硬绑定留 v1.1 | 批准 |
-| 3 | Assignment Ledger 表结构（含 previous/handoff_reason 链表） | 批准 |
-| 4 | HANDOFF 并入 `reviewTask(decision='HANDOFF', to_binding_id, reason)`，不新增 Task 状态 | 批准 |
-| 5 | assignTask workerBindingId 变必填（多 Worker 无默认） | 批准 |
-| 6 | Schema v3（task_assignments 表 + 版本迁移，role_bindings 零 DDL） | 批准 |
-| 7 | v0.7.0 Gate = 8.2 六项证明全 PASS（M2-F） | 批准 |
-
-> 按 M1-C 同款流程：本稿 Owner Review 通过后，才进入实现（不改 v0.6.0 稳定基线）。
+> **实施授权**：本冻结稿生效即实施（无需第二轮批准）。v0.7.0 发布以 §8 Gate 全 PASS 为硬条件。
