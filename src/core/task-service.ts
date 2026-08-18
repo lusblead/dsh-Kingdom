@@ -199,8 +199,9 @@ function checkTerritoryScope(
       message: `错误：领地「${territory.name}」未指派主理 Supervisor，任何 Supervisor 都不能治理（fail-closed）。请由 OWNER 执行 kingdom_set_territory_supervisor 指派。`,
     }
   }
-  // 调用者身份可证明（session-bound）时强制匹配；declarative 演示模式跳过匹配检查。
-  if (ctx.principal?.sessionId && territory.supervisor_binding_id !== supervisorBindingId) {
+  // session-bound 下调用者身份是 DSH Runtime 证明的 → 强制 scope 匹配；
+  // declarative 演示模式（requireRole 只查绑定存在、快照标注 local-demo）跳过匹配检查。
+  if (ctx.auth.mode === 'session-bound' && territory.supervisor_binding_id !== supervisorBindingId) {
     return {
       ok: false,
       code: 'TASK_OUT_OF_SCOPE',
