@@ -24,6 +24,7 @@ export const EXECUTION_STATES = [
   'STARTING',
   'RUNNING',
   'PAUSED',
+  'RECOVERING',
   'COMPLETED',
   'FAILED',
   'ABORTED',
@@ -36,14 +37,18 @@ export type ExecutionState = (typeof EXECUTION_STATES)[number]
  *
  * - `STARTING → RUNNING`：宿主确认执行已真正开始。
  * - `RUNNING ↔ PAUSED`：暂停/恢复（见 `./execution.ts` 关于 one-shot 的诚实边界说明）。
+ * - `* → RECOVERING`：v0.8（M3-S2 v6）——Kingdom 无法确认 Execution 真实 Runtime 状态、
+ *   正在重建证据（Dispatch Intent 有 / Adapter 失联 / host 重启）。**不改 Task 治理状态**；
+ *   只有可信 Terminal Evidence 才允许从 RECOVERING 走向终态。
  * - `* → COMPLETED`：执行交回了合法结构化结果（**注意：这只说明跑完了，不代表任务完成**）。
  * - `* → FAILED`：宿主观察到执行没跑出合法结果。
  * - `* → ABORTED`：被显式终止（会话停止/用户取消），与 FAILED 区分开。
  */
 export const EXECUTION_TRANSITIONS: Record<ExecutionState, readonly ExecutionState[]> = {
-  STARTING: ['RUNNING', 'FAILED', 'ABORTED'],
-  RUNNING: ['PAUSED', 'COMPLETED', 'FAILED', 'ABORTED'],
-  PAUSED: ['RUNNING', 'ABORTED', 'FAILED'],
+  STARTING: ['RUNNING', 'RECOVERING', 'FAILED', 'ABORTED'],
+  RUNNING: ['PAUSED', 'RECOVERING', 'COMPLETED', 'FAILED', 'ABORTED'],
+  PAUSED: ['RUNNING', 'RECOVERING', 'ABORTED', 'FAILED'],
+  RECOVERING: ['RUNNING', 'RECOVERING', 'COMPLETED', 'FAILED', 'ABORTED'],
   COMPLETED: [],
   FAILED: [],
   ABORTED: [],

@@ -187,6 +187,76 @@ export interface ExecutionView {
    * GUI 应显示"准备休息"，**不要**直接播睡觉动画——那会谎报状态。
    */
   pausePending: boolean
+  /** v0.8（M3-S2 v6）：LEGACY_COMPAT / GOVERNED_PERSISTENT。 */
+  executionContract: string
+  /** v0.8：governed 关联的 lease / decision（legacy 为 null）。 */
+  leaseId: string | null
+  capabilityDecisionId: string | null
+}
+
+// ── v0.8 Runtime Governance 视图（§32：Worker/Task·Execution/Runtime Governance/Detail）──
+
+/** Worker ↔ Persistent Session ↔ Territory（Affinity Ledger 投影）。 */
+export interface AffinityView {
+  affinityId: string
+  workerBindingId: string
+  /** 脱敏 session_ref（与 BindingView 同款掩码）。 */
+  sessionDisplay: string | null
+  runtimeType: string
+  territoryId: string
+  isCurrent: boolean
+  establishedAt: string
+  retiredAt: string | null
+}
+
+/** Execution Lease 投影。 */
+export interface LeaseView {
+  leaseId: string
+  taskId: string
+  attemptNo: number
+  workerBindingId: string
+  sessionDisplay: string | null
+  territoryId: string
+  state: string
+  capabilityDecisionId: string | null
+  hasPlan: boolean
+  hasReleaseEvidence: boolean
+  acquiredAt: string
+  releasedAt: string | null
+}
+
+/** Capability Decision 投影（DENIED 必须显示原因，禁止显示成 Success）。 */
+export interface CapabilityDecisionView {
+  decisionId: string
+  taskId: string
+  decision: string
+  enforcementStatus: string
+  requirementCoverage: string
+  reasonCode: string | null
+  hasEvidence: boolean
+  createdAt: string
+}
+
+/** Dispatch Record 投影（RECOVERING 必须如实显示，禁止显示成 Done）。 */
+export interface DispatchView {
+  dispatchId: string
+  leaseId: string
+  executionId: string
+  taskId: string
+  attemptNo: number
+  state: string
+  runtimeDispatchRef: string | null
+  runtimeExecutionRef: string | null
+  hasReceipt: boolean
+  hasTerminalEvidence: boolean
+  createdAt: string
+}
+
+export interface RuntimeGovernanceView {
+  workerSessions: AffinityView[]
+  leases: LeaseView[]
+  decisions: CapabilityDecisionView[]
+  dispatches: DispatchView[]
 }
 
 export interface TaskView {
@@ -270,6 +340,8 @@ export interface SnapshotView {
   /** 每个组织角色此刻的表演语义。 */
   stage: StageActorView[]
   recentEvents: EventView[]
+  /** v0.8：Runtime Governance 投影（§32）。Schema 非 v4 时为全空数组。 */
+  governance: RuntimeGovernanceView
 }
 
 /** 任务详情：验收标准、尝试历史、Claim、Supervisor 决策、关联事件、下一步动作。 */
@@ -293,6 +365,8 @@ export interface TaskDetailView {
   }[]
   relatedEvents: EventView[]
   allowedActions: AllowedAction[]
+  /** v0.8：本任务的 Runtime Governance 投影（Lease/Decision/Dispatch）。 */
+  governance: RuntimeGovernanceView
 }
 
 /** 所有写命令的统一返回。GUI 只读结构化字段，不解析 `message`。 */

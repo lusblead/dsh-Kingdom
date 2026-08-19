@@ -8,14 +8,19 @@
  * 绝不产出贴图、clip、场景文件名——那些是 GUI 的 visual-map 的事。
  */
 import type {
+  AffinityView,
   AllowedAction,
   ActorActivity,
   ActorRole,
   ActorState,
   BindingView,
+  CapabilityDecisionView,
   ClaimView,
+  DispatchView,
   EventView,
   ExecutionView,
+  LeaseView,
+  RuntimeGovernanceView,
   StageActorView,
   TaskDetailView,
   TaskView,
@@ -133,6 +138,97 @@ export function toExecutionView(row: ExecutionRow): ExecutionView {
     heartbeatAt: row.heartbeat_at,
     endedAt: row.ended_at,
     pausePending: row.pause_requested_at !== null && row.state === 'RUNNING',
+    // v0.8（M3-S2 v6）
+    executionContract: row.execution_contract,
+    leaseId: row.lease_id,
+    capabilityDecisionId: row.capability_decision_id,
+  }
+}
+
+// ── v0.8 Runtime Governance 投影（§32）──────────────────────────
+
+function emptyGovernance(): RuntimeGovernanceView {
+  return { workerSessions: [], leases: [], decisions: [], dispatches: [] }
+}
+
+function toAffinityView(row: import('../core/db.js').AffinityRow): AffinityView {
+  return {
+    affinityId: row.affinity_id,
+    workerBindingId: row.worker_binding_id,
+    sessionDisplay: maskSessionId(row.session_ref),
+    runtimeType: row.runtime_type,
+    territoryId: row.territory_id,
+    isCurrent: row.is_current === 1,
+    establishedAt: row.established_at,
+    retiredAt: row.retired_at,
+  }
+}
+
+function toLeaseView(row: import('../core/db.js').LeaseRow): LeaseView {
+  return {
+    leaseId: row.lease_id,
+    taskId: row.task_id,
+    attemptNo: row.attempt_no,
+    workerBindingId: row.worker_binding_id,
+    sessionDisplay: maskSessionId(row.session_ref),
+    territoryId: row.territory_id,
+    state: row.state,
+    capabilityDecisionId: row.capability_decision_id,
+    hasPlan: row.enforcement_plan_snapshot !== null,
+    hasReleaseEvidence: row.release_evidence_json !== null,
+    acquiredAt: row.acquired_at,
+    releasedAt: row.released_at,
+  }
+}
+
+function toDecisionView(row: import('../core/db.js').CapabilityDecisionRow): CapabilityDecisionView {
+  return {
+    decisionId: row.decision_id,
+    taskId: row.task_id,
+    decision: row.decision,
+    enforcementStatus: row.enforcement_status,
+    requirementCoverage: row.requirement_coverage,
+    reasonCode: row.reason_code,
+    hasEvidence: row.enforcement_evidence_json !== null,
+    createdAt: row.created_at,
+  }
+}
+
+function toDispatchView(row: import('../core/db.js').DispatchRecordRow): DispatchView {
+  return {
+    dispatchId: row.dispatch_id,
+    leaseId: row.lease_id,
+    executionId: row.execution_id,
+    taskId: row.task_id,
+    attemptNo: row.attempt_no,
+    state: row.state,
+    runtimeDispatchRef: row.runtime_dispatch_ref,
+    runtimeExecutionRef: row.runtime_execution_ref,
+    hasReceipt: row.receipt_json !== null,
+    hasTerminalEvidence: row.terminal_evidence_json !== null,
+    createdAt: row.created_at,
+  }
+}
+
+/** 王国级 Runtime Governance 投影；schema 非 v4 时返回空视图。 */
+export function buildGovernance(store: KingdomStore, kingdomId: string): RuntimeGovernanceView {
+  if (!store.isSchemaV4) return emptyGovernance()
+  return {
+    workerSessions: store.listAffinities(kingdomId).map(toAffinityView),
+    leases: store.listLeases(kingdomId).map(toLeaseView),
+    decisions: store.listCapabilityDecisions(kingdomId).map(toDecisionView),
+    dispatches: store.listDispatches(kingdomId).map(toDispatchView),
+  }
+}
+
+/** 任务级 Runtime Governance 投影（TaskDetail 用）。 */
+export function buildTaskGovernance(store: KingdomStore, taskId: string): RuntimeGovernanceView {
+  if (!store.isSchemaV4) return emptyGovernance()
+  return {
+    workerSessions: [],
+    leases: store.listLeases(store.getDefaultKingdom()?.kingdom_id ?? '').filter(l => l.task_id === taskId).map(toLeaseView),
+    decisions: store.listCapabilityDecisions(store.getDefaultKingdom()?.kingdom_id ?? '').filter(d => d.task_id === taskId).map(toDecisionView),
+    dispatches: store.listDispatches(store.getDefaultKingdom()?.kingdom_id ?? '').filter(d => d.task_id === taskId).map(toDispatchView),
   }
 }
 
@@ -398,6 +494,7 @@ export function buildSnapshot(store: KingdomStore, options: SnapshotOptions): Sn
       liveExecutions: [],
       stage: [],
       recentEvents: [],
+      governance: emptyGovernance(),
     }
   }
 
@@ -432,6 +529,7 @@ export function buildSnapshot(store: KingdomStore, options: SnapshotOptions): Sn
       transientWindowMs: options.transientWindowMs ?? TRANSIENT_WINDOW_MS,
     }),
     recentEvents: events.map(toEventView),
+    governance: buildGovernance(store, kingdomId),
   }
 }
 
@@ -479,5 +577,6 @@ export function buildTaskDetail(
     reviews,
     relatedEvents: related.map(toEventView),
     allowedActions: view.allowedActions,
+    governance: buildTaskGovernance(store, taskId),
   }
 }

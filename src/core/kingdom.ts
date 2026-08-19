@@ -39,6 +39,12 @@ export interface KingdomManagerOptions {
   /** 显式 owner 名称；缺省取 OS 用户名 */
   ownerName?: string
   dbPath?: string
+  /**
+   * v0.8（M3-S2 v6）：允许对**已有 v3 库**执行 Schema v4 迁移。
+   * 默认 false——正式 kingdom.db 受 Formal DB Migration Gate 保护：
+   * 全新库自动 v4；已有库保持 v3 直到 Owner 明确 Gate 放行（届时传 true）。
+   */
+  migrateV4?: boolean
 }
 
 export class KingdomManager {
@@ -53,7 +59,7 @@ export class KingdomManager {
       ownerName: options.ownerName ?? currentOsUser(),
       dbPath: options.dbPath ?? kingdomDbPath(),
     }
-    this.store = new KingdomStore(this.opts.dbPath)
+    this.store = new KingdomStore(this.opts.dbPath, { allowSchemaV4: options.migrateV4 === true })
   }
 
   get storeHandle(): KingdomStore {

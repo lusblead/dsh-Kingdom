@@ -1,7 +1,7 @@
 {
   "name": "dsh-kingdom",
-  "version": "0.7.0",
-  "description": "独立 dsh 插件：安装后会话内初始化/接入本地王国，Territory/Binding CRUD（含换届与角色↔独立会话归属）+ Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期 + 本地 GUI 通道（网关写命令面：init/领地/角色/任务）",
+  "version": "0.8.0",
+  "description": "独立 dsh 插件：会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期 + v0.8 Persistent Governed Worker（长期 Session / Territory Affinity / Capability Gate / Execution Lease / Dispatch Evidence / Reconciliation）+ 本地 GUI 通道",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",

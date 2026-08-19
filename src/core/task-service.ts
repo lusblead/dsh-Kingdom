@@ -489,6 +489,10 @@ export async function startTask(
     heartbeat_at: now(),
     ended_at: null,
     pause_requested_at: null,
+    // v0.8（M3-S2 v6）：旧 one-shot 路径 = LEGACY_COMPAT（显式声明，非 governed）
+    execution_contract: 'LEGACY_COMPAT',
+    lease_id: null,
+    capability_decision_id: null,
     ...evidence,
   })
   collector.emit('SESSION_STARTED',

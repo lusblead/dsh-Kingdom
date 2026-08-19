@@ -99,6 +99,66 @@ export function resolveWorkerExecution(
   return { ok: true, info, executor }
 }
 
+/** governed 路径解析出的 Worker Runtime（provider/model）。 */
+export interface GovernedWorkerRuntime {
+  provider: string
+  providerSource: ProviderSource
+  /** governed Persistent Session 必须显式配置的模型（DSH deployment prompt 依赖 {{model}}）。 */
+  model: string
+  modelSource: 'binding'
+}
+
+export type ResolveGovernedWorkerRuntimeResult =
+  | { ok: true; runtime: GovernedWorkerRuntime }
+  | { ok: false; error: string }
+
+/**
+ * v0.8 governed 路径的执行解析（Owner V0.8 PRODUCTION-PATH CLOSURE A）。
+ *
+ * - 权威来源 = Worker binding 的 `execution_profile_json`（v0.6.0 M1-C 语义；**绝不读**
+ *   `model_name` / `agent_name` / `session_meta` —— Role 与 Model 不重新绑定）；
+ * - provider = profile.provider ?? globalProvider（全局 workerProvider config 回退，`global-fallback` 证据）；
+ * - model = profile.model —— **必须显式配置合法模型**（真实 E2E 证实：DSH deployment prompt 段
+ *   依赖 `{{model}}`，缺失 → `turn/end=error`、无 assistant）；缺失 → fail closed：
+ *   明确 configuration error，不创建 Session、不 dispatch；
+ * - 不覆盖 Worker 已显式配置的 provider/model（显式配置优先于全局回退）；
+ * - 禁止 hardcode 任何单一模型（本函数零模型字面量）。
+ */
+export function resolveGovernedWorkerRuntime(
+  store: KingdomStore,
+  task: TaskRow,
+  global: { globalProvider: string },
+): ResolveGovernedWorkerRuntimeResult {
+  const binding = task.assigned_binding_id ? store.getBindingById(task.assigned_binding_id) : null
+  if (!binding) {
+    return { ok: false, error: `错误：任务「${task.title}」未指派 Worker 绑定（assigned_binding_id 缺失或不存在）。` }
+  }
+  if (binding.role_type !== 'WORKER') {
+    return { ok: false, error: `错误：任务「${task.title}」指派的绑定 ${binding.role_name} 不是 WORKER，无法执行。` }
+  }
+  const profile = parseExecutionProfile(binding.execution_profile_json)
+  const provider = profile?.provider?.trim() || global.globalProvider
+  const providerSource: ProviderSource = profile?.provider?.trim() ? 'binding' : 'global-fallback'
+  if (!provider) {
+    return {
+      ok: false,
+      error: `错误：Worker「${binding.role_name}」执行配置缺失 provider，且无全局 workerProvider 回退`
+        + `——governed Persistent Session 需要 provider（fail closed，zero execution）。`,
+    }
+  }
+  const model = profile?.model?.trim() || null
+  if (!model) {
+    return {
+      ok: false,
+      error: `错误：Worker「${binding.role_name}」未配置执行模型（execution_profile_json.model 缺失）。`
+        + `governed Persistent Session 必须显式配置合法 model（DSH deployment prompt 依赖 {{model}}）；`
+        + `请用 kingdom_set_execution_profile 为 Worker 配置 {"provider":"...","model":"..."}`
+        + `（fail closed，zero execution，不创建 Session、不 dispatch）。`,
+    }
+  }
+  return { ok: true, runtime: { provider, providerSource, model, modelSource: 'binding' } }
+}
+
 /**
  * 构造 Execution 落库用的不可变快照 JSON（requested/resolved/source 三节）。
  * start 时写 requested+source 节；结算时补 resolved 节（updateExecutionResolvedEvidence）。

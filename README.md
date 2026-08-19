@@ -5,7 +5,7 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.7.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.0--rc.5-orange)](#compatibility)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#requirements)
@@ -47,6 +47,9 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 | 🔄 **换届与会话归属**（v0.4） | `kingdom_unbind_role` 解绑 / `kingdom_bind_session` 把角色绑到**独立会话**；`session-bound` 模式下只有被绑定会话能行使职权 |
 | 🪪 **会话身份预留字段**（v0.4） | 角色可携带 `model_name` / `agent_name` / `session_meta`（JSON 扩展槽）——现在不必填，未来完整会话逐步填满 |
 | 🎭 **GUI 就绪**（可选） | 结构化快照 + 本地数据网关（默认关闭），前端页面由 GUI 部署方提供 |
+| 👑 **Persistent Governed Worker**（v0.8） | Worker 拥有**长期 DSH Session**（REWORK 唤醒同一 Worker）；Session ↔ Territory Affinity 不可改绑；每次执行经 **Capability Gate**（仅 GRANTED+ENFORCED 才 dispatch，Runtime 无法 enforce → **DENIED + zero execution**）；**Execution Lease** 互斥 + **Dispatch Intent**（crash 可 reconcile，不盲发）；terminal 证据来自事件链，**Runtime 跑完 ≠ Task DONE**（Claim → Supervisor 裁定链不变） |
+| 🛡️ **Fail-closed 能力治理**（v0.8） | 无自授 / 超 Ceiling / scope 外 / 部分 policy 一律拒绝；approval=never 禁扩权；workspace 外写真实拒绝；RECOVERING 状态如实显示，禁止显示成 Done |
+| 🧩 **Legacy 兼容**（v0.8） | 旧 one-shot 路径继续 `LEGACY_COMPAT` 工作，回归全绿 |
 
 ---
 

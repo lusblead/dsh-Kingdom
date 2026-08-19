@@ -25,7 +25,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
+import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { KingdomManager } from './core/kingdom.js'
+import { DshRuntimeAdapter } from './adapter/dsh-backend.js'
+import { runGovernedTask } from './worker/governed-executor.js'
+import { settleAndRelease } from './dispatch/service.js'
 import { bindRole, listBindings, rebindSession, setExecutionProfile, unbindRole } from './core/binding.js'
 import { createTerritory, deleteTerritory, listTerritories, setTerritorySupervisor } from './core/territory.js'
 import {
@@ -59,6 +64,8 @@ export interface Config {
   guiToken: string
   guiAllowOrigins: string[]
   authMode: 'declarative' | 'session-bound'
+  /** v0.8（M3-S2 v6）：允许对已有 v3 库执行 Schema v4 迁移（Formal DB Migration Gate 用）。 */
+  migrateV4: boolean
 }
 
 export const Config = z.object({
@@ -82,6 +89,12 @@ export const Config = z.object({
    * `session-bound` 额外要求调用方 session 与 binding.session_id 一致。
    */
   authMode: z.union(['declarative', 'session-bound'] as const).default('declarative'),
+  /**
+   * v0.8（M3-S2 v6）：允许对已有 v3 库执行 Schema v4 迁移。
+   * **默认 false**：正式 kingdom.db 受 Formal DB Migration Gate 保护——
+   * 全新库自动 v4；已有库保持 v3（governed API fail-closed）直到 Owner 明确 Gate 放行。
+   */
+  migrateV4: z.boolean().default(false),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -89,6 +102,7 @@ export function apply(ctx: Context, config: Config): void {
   const manager = new KingdomManager({
     kingdomName: config.kingdomName,
     ownerName: config.ownerName || undefined,
+    migrateV4: config.migrateV4,
   })
   // 卸载/重载时关闭 SQLite 连接（disposer 由 fiber 自动收集执行）
   ctx.effect(() => () => manager.close())
@@ -554,6 +568,146 @@ export function apply(ctx: Context, config: Config): void {
       return result.message
     },
   })), 'dsh-kingdom: start-task tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_start_task_governed',
+    description: '以 Governed Persistent Worker 执行任务（v0.8）：Worker 长期 DSH Session + Capability Gate（仅 GRANTED+ENFORCED 才 dispatch）+ Lease/Dispatch/Receipt/Evidence 全链；DENIED/CANNOT_ENFORCE → zero execution。需王国已迁移 Schema v4；Worker 获得并复用长期 Session（REWORK 唤醒同一 Worker）',
+    parameters: {
+      task_id: { type: 'string', required: true, description: '任务 id（状态需为 ASSIGNED，或 REWORK 后的 RUNNING）' },
+      grant_json: { type: 'string', required: true, description: 'Supervisor 本次 Attempt 的权威授权 JSON（如 {"tool:pwsh": true, "filesystem.write": true}；与任务 capability requirement 求交集）' },
+      sandbox_mode: { type: 'string', description: 'workspace-write（默认，领地写边界）/ read-only' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { task_id: string; grant_json: string; sandbox_mode?: string }, exec: { agent?: unknown }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      if (!store.isSchemaV4) {
+        return '错误：Schema v4 未迁移（正式 kingdom.db 迁移须经 Formal DB Migration Gate）；governed 执行不可用（fail-closed）。'
+      }
+      const loadedTask = store.getTask(args.task_id)
+      if (!loadedTask) return `错误：找不到任务 ${args.task_id}。`
+      if (loadedTask.status !== 'ASSIGNED' && loadedTask.status !== 'RUNNING') {
+        return `错误：任务状态 ${loadedTask.status} 不可 governed 启动（仅 ASSIGNED / REWORK 后的 RUNNING）。`
+      }
+      const territory = store.getTerritoryById(loadedTask.territory_id)
+      if (!territory) return '错误：任务领地缺失。'
+      const worker = loadedTask.assigned_binding_id
+      if (!worker) return '错误：任务未指派 Worker。'
+
+      const agents = ctx.get('agents')
+      if (!agents) {
+        return '错误：当前 dsh 组合未提供 agents 服务（Persistent Session 不可用）；governed 执行不可用。'
+      }
+      let grant: Record<string, boolean>
+      try {
+        const parsed = JSON.parse(args.grant_json) as unknown
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('shape')
+        grant = parsed as Record<string, boolean>
+      } catch {
+        return '错误：grant_json 必须是非空 JSON 对象（Supervisor 权威授权）。'
+      }
+
+      const sup = territory.supervisor_binding_id ?? store.getBindingsByRole(kingdomId, 'SUPERVISOR')[0]?.binding_id ?? null
+      // Owner V0.8 PRODUCTION-PATH CLOSURE（正式入口 E2E seam）：S4 materialize 需要**模块函数** seam
+      // （`setSandboxMode = session.append('sandbox/mode')` / `setApprovalPolicy = session.append('approval/policy')`），
+      // 而非 ctx 服务对象（SandboxPolicyService/ApprovalService 无这些方法，传服务 → MATERIALIZE_FAILED）。
+      // 动态 import（懒解析）：失败 → null → materialize 报「缺失」→ DENIED（fail-closed，不崩溃插件）。
+      const s4Seam = await (async () => {
+        try {
+          // 变量 specifier：运行时经 dsh loader 解析（动态 seam；静态类型不做解析校验）
+          const sbSpec = '@deepseek-ai/dsh-sandbox-policy'
+          const apSpec = '@deepseek-ai/dsh-user-approval'
+          const sandbox = (await import(sbSpec)) as { setSandboxMode: (session: unknown, mode: string) => void }
+          const approval = (await import(apSpec)) as { setApprovalPolicy: (session: unknown, policy: string) => void }
+          return {
+            sandboxPolicy: { setSandboxMode: sandbox.setSandboxMode },
+            approval: { setApprovalPolicy: approval.setApprovalPolicy },
+          }
+        } catch {
+          return { sandboxPolicy: null, approval: null }
+        }
+      })()
+      const adapter = new DshRuntimeAdapter({
+        runtimeInstanceRef: `dsh-${hostname()}`,
+        provider: config.workerProvider || 'spawn',
+        model: null,
+        agents,
+        permission: ctx.get('permission'),
+        sandboxPolicy: s4Seam.sandboxPolicy,
+        approval: s4Seam.approval,
+        presets: ctx.get('agentPresets'),
+      })
+
+      // attempt 编号必须纳入 Lease Ledger（zero-execution 的 gate 拒绝也会消耗 attempt_no，
+      // 否则重试会撞 UNIQUE(task_id, attempt_no)——正式入口 E2E 实证）
+      const leaseMax = store.listLeases(kingdomId)
+        .filter((l) => l.task_id === loadedTask.task_id)
+        .reduce((m, l) => Math.max(m, l.attempt_no), 0)
+      const attemptNo = Math.max(store.nextAttemptNo(loadedTask.task_id), leaseMax + 1)
+      const result = await runGovernedTask({
+        store, adapter, kingdomId, workerBindingId: worker,
+        territoryId: loadedTask.territory_id, cwd: territory.workspace_path ?? process.cwd(),
+        taskId: loadedTask.task_id, attemptNo, supervisorBindingId: sup,
+        grant, requirementJson: store.getTaskCapabilityRequirement(loadedTask.task_id),
+        sandboxMode: args.sandbox_mode === 'read-only' ? 'read-only' : 'workspace-write',
+        // Owner V0.8 PRODUCTION-PATH CLOSURE A：全局 workerProvider 仅作 provider 回退；
+        // Worker 的 provider/model 权威来源 = execution_profile_json（runGovernedTask 内部解析，
+        // model 缺失 → fail closed configuration error，不创建 Session、不 dispatch）。
+        globalProvider: config.workerProvider || 'spawn',
+        // 真实模型 turn 轮询窗口（正式入口 E2E 实证：默认 100ms×40=4s 太短，turn 未及 terminal）：
+        // 1s × 60 = 60s；超窗 → fail-closed 返回（进 RECOVERING，由 reconcile 处理）。
+        pollIntervalMs: 1000,
+        maxPolls: 60,
+      })
+      if (!result.ok) {
+        return `Governed 执行未发生（zero execution）：${result.reason}\n（任务保持 ${loadedTask.status}；请检查 Capability 配置后重试或改用 kingdom_start_task legacy 路径。）`
+      }
+
+      // Claim 到达（Claim ≠ Fact）：落 worker_results + Task RUNNING→REVIEW（不是 DONE）。
+      // Owner V0.8 FINAL RELEASE BLOCKER：Claim outcome 按已验证 terminalOutcome 收敛
+      // （COMPLETED/FAILED/ABORTED）——禁止 hardcode COMPLETED；FAILED 不得生成 COMPLETED Claim；
+      // summary 仅来自真实 assistant 文本，无文本 → 诚实回退占位（不伪造"任务完成"类摘要）。
+      const task = store.getTask(loadedTask.task_id)!
+      const running = task.status === 'ASSIGNED' ? store.transitionTask(task, 'RUNNING') : task
+      const outcome = result.terminalOutcome
+      const summary = result.summary
+      store.insertWorkerResult({
+        result_id: randomUUID(),
+        task_id: task.task_id,
+        attempt_no: attemptNo,
+        worker_binding_id: worker,
+        session_id: result.sessionRef,
+        outcome,
+        result_json: JSON.stringify({ outcome, summary }),
+        created_at: new Date().toISOString(),
+      })
+      store.transitionTask(running, 'REVIEW', { result_summary: summary })
+      // settlement：cleanup 确认 → release lease
+      const lease = store.getLease(result.leaseId)
+      if (lease && lease.state !== 'RELEASED') {
+        settleAndRelease(store, result.leaseId, true, 'settled-cleanup-ok')
+      }
+      const nowIso = new Date().toISOString()
+      store.appendEvent({
+        event_id: randomUUID(), kingdom_id: kingdomId, event_type: 'WORKER_RESULT_SUBMITTED',
+        actor_role: 'WORKER', actor_id: worker, target_type: 'task', target_id: task.task_id,
+        payload_json: JSON.stringify({ attempt_no: attemptNo, claimed_outcome: outcome, session_id: result.sessionRef, executor: 'dsh-governed:persistent' }),
+        created_at: nowIso,
+      })
+      store.appendEvent({
+        event_id: randomUUID(), kingdom_id: kingdomId, event_type: 'SESSION_STOPPED',
+        actor_role: 'WORKER', actor_id: worker, target_type: 'execution', target_id: result.executionId,
+        payload_json: JSON.stringify({ task_id: task.task_id, attempt_no: attemptNo, reason: outcome === 'COMPLETED' ? 'completed' : outcome.toLowerCase() }),
+        created_at: nowIso,
+      })
+      return `Governed Worker 已提交第 ${attemptNo} 次尝试的 Claim（outcome=${outcome}，长期 Session ${result.sessionRef.slice(-8)}${result.created ? ' 新建' : ' 复用'}）。\n`
+        + `摘要：${summary}\n`
+        + `任务「${task.title}」现在处于 **REVIEW**。这是一个待审查的 Claim，尚未成为任务完成事实——请 Supervisor 用 kingdom_review_task 裁定 ACCEPT / REWORK / FAIL。`
+    },
+  })), 'dsh-kingdom: governed start-task tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_review_task',

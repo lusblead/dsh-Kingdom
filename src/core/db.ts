@@ -33,9 +33,23 @@ import {
  *   territories tombstone（deleted_at/deleted_reason）、
  *   task_assignments（权威派遣历史 + one-active 唯一索引）、
  *   Territory supervisor backfill（1 个 ACTIVE Supervisor → NULL scope 领地自动接管）。
- * 迁移均为 Versioned + transactional + idempotent ADD COLUMN / CREATE TABLE（不重建表）。
+ * - v4：v0.8.0（M3-S2 Schema v4 Design v6，Owner 三次 Review APPROVED 2026-08-19）——
+ *   四套独立 Core Ledger（session_territory_affinities / execution_leases /
+ *   capability_decisions / dispatch_records）+ executions 重建（增 execution_contract /
+ *   lease_id / capability_decision_id 三列，旧行 backfill LEGACY_COMPAT）+
+ *   tasks.capability_requirement_json / kingdoms.capability_ceiling_json 增量 +
+ *   硬编码 transition trigger（含 INSERT 状态守卫）+ 完整 immutability/DELETE 保护 +
+ *   每连接 PRAGMA foreign_keys=ON 协议。
+ *
+ * 迁移纪律（v2 起）：
+ * - **每个 ensureSchemaVx 只 gate 自己的目标版本、只写自己的目标版本**
+ *   （v2→2 / v3→3 / v4→4）。禁止用全局 SCHEMA_VERSION 做 gate/写入，
+ *   否则 bump 全局版本会令旧迁移重跑并直写新版本、跳过目标迁移。
+ * - v4 的 executions 重建（DROP + RENAME）与全部 v4 DDL 都在 ensureSchemaV4
+ *   的**单事务**内完成；任一步失败 ROLLBACK，库保持完整旧语义。
+ * - v4 DDL 不进 SCHEMA_SQL bootstrap（避免迁移事务语义失效；见 ensureSchemaV4 头注）。
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS kingdoms (
@@ -313,6 +327,106 @@ export interface ExecutionRow {
   model_source: string | null
   /** 不可变执行解析快照 JSON（requested/resolved/source 三节；关键字段以列为准）。 */
   execution_profile_json: string | null
+  /**
+   * v0.8（M3-S2 v6）：Execution Contract。
+   * `LEGACY_COMPAT`（旧 one-shot 路径 backfill）/ `GOVERNED_PERSISTENT`（受治理持久执行）。
+   * 创建后不可变（execution_contract_immutable trigger）。
+   */
+  execution_contract: string
+  /** v0.8：GOVERNED_PERSISTENT 必关联的 Lease（FK → execution_leases）。 */
+  lease_id: string | null
+  /** v0.8：GOVERNED_PERSISTENT 必关联的 GRANTED+ENFORCED Decision（FK → capability_decisions）。 */
+  capability_decision_id: string | null
+}
+
+/**
+ * v0.8（M3-S2 v6）：Session ↔ Territory Affinity Ledger 行。
+ * 完整 Runtime Session identity = (runtime_type, runtime_instance_ref, session_ref)。
+ */
+export interface AffinityRow {
+  affinity_id: string
+  kingdom_id: string
+  worker_binding_id: string
+  runtime_type: string
+  runtime_instance_ref: string
+  session_ref: string
+  territory_id: string
+  established_at: string
+  retired_at: string | null
+  /** 1=当前（retired_at 必 NULL）/ 0=已退役（retired_at 必非 NULL），行内 CHECK 强制。 */
+  is_current: number
+  created_at: string
+}
+
+/** v0.8（M3-S2 v6）：Execution Lease Ledger 行。 */
+export interface LeaseRow {
+  lease_id: string
+  kingdom_id: string
+  worker_binding_id: string
+  runtime_type: string
+  runtime_instance_ref: string
+  session_ref: string
+  territory_id: string
+  task_id: string
+  attempt_no: number
+  /** ACQUIRED..RELEASED / RECOVERING，见 v6 transition matrix。 */
+  state: string
+  capability_decision_id: string | null
+  enforcement_plan_snapshot: string | null
+  release_evidence_json: string | null
+  release_reason: string | null
+  acquired_at: string
+  released_at: string | null
+  updated_at: string
+}
+
+/** v0.8（M3-S2 v6）：Capability Decision Ledger 行。合法组合 GRANTED+ENFORCED / DENIED+{NOT_ATTEMPTED,UNAVAILABLE,FAILED}。 */
+export interface CapabilityDecisionRow {
+  decision_id: string
+  kingdom_id: string
+  task_id: string
+  worker_binding_id: string | null
+  supervisor_binding_id: string | null
+  requirement_snapshot: string | null
+  ceiling_snapshot: string | null
+  proposed_grant_snapshot: string | null
+  scope_snapshot: string | null
+  effective_snapshot: string | null
+  decision: string
+  enforcement_status: string
+  enforcement_evidence_json: string | null
+  requirement_coverage: string
+  reason_code: string | null
+  execution_id: string | null
+  created_at: string
+}
+
+/** v0.8（M3-S2 v6）：Dispatch Record / Intent Ledger 行（COMMIT POINT 先于 Runtime dispatch）。 */
+export interface DispatchRecordRow {
+  dispatch_id: string
+  kingdom_id: string
+  lease_id: string
+  execution_id: string
+  task_id: string
+  attempt_no: number
+  runtime_type: string
+  runtime_instance_ref: string
+  session_ref: string
+  /** INTENDED..TERMINAL / FAILED / RECOVERING，见 v6 transition matrix。 */
+  state: string
+  dispatch_request_snapshot: string
+  dispatch_input_ref_json: string
+  dispatch_payload_hash: string
+  runtime_dispatch_ref: string | null
+  runtime_execution_ref: string | null
+  receipt_json: string | null
+  terminal_evidence_json: string | null
+  output_ref_json: string | null
+  dispatched_at: string | null
+  receipt_at: string | null
+  terminal_at: string | null
+  created_at: string
+  updated_at: string
 }
 
 /** tasks 行（Phase 1 schema，Phase 2 一字未改）。status 语义见 ./task.ts。 */
@@ -359,18 +473,66 @@ export class KingdomStore {
   readonly db: DatabaseSync
   /** 已打开即存在（表已保证）；记录 init 结果供 status 用 */
   readonly existed: boolean
+  /** 库的 schema 版本（经 kingdoms.schema_version 收敛；v4 判定用）。 */
+  readonly schemaVersion: number
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { allowSchemaV4?: boolean } = {}) {
     mkdirSync(dirname(dbPath), { recursive: true })
     const existed = isExistingDatabase(dbPath)
     this.existed = existed
     this.db = new DatabaseSync(dbPath)
-    this.db.exec('PRAGMA journal_mode = WAL')
-    this.db.exec(SCHEMA_SQL)
-    this.ensureEventSequence()
-    this.ensureSessionProfileColumns()
-    this.ensureSchemaV2()
-    this.ensureSchemaV3()
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL')
+      // v0.8（M3-S2 v6 §6 / F-1..F-4）：FK 是连接级设置——每个连接开启 + 回读断言。
+      // 必须在任何事务之前执行（SQLite 禁止在事务内切换 foreign_keys）。
+      this.enableForeignKeys()
+      this.db.exec(SCHEMA_SQL)
+      this.ensureEventSequence()
+      this.ensureSessionProfileColumns()
+      this.ensureSchemaV2()
+      this.ensureSchemaV3()
+      // v0.8（M3-S2 v6）：Schema v4 迁移。
+      // 正式 kingdom.db 受 Formal DB Migration Gate 保护：默认**不自动**迁移已有 v3 库
+      // （打开真实库时保持 v3 语义继续可用，v4 Domain API 会 fail-closed 拒绝）；
+      // 只有「全新库（无王国数据）」或显式 allowSchemaV4=true 才执行 v4。
+      const fresh = !existed || this.getDefaultKingdom() === null
+      const v4Migrated = options.allowSchemaV4 === true || fresh
+      if (v4Migrated) {
+        this.ensureSchemaV4()
+      }
+      // 空王国库（:memory:/新文件）的 UPDATE kingdoms 命中 0 行，
+      // 但 v4 对象已建 → 版本按 MAX(库值, 已执行 v4 ? 4 : 0) 收敛。
+      this.schemaVersion = Math.max(this.readSchemaVersion(), v4Migrated ? 4 : 0)
+    } catch (error: unknown) {
+      // 迁移/初始化失败：关闭连接再抛，避免句柄泄漏锁死文件（Windows EPERM）
+      try { this.db.close() } catch { /* 已关闭则忽略 */ }
+      throw error
+    }
+  }
+
+  /**
+   * v0.8（M3-S2 v6 F-1/F-2）：FK 连接级协议。
+   * 每个连接创建后：PRAGMA foreign_keys=ON → 回读 → 断言 == 1（fail-loud）。
+   */
+  private enableForeignKeys(): void {
+    this.db.exec('PRAGMA foreign_keys = ON')
+    const row = this.db.prepare('PRAGMA foreign_keys').get() as unknown as { foreign_keys: number } | undefined
+    if ((row?.foreign_keys ?? 0) !== 1) {
+      throw new Error('Schema v4 FK protocol failed: PRAGMA foreign_keys read-back != 1（拒绝在 FK 关闭的连接上继续）')
+    }
+  }
+
+  /** 当前库 schema 版本（kingdoms.schema_version 的 MAX；无王国视为 0）。 */
+  private readSchemaVersion(): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(schema_version), 0) AS v FROM kingdoms')
+      .get() as unknown as { v: number } | undefined
+    return row?.v ?? 0
+  }
+
+  /** v0.8：库是否已具备 v4 结构（Domain API 前置校验用；非 v4 一律 fail-closed）。 */
+  get isSchemaV4(): boolean {
+    return this.schemaVersion >= 4 && this.hasV4Objects()
   }
 
   /**
@@ -405,7 +567,8 @@ export class KingdomStore {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(schema_version), 0) AS v FROM kingdoms')
       .get() as unknown as { v: number } | undefined
-    if ((row?.v ?? 0) >= SCHEMA_VERSION) return
+    // gate 自己的目标版本（2），不 gate 全局 SCHEMA_VERSION（见文件头迁移纪律）
+    if ((row?.v ?? 0) >= 2) return
 
     const bindingColumns = ['execution_profile_json'] as const
     const executionColumns = [
@@ -461,7 +624,8 @@ export class KingdomStore {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(schema_version), 0) AS v FROM kingdoms')
       .get() as unknown as { v: number } | undefined
-    if ((row?.v ?? 0) >= SCHEMA_VERSION) return
+    // gate 自己的目标版本（3），不 gate 全局 SCHEMA_VERSION（v0.8 迁移纪律）
+    if ((row?.v ?? 0) >= 3) return
 
     const bindingColumns = ['status', 'retired_at', 'retired_reason'] as const
     const territoryColumns = ['deleted_at', 'deleted_reason'] as const
@@ -511,11 +675,511 @@ export class KingdomStore {
       for (const required of ['task_assignments', 'one_active_assignment_per_task', 'task_assignments_task_idx']) {
         if (!names.has(required)) throw new Error(`Schema v3 migration failed: ${required} missing`)
       }
-      this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(SCHEMA_VERSION)
+      // v3 迁移的目标版本写 3（不是全局 SCHEMA_VERSION——v4 迁移的入口判断依赖它）
+      this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(3)
       this.db.exec('COMMIT')
     } catch (error: unknown) {
       this.db.exec('ROLLBACK')
       throw error
+    }
+  }
+
+  // ── v0.8（M3-S2 Schema v4 Design v6，Owner 三次 Review APPROVED）─────────
+  //
+  // 忠实实现 v6（D:\dsh\kingdom\docs\M3-S2-SCHEMA-V4-DESIGN-v6.md + 49/49 验证脚本）：
+  // - 四套独立 Core Ledger：session_territory_affinities / execution_leases /
+  //   capability_decisions / dispatch_records；
+  // - executions 重建（v6 §14）：建 executions_v4 暂存表（v2 证据列 + 新增
+  //   execution_contract/lease_id/capability_decision_id）→ 全量复制 + LEGACY_COMPAT
+  //   backfill → 校验行数 → 删旧表 → RENAME 回 executions → 重建索引/trigger → 终验；
+  // - 硬编码 transition trigger（含 INSERT 状态守卫）+ 完整 immutability + DELETE 保护；
+  // - 每连接 PRAGMA foreign_keys=ON（构造函数 enableForeignKeys，v6 F-1..F-4）。
+  //
+  // 为什么 v4 DDL 不进 SCHEMA_SQL bootstrap（Owner v0.8 施工 Prompt §13）：
+  // SCHEMA_SQL 在构造函数里先于任何事务执行；若 v4 对象提前进入 bootstrap，
+  // 既有 v3 库开库瞬间就被建出 v4 表，ensureSchemaV4 的"单事务迁移 + 失败 ROLLBACK"
+  // 语义失效。因此 v4 全部 DDL 只在 ensureSchemaV4 的 BEGIN IMMEDIATE 事务内落地。
+
+  /** v4 Ledger 表（affinity/lease/decision）+ 各自索引与 trigger（不含 executions 重建与 dispatch）。 */
+  static readonly V4_LEDGER_SQL = `
+CREATE TABLE IF NOT EXISTS session_territory_affinities (
+  affinity_id       TEXT PRIMARY KEY,
+  kingdom_id        TEXT NOT NULL,
+  worker_binding_id TEXT NOT NULL,
+  runtime_type      TEXT NOT NULL,
+  runtime_instance_ref TEXT NOT NULL,
+  session_ref       TEXT NOT NULL,
+  territory_id      TEXT NOT NULL,
+  established_at    TEXT NOT NULL,
+  retired_at        TEXT,
+  is_current        INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  UNIQUE (runtime_type, runtime_instance_ref, session_ref),
+  CHECK (
+    (is_current = 1 AND retired_at IS NULL)
+    OR
+    (is_current = 0 AND retired_at IS NOT NULL)
+  )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS affinity_one_current_per_worker
+  ON session_territory_affinities(kingdom_id, worker_binding_id)
+  WHERE is_current = 1;
+CREATE TRIGGER IF NOT EXISTS affinity_identity_immutable
+BEFORE UPDATE OF kingdom_id, worker_binding_id, runtime_type,
+                 runtime_instance_ref, session_ref, territory_id,
+                 established_at, created_at
+ON session_territory_affinities
+BEGIN SELECT RAISE(ABORT, 'AFFINITY_IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS affinity_retire
+BEFORE UPDATE OF is_current, retired_at
+ON session_territory_affinities
+BEGIN
+  SELECT RAISE(ABORT, 'AFFINITY_RETIRE_ONLY_JOINT')
+  WHERE NOT (
+    OLD.is_current = 1 AND OLD.retired_at IS NULL
+    AND NEW.is_current = 0 AND NEW.retired_at IS NOT NULL
+  );
+  SELECT RAISE(ABORT, 'AFFINITY_ALREADY_RETIRED')
+  WHERE OLD.retired_at IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS affinity_no_delete
+BEFORE DELETE ON session_territory_affinities
+BEGIN SELECT RAISE(ABORT, 'AFFINITY_NO_DELETE'); END;
+
+CREATE TABLE IF NOT EXISTS execution_leases (
+  lease_id               TEXT PRIMARY KEY,
+  kingdom_id             TEXT NOT NULL,
+  worker_binding_id      TEXT NOT NULL,
+  runtime_type           TEXT NOT NULL,
+  runtime_instance_ref   TEXT NOT NULL,
+  session_ref            TEXT NOT NULL,
+  territory_id           TEXT NOT NULL,
+  task_id                TEXT NOT NULL,
+  attempt_no             INTEGER NOT NULL,
+  state                  TEXT NOT NULL CHECK(state IN
+    ('ACQUIRED','PREPARING','MATERIALIZING','DISPATCH_READY',
+     'EXECUTING','SETTLING','RELEASING','RECOVERING','RELEASED')),
+  capability_decision_id TEXT,
+  enforcement_plan_snapshot TEXT,
+  release_evidence_json  TEXT,
+  release_reason         TEXT,
+  acquired_at            TEXT NOT NULL,
+  released_at            TEXT,
+  updated_at             TEXT NOT NULL,
+  UNIQUE (task_id, attempt_no),
+  UNIQUE (runtime_type, runtime_instance_ref, session_ref, task_id, attempt_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS lease_one_active_per_session
+  ON execution_leases(runtime_type, runtime_instance_ref, session_ref)
+  WHERE state <> 'RELEASED';
+CREATE TRIGGER IF NOT EXISTS lease_requires_matching_affinity
+BEFORE INSERT ON execution_leases
+BEGIN
+  SELECT RAISE(ABORT, 'LEASE_REQUIRES_MATCHING_CURRENT_AFFINITY')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM session_territory_affinities a
+    JOIN tasks t ON t.task_id = NEW.task_id
+    WHERE a.kingdom_id = NEW.kingdom_id
+      AND a.worker_binding_id = NEW.worker_binding_id
+      AND a.runtime_type = NEW.runtime_type
+      AND a.runtime_instance_ref = NEW.runtime_instance_ref
+      AND a.session_ref = NEW.session_ref
+      AND a.is_current = 1 AND a.retired_at IS NULL
+      AND a.territory_id = NEW.territory_id
+      AND t.territory_id = NEW.territory_id
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS lease_identity_immutable
+BEFORE UPDATE OF kingdom_id, worker_binding_id, runtime_type, runtime_instance_ref,
+                 session_ref, territory_id, task_id, attempt_no, acquired_at
+ON execution_leases
+BEGIN SELECT RAISE(ABORT, 'LEASE_IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS lease_plan_once
+BEFORE UPDATE OF enforcement_plan_snapshot
+ON execution_leases
+WHEN OLD.enforcement_plan_snapshot IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'LEASE_PLAN_ALREADY_SET'); END;
+CREATE TRIGGER IF NOT EXISTS lease_decision_once
+BEFORE UPDATE OF capability_decision_id
+ON execution_leases
+WHEN OLD.capability_decision_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'LEASE_DECISION_ALREADY_BOUND'); END;
+CREATE TRIGGER IF NOT EXISTS lease_release_evidence_once
+BEFORE UPDATE OF release_evidence_json, release_reason
+ON execution_leases
+WHEN OLD.release_evidence_json IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'LEASE_RELEASE_EVIDENCE_ALREADY_SET'); END;
+CREATE TRIGGER IF NOT EXISTS lease_state_guard
+BEFORE UPDATE OF state ON execution_leases
+WHEN NEW.state <> OLD.state
+BEGIN
+  SELECT RAISE(ABORT, 'ILLEGAL_LEASE_TRANSITION') WHERE NOT (
+    (OLD.state='ACQUIRED' AND NEW.state IN ('PREPARING','RECOVERING'))
+    OR (OLD.state='PREPARING' AND NEW.state IN ('MATERIALIZING','RECOVERING'))
+    OR (OLD.state='MATERIALIZING' AND NEW.state IN ('DISPATCH_READY','RECOVERING','RELEASED'))
+    OR (OLD.state='DISPATCH_READY' AND NEW.state IN ('EXECUTING','RECOVERING'))
+    OR (OLD.state='EXECUTING' AND NEW.state IN ('SETTLING','RECOVERING'))
+    OR (OLD.state='SETTLING' AND NEW.state IN ('RELEASING','RECOVERING'))
+    OR (OLD.state='RELEASING' AND NEW.state IN ('RELEASED','RECOVERING'))
+    OR (OLD.state='RECOVERING' AND NEW.state IN ('RELEASED','RECOVERING'))
+  );
+  SELECT RAISE(ABORT, 'LEASE_MATERIALIZING_REQUIRES_PLAN')
+  WHERE NEW.state='MATERIALIZING' AND (NEW.enforcement_plan_snapshot IS NULL OR json_valid(NEW.enforcement_plan_snapshot)=0);
+  SELECT RAISE(ABORT, 'LEASE_DISPATCH_READY_REQUIRES_DECISION')
+  WHERE NEW.state='DISPATCH_READY' AND NOT EXISTS (
+    SELECT 1 FROM capability_decisions d
+    WHERE d.decision_id = NEW.capability_decision_id
+      AND d.decision='GRANTED' AND d.enforcement_status='ENFORCED'
+      AND d.enforcement_evidence_json IS NOT NULL
+  );
+  SELECT RAISE(ABORT, 'LEASE_RELEASED_REQUIRES_EVIDENCE')
+  WHERE NEW.state='RELEASED' AND (NEW.release_evidence_json IS NULL OR NEW.released_at IS NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS lease_insert_state_guard
+BEFORE INSERT ON execution_leases
+WHEN NEW.state <> 'ACQUIRED'
+BEGIN SELECT RAISE(ABORT, 'LEASE_INSERT_MUST_BE_ACQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS lease_no_delete
+BEFORE DELETE ON execution_leases
+BEGIN SELECT RAISE(ABORT, 'LEASE_NO_DELETE'); END;
+
+CREATE TABLE IF NOT EXISTS capability_decisions (
+  decision_id              TEXT PRIMARY KEY,
+  kingdom_id               TEXT NOT NULL,
+  task_id                  TEXT NOT NULL,
+  worker_binding_id        TEXT,
+  supervisor_binding_id    TEXT,
+  requirement_snapshot     TEXT,
+  ceiling_snapshot         TEXT,
+  proposed_grant_snapshot  TEXT,
+  scope_snapshot           TEXT,
+  effective_snapshot       TEXT,
+  decision                 TEXT NOT NULL,
+  enforcement_status       TEXT NOT NULL,
+  enforcement_evidence_json TEXT,
+  requirement_coverage     TEXT NOT NULL DEFAULT 'NONE'
+                            CHECK(requirement_coverage IN ('FULL','PARTIAL','NONE')),
+  reason_code              TEXT,
+  execution_id             TEXT,
+  created_at               TEXT NOT NULL,
+  CHECK (
+    (decision = 'GRANTED' AND enforcement_status = 'ENFORCED')
+    OR
+    (decision = 'DENIED' AND enforcement_status IN
+       ('NOT_ATTEMPTED','UNAVAILABLE','FAILED'))
+  ),
+  CHECK (decision <> 'GRANTED' OR
+    (enforcement_evidence_json IS NOT NULL AND json_valid(enforcement_evidence_json)=1))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS capability_decision_execution_uk
+  ON capability_decisions(execution_id) WHERE execution_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS capability_decision_immutable
+BEFORE UPDATE OF kingdom_id, task_id, worker_binding_id, supervisor_binding_id,
+                 requirement_snapshot, ceiling_snapshot, proposed_grant_snapshot,
+                 scope_snapshot, effective_snapshot, decision, enforcement_status,
+                 enforcement_evidence_json, requirement_coverage, reason_code, created_at
+ON capability_decisions
+BEGIN SELECT RAISE(ABORT, 'CAPABILITY_DECISION_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS capability_decision_execution_bind
+BEFORE UPDATE OF execution_id
+ON capability_decisions
+WHEN NEW.execution_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'CAPABILITY_DECISION_EXECUTION_ALREADY_BOUND')
+  WHERE OLD.execution_id IS NOT NULL;
+  SELECT RAISE(ABORT, 'CAPABILITY_DECISION_BIND_REQUIRES_GRANTED')
+  WHERE NOT (OLD.decision='GRANTED' AND OLD.enforcement_status='ENFORCED');
+END;
+CREATE TRIGGER IF NOT EXISTS capability_decision_no_delete
+BEFORE DELETE ON capability_decisions
+BEGIN SELECT RAISE(ABORT, 'CAPABILITY_DECISION_NO_DELETE'); END;
+`
+
+  /**
+   * executions 重建形态（暂存名 executions_v4，迁移后 RENAME 回 executions）。
+   * = 旧 executions 全部列（含 v2 证据列）+ 新增 3 列（v6 §8.1）。
+   */
+  static readonly V4_EXECUTIONS_STAGING_SQL = `
+CREATE TABLE IF NOT EXISTS executions_v4 (
+  execution_id       TEXT PRIMARY KEY,
+  task_id            TEXT NOT NULL,
+  attempt_no         INTEGER NOT NULL,
+  worker_binding_id  TEXT,
+  session_id         TEXT,
+  state              TEXT NOT NULL CHECK(state IN
+    ('STARTING','RUNNING','PAUSED','RECOVERING','COMPLETED','FAILED','ABORTED')),
+  detail             TEXT,
+  started_at         TEXT NOT NULL,
+  heartbeat_at       TEXT,
+  ended_at           TEXT,
+  pause_requested_at TEXT,
+  executor_kind      TEXT,
+  provider           TEXT,
+  provider_source    TEXT,
+  requested_model    TEXT,
+  resolved_model     TEXT,
+  model_source       TEXT,
+  execution_profile_json TEXT,
+  execution_contract TEXT NOT NULL DEFAULT 'LEGACY_COMPAT'
+                       CHECK(execution_contract IN ('LEGACY_COMPAT','GOVERNED_PERSISTENT')),
+  lease_id           TEXT,
+  capability_decision_id TEXT,
+  UNIQUE (task_id, attempt_no),
+  CHECK (
+    execution_contract = 'LEGACY_COMPAT'
+    OR (
+      execution_contract = 'GOVERNED_PERSISTENT'
+      AND lease_id IS NOT NULL
+      AND capability_decision_id IS NOT NULL
+    )
+  ),
+  FOREIGN KEY (lease_id) REFERENCES execution_leases(lease_id),
+  FOREIGN KEY (capability_decision_id) REFERENCES capability_decisions(decision_id)
+);
+`
+
+  /** executions 重建后的 trigger（RENAME 回 executions 之后创建；不依赖 RENAME 自动改写）。 */
+  static readonly V4_EXECUTIONS_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS execution_governed_consistency
+BEFORE INSERT ON executions
+WHEN NEW.execution_contract = 'GOVERNED_PERSISTENT'
+BEGIN
+  SELECT RAISE(ABORT, 'EXECUTION_GOVERNED_REQUIRES_MATCHING_LEASE')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM execution_leases l
+    JOIN capability_decisions d ON d.decision_id = NEW.capability_decision_id
+    WHERE l.lease_id = NEW.lease_id
+      AND l.task_id = NEW.task_id
+      AND l.attempt_no = NEW.attempt_no
+      AND l.capability_decision_id = NEW.capability_decision_id
+      AND l.kingdom_id = d.kingdom_id
+      AND d.task_id = NEW.task_id
+      AND d.decision='GRANTED' AND d.enforcement_status='ENFORCED'
+      AND (d.execution_id IS NULL OR d.execution_id = NEW.execution_id)
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS execution_contract_immutable
+BEFORE UPDATE OF execution_contract ON executions
+BEGIN SELECT RAISE(ABORT, 'EXECUTION_CONTRACT_IMMUTABLE'); END;
+`
+
+  /** Dispatch Ledger（executions 重建完成后创建；FK 直接指向最终名 executions）。 */
+  static readonly V4_DISPATCH_SQL = `
+CREATE TABLE IF NOT EXISTS dispatch_records (
+  dispatch_id          TEXT PRIMARY KEY,
+  kingdom_id           TEXT NOT NULL,
+  lease_id             TEXT NOT NULL,
+  execution_id         TEXT NOT NULL,
+  task_id              TEXT NOT NULL,
+  attempt_no           INTEGER NOT NULL,
+  runtime_type         TEXT NOT NULL,
+  runtime_instance_ref TEXT NOT NULL,
+  session_ref          TEXT NOT NULL,
+  state                TEXT NOT NULL CHECK(state IN
+    ('INTENDED','DISPATCHED','RECEIVED','CORRELATED','TERMINAL','FAILED','RECOVERING')),
+  dispatch_request_snapshot TEXT NOT NULL,
+  dispatch_input_ref_json  TEXT NOT NULL,
+  dispatch_payload_hash    TEXT NOT NULL,
+  runtime_dispatch_ref  TEXT,
+  runtime_execution_ref TEXT,
+  receipt_json          TEXT,
+  terminal_evidence_json TEXT,
+  output_ref_json       TEXT,
+  dispatched_at         TEXT,
+  receipt_at            TEXT,
+  terminal_at           TEXT,
+  created_at            TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
+  FOREIGN KEY (lease_id) REFERENCES execution_leases(lease_id),
+  FOREIGN KEY (execution_id) REFERENCES executions(execution_id),
+  UNIQUE (lease_id),
+  UNIQUE (execution_id)
+);
+CREATE TRIGGER IF NOT EXISTS dispatch_request_immutable
+BEFORE UPDATE OF dispatch_id, kingdom_id, lease_id, execution_id, task_id, attempt_no,
+                 runtime_type, runtime_instance_ref, session_ref,
+                 dispatch_request_snapshot, dispatch_input_ref_json, dispatch_payload_hash,
+                 created_at
+ON dispatch_records
+BEGIN SELECT RAISE(ABORT, 'DISPATCH_REQUEST_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS dispatch_requires_ready_lease
+BEFORE INSERT ON dispatch_records
+BEGIN
+  SELECT RAISE(ABORT, 'DISPATCH_REQUIRES_MATCHING_READY_LEASE')
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM execution_leases l
+    JOIN executions e ON e.execution_id = NEW.execution_id
+    WHERE l.lease_id = NEW.lease_id
+      AND l.state = 'DISPATCH_READY'
+      AND l.kingdom_id = NEW.kingdom_id
+      AND l.task_id = NEW.task_id
+      AND l.attempt_no = NEW.attempt_no
+      AND l.runtime_type = NEW.runtime_type
+      AND l.runtime_instance_ref = NEW.runtime_instance_ref
+      AND l.session_ref = NEW.session_ref
+      AND e.task_id = NEW.task_id
+      AND e.attempt_no = NEW.attempt_no
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS dispatch_state_guard
+BEFORE UPDATE OF state ON dispatch_records
+WHEN NEW.state <> OLD.state
+BEGIN
+  SELECT RAISE(ABORT, 'ILLEGAL_DISPATCH_TRANSITION') WHERE NOT (
+    (OLD.state='INTENDED' AND NEW.state IN ('DISPATCHED','FAILED','RECOVERING'))
+    OR (OLD.state='DISPATCHED' AND NEW.state IN ('RECEIVED','RECOVERING'))
+    OR (OLD.state='RECEIVED' AND NEW.state IN ('CORRELATED','RECOVERING'))
+    OR (OLD.state='CORRELATED' AND NEW.state IN ('TERMINAL','RECOVERING'))
+    OR (OLD.state='RECOVERING' AND NEW.state IN ('TERMINAL','FAILED','RECOVERING'))
+  );
+  SELECT RAISE(ABORT, 'DISPATCH_RECEIVED_REQUIRES_REF_RECEIPT')
+  WHERE NEW.state='RECEIVED' AND (NEW.runtime_dispatch_ref IS NULL OR NEW.receipt_json IS NULL OR NEW.receipt_at IS NULL);
+  SELECT RAISE(ABORT, 'DISPATCH_CORRELATED_REQUIRES_EXEC_REF')
+  WHERE NEW.state='CORRELATED' AND NEW.runtime_execution_ref IS NULL;
+  SELECT RAISE(ABORT, 'DISPATCH_TERMINAL_REQUIRES_EVIDENCE')
+  WHERE NEW.state='TERMINAL' AND (NEW.terminal_evidence_json IS NULL OR NEW.terminal_at IS NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS dispatch_insert_state_guard
+BEFORE INSERT ON dispatch_records
+WHEN NEW.state <> 'INTENDED'
+BEGIN SELECT RAISE(ABORT, 'DISPATCH_INSERT_MUST_BE_INTENDED'); END;
+CREATE TRIGGER IF NOT EXISTS dispatch_no_delete
+BEFORE DELETE ON dispatch_records
+BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
+`
+
+  /** v4 对象是否已存在（execution_leases 表是 v4 迁移完成的地标）。 */
+  private hasV4Objects(): boolean {
+    return this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_leases'`).get() !== undefined
+  }
+
+  /**
+   * v0.8（M3-S2 v6）：Schema v4 迁移（单事务、可回滚、幂等 gate 于 schema_version>=4）。
+   *
+   * 顺序（v6 §14 + 本文件头迁移纪律）：
+   * 1. gate：schema_version >= 4 **或 v4 对象已存在**（空王国库 schema_version 可能为 0）→ 已迁移，直接返回；
+   * 2. BEGIN IMMEDIATE：
+   *    a. ADD COLUMN tasks.capability_requirement_json / kingdoms.capability_ceiling_json；
+   *    b. 四 Ledger 中三张（affinity/lease/decision）+ 索引 + trigger；
+   *    c. 建 executions_v4 暂存表（旧列 + 3 新列 + FK）→ 全量复制 + LEGACY_COMPAT backfill
+   *       → 校验行数一致（不一致即抛，整单回滚）；
+   *    d. DROP 旧 executions → RENAME executions_v4 → executions → 重建索引；
+   *    e. executions trigger（governed consistency / contract immutable）；
+   *    f. dispatch_records + trigger（FK 直接指向最终名 executions）；
+   *    g. UPDATE kingdoms.schema_version = 4；
+   * 3. 终验（事务内 fail-loud）：sqlite_master 精确对象集、PRAGMA foreign_key_check 为空、
+   *    PRAGMA integrity_check = ok；
+   * 4. COMMIT；任一步失败 ROLLBACK，库保持完整 v3 语义。
+   */
+  private ensureSchemaV4(): void {
+    if (this.readSchemaVersion() >= 4 || this.hasV4Objects()) return
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // a. tasks / kingdoms 增量列（ADD COLUMN 无 IF NOT EXISTS，用 PRAGMA table_info gate）
+      const tableColumns = (table: string): Set<string> => new Set(
+        (this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map(c => c.name),
+      )
+      if (!tableColumns('tasks').has('capability_requirement_json')) {
+        this.db.exec('ALTER TABLE tasks ADD COLUMN capability_requirement_json TEXT')
+      }
+      if (!tableColumns('kingdoms').has('capability_ceiling_json')) {
+        this.db.exec('ALTER TABLE kingdoms ADD COLUMN capability_ceiling_json TEXT')
+      }
+
+      // b. affinity / lease / decision Ledger（含索引与 trigger）
+      this.db.exec(KingdomStore.V4_LEDGER_SQL)
+
+      // c. executions 重建：暂存表 → 复制（LEGACY_COMPAT backfill）→ 行数校验
+      this.db.exec(KingdomStore.V4_EXECUTIONS_STAGING_SQL)
+      this.db.exec(`
+        INSERT INTO executions_v4
+          (execution_id, task_id, attempt_no, worker_binding_id, session_id, state,
+           detail, started_at, heartbeat_at, ended_at, pause_requested_at,
+           executor_kind, provider, provider_source, requested_model, resolved_model,
+           model_source, execution_profile_json,
+           execution_contract, lease_id, capability_decision_id)
+        SELECT
+           execution_id, task_id, attempt_no, worker_binding_id, session_id, state,
+           detail, started_at, heartbeat_at, ended_at, pause_requested_at,
+           executor_kind, provider, provider_source, requested_model, resolved_model,
+           model_source, execution_profile_json,
+           'LEGACY_COMPAT', NULL, NULL
+        FROM executions
+      `)
+      const oldCount = this.db.prepare('SELECT COUNT(*) AS n FROM executions').get() as unknown as { n: number }
+      const newCount = this.db.prepare('SELECT COUNT(*) AS n FROM executions_v4').get() as unknown as { n: number }
+      if (oldCount.n !== newCount.n) {
+        throw new Error(`Schema v4 migration failed: executions row count mismatch (old=${oldCount.n}, new=${newCount.n})`)
+      }
+
+      // d. 换表：删旧 → 暂存表 RENAME 回 executions → 重建索引
+      this.db.exec('DROP TABLE executions')
+      this.db.exec('ALTER TABLE executions_v4 RENAME TO executions')
+      this.db.exec('CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id)')
+
+      // e. executions trigger（改名后创建，不依赖 RENAME 自动改写）
+      this.db.exec(KingdomStore.V4_EXECUTIONS_TRIGGERS_SQL)
+
+      // f. dispatch_records + trigger（FK 直接指向最终名 executions）
+      this.db.exec(KingdomStore.V4_DISPATCH_SQL)
+
+      // g. schema_version = 4
+      this.db.prepare('UPDATE kingdoms SET schema_version = ?').run(4)
+
+      // 终验（事务内 fail-loud）
+      this.verifyV4Objects()
+      const fk = this.db.prepare('PRAGMA foreign_key_check').all() as unknown as unknown[]
+      if (fk.length > 0) {
+        throw new Error(`Schema v4 migration failed: foreign_key_check found ${fk.length} violation(s)`)
+      }
+      const integrity = this.db.prepare('PRAGMA integrity_check').get() as unknown as { integrity_check: string }
+      if (integrity.integrity_check !== 'ok') {
+        throw new Error(`Schema v4 migration failed: integrity_check = ${integrity.integrity_check}`)
+      }
+
+      this.db.exec('COMMIT')
+    } catch (error: unknown) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /** v4 迁移终验：sqlite_master 精确对象集（表/索引/trigger 全在、无多余 v4 对象缺失）。 */
+  private verifyV4Objects(): void {
+    const rows = this.db.prepare(
+      `SELECT name, type FROM sqlite_master WHERE type IN ('table','index','trigger')`,
+    ).all() as unknown as { name: string; type: string }[]
+    const names = new Set(rows.map(r => r.name))
+    const requiredTables = [
+      'session_territory_affinities', 'execution_leases', 'capability_decisions', 'dispatch_records', 'executions',
+    ]
+    const requiredIndexes = [
+      'affinity_one_current_per_worker', 'lease_one_active_per_session',
+      'capability_decision_execution_uk', 'executions_task_idx',
+    ]
+    const requiredTriggers = [
+      'affinity_identity_immutable', 'affinity_retire', 'affinity_no_delete',
+      'lease_requires_matching_affinity', 'lease_identity_immutable', 'lease_plan_once',
+      'lease_decision_once', 'lease_release_evidence_once', 'lease_state_guard',
+      'lease_insert_state_guard', 'lease_no_delete',
+      'capability_decision_immutable', 'capability_decision_execution_bind', 'capability_decision_no_delete',
+      'execution_governed_consistency', 'execution_contract_immutable',
+      'dispatch_request_immutable', 'dispatch_requires_ready_lease', 'dispatch_state_guard',
+      'dispatch_insert_state_guard', 'dispatch_no_delete',
+    ]
+    for (const name of [...requiredTables, ...requiredIndexes, ...requiredTriggers]) {
+      if (!names.has(name)) throw new Error(`Schema v4 migration failed: expected object missing: ${name}`)
+    }
+    // executions 必须是 v4 形态（含新列）
+    const execColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(executions)').all() as unknown as { name: string }[]).map(c => c.name),
+    )
+    for (const column of ['execution_contract', 'lease_id', 'capability_decision_id', 'executor_kind']) {
+      if (!execColumns.has(column)) throw new Error(`Schema v4 migration failed: executions.${column} missing`)
     }
   }
 
@@ -1100,8 +1764,8 @@ export class KingdomStore {
            (execution_id, task_id, attempt_no, worker_binding_id, session_id, state, detail,
             started_at, heartbeat_at, ended_at, pause_requested_at,
             executor_kind, provider, provider_source, requested_model, resolved_model, model_source,
-            execution_profile_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            execution_profile_json, execution_contract, lease_id, capability_decision_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.execution_id,
@@ -1122,6 +1786,9 @@ export class KingdomStore {
         row.resolved_model,
         row.model_source,
         row.execution_profile_json,
+        row.execution_contract ?? 'LEGACY_COMPAT',
+        row.lease_id ?? null,
+        row.capability_decision_id ?? null,
       )
     return row
   }
@@ -1189,6 +1856,280 @@ export class KingdomStore {
       .run(at, executionId)
   }
 
+  // ── v0.8 Runtime Governance Ledgers（M3-S2 v6；约束由 DB trigger 权威执行）────
+
+  // session_territory_affinities ────────────────────────────────
+
+  insertAffinity(row: AffinityRow): AffinityRow {
+    this.db
+      .prepare(
+        `INSERT INTO session_territory_affinities
+           (affinity_id, kingdom_id, worker_binding_id, runtime_type, runtime_instance_ref,
+            session_ref, territory_id, established_at, retired_at, is_current, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.affinity_id, row.kingdom_id, row.worker_binding_id, row.runtime_type,
+        row.runtime_instance_ref, row.session_ref, row.territory_id, row.established_at,
+        row.retired_at ?? null, row.is_current ?? 1, row.created_at,
+      )
+    return row
+  }
+
+  getAffinity(affinityId: string): AffinityRow | null {
+    const rows = this.db.prepare('SELECT * FROM session_territory_affinities WHERE affinity_id = ?').all(affinityId) as unknown as AffinityRow[]
+    return rows[0] ?? null
+  }
+
+  getAffinityBySession(session: { runtimeType: string; runtimeInstanceRef: string; sessionRef: string }): AffinityRow | null {
+    const rows = this.db
+      .prepare(`SELECT * FROM session_territory_affinities
+                 WHERE runtime_type = ? AND runtime_instance_ref = ? AND session_ref = ?`)
+      .all(session.runtimeType, session.runtimeInstanceRef, session.sessionRef) as unknown as AffinityRow[]
+    return rows[0] ?? null
+  }
+
+  listAffinities(kingdomId: string): AffinityRow[] {
+    return this.db
+      .prepare('SELECT * FROM session_territory_affinities WHERE kingdom_id = ? ORDER BY created_at')
+      .all(kingdomId) as unknown as AffinityRow[]
+  }
+
+  /** Worker 当前（未退役）Affinity；DB 部分唯一索引保证至多一条。 */
+  getCurrentAffinityForWorker(kingdomId: string, workerBindingId: string): AffinityRow | null {
+    const rows = this.db
+      .prepare(`SELECT * FROM session_territory_affinities
+                 WHERE kingdom_id = ? AND worker_binding_id = ? AND is_current = 1 LIMIT 1`)
+      .all(kingdomId, workerBindingId) as unknown as AffinityRow[]
+    return rows[0] ?? null
+  }
+
+  /**
+   * 退役 affinity（唯一合法联合转换由 affinity_retire trigger 强制）。
+   * 仅做数据写；Domain 层负责并发/事务与事件。
+   */
+  retireAffinityRow(affinityId: string, retiredAt: string): AffinityRow | null {
+    this.db
+      .prepare(`UPDATE session_territory_affinities SET is_current = 0, retired_at = ? WHERE affinity_id = ?`)
+      .run(retiredAt, affinityId)
+    return this.getAffinity(affinityId)
+  }
+
+  // execution_leases ────────────────────────────────────────────
+
+  insertLease(row: LeaseRow): LeaseRow {
+    this.db
+      .prepare(
+        `INSERT INTO execution_leases
+           (lease_id, kingdom_id, worker_binding_id, runtime_type, runtime_instance_ref,
+            session_ref, territory_id, task_id, attempt_no, state,
+            capability_decision_id, enforcement_plan_snapshot, release_evidence_json, release_reason,
+            acquired_at, released_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.lease_id, row.kingdom_id, row.worker_binding_id, row.runtime_type,
+        row.runtime_instance_ref, row.session_ref, row.territory_id, row.task_id,
+        row.attempt_no, row.state, row.capability_decision_id ?? null,
+        row.enforcement_plan_snapshot ?? null, row.release_evidence_json ?? null,
+        row.release_reason ?? null, row.acquired_at, row.released_at ?? null, row.updated_at,
+      )
+    return row
+  }
+
+  getLease(leaseId: string): LeaseRow | null {
+    const rows = this.db.prepare('SELECT * FROM execution_leases WHERE lease_id = ?').all(leaseId) as unknown as LeaseRow[]
+    return rows[0] ?? null
+  }
+
+  getLeaseByTaskAttempt(taskId: string, attemptNo: number): LeaseRow | null {
+    const rows = this.db
+      .prepare('SELECT * FROM execution_leases WHERE task_id = ? AND attempt_no = ?')
+      .all(taskId, attemptNo) as unknown as LeaseRow[]
+    return rows[0] ?? null
+  }
+
+  listLeases(kingdomId: string): LeaseRow[] {
+    return this.db
+      .prepare('SELECT * FROM execution_leases WHERE kingdom_id = ? ORDER BY acquired_at')
+      .all(kingdomId) as unknown as LeaseRow[]
+  }
+
+  /** 某 Session 当前未释放的 Lease（部分唯一索引保证至多一条非 RELEASED）。 */
+  getActiveLeaseForSession(session: { runtimeType: string; runtimeInstanceRef: string; sessionRef: string }): LeaseRow | null {
+    const rows = this.db
+      .prepare(`SELECT * FROM execution_leases
+                 WHERE runtime_type = ? AND runtime_instance_ref = ? AND session_ref = ? AND state <> 'RELEASED'
+                 LIMIT 1`)
+      .all(session.runtimeType, session.runtimeInstanceRef, session.sessionRef) as unknown as LeaseRow[]
+    return rows[0] ?? null
+  }
+
+  /**
+   * CAS 推进 Lease 状态：`WHERE lease_id=? AND state=?`（期望旧态）。
+   * 0 行更新 = 陈旧态（并发/重复调用）→ 抛 StaleStateError（fail-closed）。
+   * 转移合法性由 lease_state_guard trigger 权威执行。
+   */
+  updateLeaseState(leaseId: string, expectedState: string, nextState: string, extra: {
+    plan?: string | null
+    decisionId?: string | null
+    releaseEvidence?: string | null
+    releaseReason?: string | null
+    releasedAt?: string | null
+  } = {}, at: string): LeaseRow {
+    const sets = ['state = ?', 'updated_at = ?']
+    const params: (string | number | null)[] = [nextState, at]
+    if (extra.plan !== undefined) { sets.push('enforcement_plan_snapshot = ?'); params.push(extra.plan) }
+    if (extra.decisionId !== undefined) { sets.push('capability_decision_id = ?'); params.push(extra.decisionId) }
+    if (extra.releaseEvidence !== undefined) { sets.push('release_evidence_json = ?'); params.push(extra.releaseEvidence) }
+    if (extra.releaseReason !== undefined) { sets.push('release_reason = ?'); params.push(extra.releaseReason) }
+    if (extra.releasedAt !== undefined) { sets.push('released_at = ?'); params.push(extra.releasedAt) }
+    params.push(leaseId, expectedState)
+    const result = this.db
+      .prepare(`UPDATE execution_leases SET ${sets.join(', ')} WHERE lease_id = ? AND state = ?`)
+      .run(...params)
+    if (result.changes !== 1) {
+      throw new StaleStateError(`lease ${leaseId}`, expectedState, nextState)
+    }
+    const updated = this.getLease(leaseId)
+    if (!updated) throw new Error(`lease ${leaseId} vanished after CAS update`)
+    return updated
+  }
+
+  // capability_decisions ────────────────────────────────────────
+
+  insertCapabilityDecision(row: CapabilityDecisionRow): CapabilityDecisionRow {
+    this.db
+      .prepare(
+        `INSERT INTO capability_decisions
+           (decision_id, kingdom_id, task_id, worker_binding_id, supervisor_binding_id,
+            requirement_snapshot, ceiling_snapshot, proposed_grant_snapshot, scope_snapshot, effective_snapshot,
+            decision, enforcement_status, enforcement_evidence_json, requirement_coverage,
+            reason_code, execution_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.decision_id, row.kingdom_id, row.task_id, row.worker_binding_id ?? null,
+        row.supervisor_binding_id ?? null, row.requirement_snapshot ?? null,
+        row.ceiling_snapshot ?? null, row.proposed_grant_snapshot ?? null,
+        row.scope_snapshot ?? null, row.effective_snapshot ?? null,
+        row.decision, row.enforcement_status, row.enforcement_evidence_json ?? null,
+        row.requirement_coverage ?? 'NONE', row.reason_code ?? null, row.execution_id ?? null,
+        row.created_at,
+      )
+    return row
+  }
+
+  getCapabilityDecision(decisionId: string): CapabilityDecisionRow | null {
+    const rows = this.db.prepare('SELECT * FROM capability_decisions WHERE decision_id = ?').all(decisionId) as unknown as CapabilityDecisionRow[]
+    return rows[0] ?? null
+  }
+
+  listCapabilityDecisions(kingdomId: string): CapabilityDecisionRow[] {
+    return this.db
+      .prepare('SELECT * FROM capability_decisions WHERE kingdom_id = ? ORDER BY created_at')
+      .all(kingdomId) as unknown as CapabilityDecisionRow[]
+  }
+
+  /** 绑定 Decision → Execution（一次 NULL→值，仅 GRANTED+ENFORCED；trigger 权威执行）。 */
+  bindDecisionExecution(decisionId: string, executionId: string): CapabilityDecisionRow | null {
+    this.db.prepare('UPDATE capability_decisions SET execution_id = ? WHERE decision_id = ?').run(executionId, decisionId)
+    return this.getCapabilityDecision(decisionId)
+  }
+
+  // dispatch_records ────────────────────────────────────────────
+
+  insertDispatchIntent(row: DispatchRecordRow): DispatchRecordRow {
+    this.db
+      .prepare(
+        `INSERT INTO dispatch_records
+           (dispatch_id, kingdom_id, lease_id, execution_id, task_id, attempt_no,
+            runtime_type, runtime_instance_ref, session_ref, state,
+            dispatch_request_snapshot, dispatch_input_ref_json, dispatch_payload_hash,
+            runtime_dispatch_ref, runtime_execution_ref, receipt_json, terminal_evidence_json,
+            output_ref_json, dispatched_at, receipt_at, terminal_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.dispatch_id, row.kingdom_id, row.lease_id, row.execution_id, row.task_id,
+        row.attempt_no, row.runtime_type, row.runtime_instance_ref, row.session_ref,
+        row.state, row.dispatch_request_snapshot, row.dispatch_input_ref_json,
+        row.dispatch_payload_hash, row.runtime_dispatch_ref ?? null,
+        row.runtime_execution_ref ?? null, row.receipt_json ?? null,
+        row.terminal_evidence_json ?? null, row.output_ref_json ?? null,
+        row.dispatched_at ?? null, row.receipt_at ?? null, row.terminal_at ?? null,
+        row.created_at, row.updated_at,
+      )
+    return row
+  }
+
+  getDispatch(dispatchId: string): DispatchRecordRow | null {
+    const rows = this.db.prepare('SELECT * FROM dispatch_records WHERE dispatch_id = ?').all(dispatchId) as unknown as DispatchRecordRow[]
+    return rows[0] ?? null
+  }
+
+  listDispatches(kingdomId: string): DispatchRecordRow[] {
+    return this.db
+      .prepare('SELECT * FROM dispatch_records WHERE kingdom_id = ? ORDER BY created_at')
+      .all(kingdomId) as unknown as DispatchRecordRow[]
+  }
+
+  /** CAS 推进 Dispatch 状态（期望旧态；转移合法性由 dispatch_state_guard trigger 权威执行）。 */
+  updateDispatchState(dispatchId: string, expectedState: string, nextState: string, extra: {
+    runtimeDispatchRef?: string | null
+    runtimeExecutionRef?: string | null
+    receiptJson?: string | null
+    terminalEvidenceJson?: string | null
+    outputRefJson?: string | null
+    dispatchedAt?: string | null
+    receiptAt?: string | null
+    terminalAt?: string | null
+  } = {}, at: string): DispatchRecordRow {
+    const sets = ['state = ?', 'updated_at = ?']
+    const params: (string | number | null)[] = [nextState, at]
+    const put = (column: string, key: keyof typeof extra): void => {
+      if (extra[key] !== undefined) { sets.push(`${column} = ?`); params.push(extra[key] ?? null) }
+    }
+    put('runtime_dispatch_ref', 'runtimeDispatchRef')
+    put('runtime_execution_ref', 'runtimeExecutionRef')
+    put('receipt_json', 'receiptJson')
+    put('terminal_evidence_json', 'terminalEvidenceJson')
+    put('output_ref_json', 'outputRefJson')
+    put('dispatched_at', 'dispatchedAt')
+    put('receipt_at', 'receiptAt')
+    put('terminal_at', 'terminalAt')
+    params.push(dispatchId, expectedState)
+    const result = this.db
+      .prepare(`UPDATE dispatch_records SET ${sets.join(', ')} WHERE dispatch_id = ? AND state = ?`)
+      .run(...params)
+    if (result.changes !== 1) {
+      throw new StaleStateError(`dispatch ${dispatchId}`, expectedState, nextState)
+    }
+    const updated = this.getDispatch(dispatchId)
+    if (!updated) throw new Error(`dispatch ${dispatchId} vanished after CAS update`)
+    return updated
+  }
+
+  // tasks.capability_requirement_json / kingdoms.capability_ceiling_json（v6 增量）────
+
+  getTaskCapabilityRequirement(taskId: string): string | null {
+    const row = this.db.prepare('SELECT capability_requirement_json FROM tasks WHERE task_id = ?').get(taskId) as unknown as { capability_requirement_json: string | null } | undefined
+    return row?.capability_requirement_json ?? null
+  }
+
+  setTaskCapabilityRequirement(taskId: string, json: string | null): void {
+    this.db.prepare('UPDATE tasks SET capability_requirement_json = ? WHERE task_id = ?').run(json, taskId)
+  }
+
+  getKingdomCapabilityCeiling(kingdomId: string): string | null {
+    const row = this.db.prepare('SELECT capability_ceiling_json FROM kingdoms WHERE kingdom_id = ?').get(kingdomId) as unknown as { capability_ceiling_json: string | null } | undefined
+    return row?.capability_ceiling_json ?? null
+  }
+
+  setKingdomCapabilityCeiling(kingdomId: string, json: string | null): void {
+    this.db.prepare('UPDATE kingdoms SET capability_ceiling_json = ? WHERE kingdom_id = ?').run(json, kingdomId)
+  }
+
   // ── status 汇总 ─────────────────────────────────────────────
 
   statusSummary(): string {
@@ -1225,6 +2166,18 @@ export class KingdomStore {
 
 function isExistingDatabase(path: string): boolean {
   return existsSync(path)
+}
+
+/**
+ * v0.8（M3-S2 v6）：CAS 陈旧态失败。
+ * `UPDATE ... WHERE state = <expected>` 命中 0 行 = 期望旧态已变化
+ * （并发推进 / 重复调用 / 状态被其它路径改写）→ fail-closed，不静默继续。
+ */
+export class StaleStateError extends Error {
+  constructor(entity: string, expectedState: string, nextState: string) {
+    super(`Stale state: ${entity} 期望 ${expectedState} → ${nextState} 失败（当前状态已非期望旧态，拒绝覆盖）`)
+    this.name = 'StaleStateError'
+  }
 }
 
 /** "CREATED×1、REVIEW×2" 形式的状态直方图，供 status 一行展示。 */
