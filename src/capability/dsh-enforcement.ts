@@ -7,6 +7,8 @@
  *   `setApprovalPolicy(session, 'never')`（user-approval/src/index.ts:142）；
  * - 工具面：`agent.ctx.tools.restrict({allow})`（tools/src/index.ts:1071）+
  *   `agent.ctx.tools.guard(...)`（:1110，单调拒绝、body 不执行，C-009）；
+ *   只有同时存在这两个 context-bound seam 时，schemas inventory 才能进入
+ *   RuntimeEnforceableSet；schemas 本身只是声明面，不是 enforcement 证据；
  * - fail-before-dispatch：任一步失败 → cleanup + DENIED，zero execution；
  * - evidence 诚实：typed envelope 只记录真实应用的事实与事件证据，不夸大（G5/G9）。
  */
@@ -120,10 +122,65 @@ function sessionKey(context: DshEnforcementContext): object {
   return context.agent.session as unknown as object
 }
 
+type ToolEnforcementSeam = NonNullable<DshAgentScopeLike['tools']> & Required<Pick<NonNullable<DshAgentScopeLike['tools']>, 'restrict' | 'guard'>>
+
+function hasToolEnforcementSeam(tools: DshAgentScopeLike['tools'] | undefined): tools is ToolEnforcementSeam {
+  return typeof tools?.restrict === 'function' && typeof tools?.guard === 'function'
+}
+
+interface DisposerFailure {
+  index: number
+  detail: string
+}
+
+interface DisposerSummary {
+  disposed: number
+  failures: DisposerFailure[]
+}
+
+/**
+ * 尝试拆除全部 disposer；失败项继续留在 registry，便于 recovery 重试。
+ * disposer 抛错只能证明 teardown UNKNOWN，不能被转换为 ok:true。
+ */
+function disposeDisposers(context: DshEnforcementContext, disposers: readonly (() => void)[]): DisposerSummary {
+  let disposed = 0
+  const failures: DisposerFailure[] = []
+  const remaining: (() => void)[] = []
+  disposers.forEach((dispose, index) => {
+    try {
+      dispose()
+      disposed++
+    } catch (error: unknown) {
+      failures.push({
+        index,
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      remaining.push(dispose)
+    }
+  })
+  if (remaining.length > 0) disposerRegistry.set(sessionKey(context), remaining)
+  else disposerRegistry.delete(sessionKey(context))
+  return { disposed, failures }
+}
+
+type SessionEvent = DshEnforcementContext['agent']['session']['events'][number]
+
+/** 只接受本次 setter 调用后追加、且字段值精确匹配的政策事件。 */
+function hasAppendedPolicyEvent(
+  context: DshEnforcementContext,
+  startIndex: number,
+  type: string,
+  field: string,
+  expected: string,
+): boolean {
+  const events = context.agent.session.events
+  return events.slice(startIndex).some((event: SessionEvent) => event.type === type && event.data?.[field] === expected)
+}
+
 /**
  * 从真实 DSH API 重建 context-bound RuntimeEnforceableSet（Owner S4 seam 裁决：A∩B）。
  *
- * - A = **Runtime Tool Inventory**：`tools.schemas()`（实证返回 `[{name,description,parameters}]`）；
+ * - A = **Runtime Tool Inventory**：`tools.schemas()`（实证返回 `[{name,description,parameters}]`），但只有当前 context 同时有 `restrict` 与 `guard` 才能证明 A 可 enforce；
  * - B = **Actual Agent Preset / Session Tool Surface**：仅用 `context.agentPresetId`（真实 agent preset：
  *   standard/code/minimal/…）调 `presets.resolveMountable(agentPresetId)`（await + catch，**禁止未处理
  *   rejection 泄漏**——BLOCKER #2 根因）；`permission/preset` 事件值是 PermissionPresetService 的预设名
@@ -143,8 +200,12 @@ export async function readEnforceableSet(context: DshEnforcementContext, deps?: 
   // permission/preset 事件值 = PermissionPresetService 预设名（materialize 的 permission.set 用）；非 agentPresetId
   const lastPermissionPreset: string | null = typeof lastPresetRaw === 'string' ? lastPresetRaw : null
 
-  // A：Runtime Tool Inventory（真实 schemas API；解析失败 → 空 → fail-closed）
-  const inventory = normalizeToolInventory(context.agent.ctx.tools?.schemas?.())
+  // A：Runtime Tool Inventory（真实 schemas API；解析失败 → 空 → fail-closed）。
+  // schemas 只有声明能力；没有当前 Session 的 restrict/guard seam 时，不能进入
+  // RuntimeEnforceableSet，即使 schemas 本身列出了 pwsh。
+  const inventory = hasToolEnforcementSeam(context.agent.ctx.tools)
+    ? normalizeToolInventory(context.agent.ctx.tools?.schemas?.())
+    : []
 
   // B：Actual Agent Preset / Session Tool Surface
   //    仅用 context.agentPresetId（真实 agent preset）；await + try/catch 消费一切 rejection（BLOCKER #2 修复）
@@ -165,7 +226,9 @@ export async function readEnforceableSet(context: DshEnforcementContext, deps?: 
   }
 
   // Enforceable = A ∩ B
-  const tools = inventory.filter(name => surface.includes(name))
+  const tools = hasToolEnforcementSeam(context.agent.ctx.tools)
+    ? inventory.filter(name => surface.includes(name))
+    : []
 
   return {
     tools,
@@ -189,9 +252,10 @@ export async function materializeDshEnforcement(
   const applied: string[] = []
 
   const toolsApi = context.agent.ctx.tools
+  const policyEventStart = context.agent.session.events.length
 
   // 1) 工具面：restrict（允许清单）+ guard（单调拒绝，body 不执行）
-  if (!toolsApi?.restrict || !toolsApi?.guard) {
+  if (!hasToolEnforcementSeam(toolsApi)) {
     reasons.push('agent.ctx.tools 无 restrict/guard（工具面无法 enforce）')
   } else {
     try {
@@ -211,10 +275,17 @@ export async function materializeDshEnforcement(
   }
 
   // 2) 领地写边界 + 禁扩权：一键 preset 或逐 knob
-  if (request.presetId && deps.permission) {
+  const presetPath = typeof request.presetId === 'string' && request.presetId.length > 0
+  let permissionApplied = false
+  if (presetPath) {
+    if (!deps.permission) {
+      reasons.push('permission preset 服务缺失（preset path 无法证明）')
+    }
     try {
-      deps.permission.set(context.agent.session, request.presetId)
-      applied.push(`permission:preset=${request.presetId}`)
+      if (deps.permission) {
+        deps.permission.set(context.agent.session, request.presetId!)
+        permissionApplied = true
+      }
     } catch (error) {
       reasons.push(`permission preset 应用失败: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -224,7 +295,6 @@ export async function materializeDshEnforcement(
     } else {
       try {
         deps.sandboxPolicy.setSandboxMode(context.agent.session, request.sandboxMode)
-        applied.push(`sandbox:mode=${request.sandboxMode}`)
       } catch (error) {
         reasons.push(`sandbox 应用失败: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -234,27 +304,77 @@ export async function materializeDshEnforcement(
     } else {
       try {
         deps.approval.setApprovalPolicy(context.agent.session, request.approvalPolicy)
-        applied.push(`approval:policy=${request.approvalPolicy}`)
       } catch (error) {
         reasons.push(`approval 应用失败: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }
 
-  // 3) 证据核验：策略事件必须落到持久 session 日志（typed evidence 的诚实基础）
-  const types = new Set(context.agent.session.events.map(e => e.type))
-  if (request.sandboxMode !== 'read-only' && !types.has('sandbox/mode')) {
-    reasons.push('sandbox/mode 事件缺失（无法证明领地写边界已生效）')
+  // 3) 证据核验：direct knob 必须看到本次 setter 追加的精确政策事件；
+  //    preset path 还允许 PermissionPresetService.set 对已生效 preset 的合法幂等 no-op，
+  //    但仍必须核对当前 sandbox/approval/preset 三项状态完全匹配。
+  const sandboxEventApplied = hasAppendedPolicyEvent(context, policyEventStart, 'sandbox/mode', 'mode', request.sandboxMode)
+  if (sandboxEventApplied && !presetPath) {
+    applied.push(`sandbox:mode=${request.sandboxMode}`)
+  } else if (!presetPath) {
+    reasons.push(`sandbox/mode 事件缺失或未反映请求模式=${request.sandboxMode}（setter/effective state 无法证明）`)
   }
-  if (!types.has('approval/policy')) {
-    reasons.push('approval/policy 事件缺失（无法证明禁扩权已生效）')
+
+  const approvalEventApplied = hasAppendedPolicyEvent(context, policyEventStart, 'approval/policy', 'policy', request.approvalPolicy)
+  if (approvalEventApplied && !presetPath) {
+    applied.push(`approval:policy=${request.approvalPolicy}`)
+  } else if (!presetPath) {
+    reasons.push(`approval/policy 事件缺失或未反映请求策略=${request.approvalPolicy}（setter/effective state 无法证明）`)
   }
-  const evidenceEvents = ['sandbox/mode', 'approval/policy', 'permission/preset'].filter(t => types.has(t))
+
+  if (permissionApplied) {
+    const presetEventApplied = hasAppendedPolicyEvent(context, policyEventStart, 'permission/preset', 'preset', request.presetId!)
+    if (presetEventApplied) applied.push(`permission:preset=${request.presetId}`)
+    else if (!presetPath) reasons.push(`permission/preset 事件缺失或未反映请求 preset=${request.presetId}`)
+  }
+
+  let current: Pick<RuntimeEnforceableSet, 'sandboxMode' | 'approvalPolicy' | 'presetId'> = {
+    sandboxMode: null,
+    approvalPolicy: null,
+    presetId: null,
+  }
+  try {
+    const enforceable = await readEnforceableSet(context)
+    current = {
+      sandboxMode: enforceable.sandboxMode,
+      approvalPolicy: enforceable.approvalPolicy,
+      presetId: enforceable.presetId,
+    }
+  } catch (error) {
+    reasons.push(`读取当前 Session effective state 失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (current.sandboxMode !== request.sandboxMode) {
+    reasons.push(`sandbox effective state=${current.sandboxMode ?? 'none'} 与请求 ${request.sandboxMode} 不一致`)
+  }
+  if (current.approvalPolicy !== request.approvalPolicy) {
+    reasons.push(`approval effective state=${current.approvalPolicy ?? 'none'} 与请求 ${request.approvalPolicy} 不一致`)
+  }
+  if (presetPath && current.presetId !== request.presetId) {
+    reasons.push(`permission preset effective state=${current.presetId ?? 'none'} 与请求 ${request.presetId} 不一致`)
+  }
+
+  const evidenceEvents = [
+    sandboxEventApplied ? 'sandbox/mode' : null,
+    approvalEventApplied ? 'approval/policy' : null,
+    permissionApplied && hasAppendedPolicyEvent(context, policyEventStart, 'permission/preset', 'preset', request.presetId!) ? 'permission/preset' : null,
+  ].filter((type): type is string => type !== null)
   if (evidenceEvents.length > 0) applied.push(`events=[${evidenceEvents.join(',')}]`)
+  if (presetPath && permissionApplied && !sandboxEventApplied && !approvalEventApplied && !hasAppendedPolicyEvent(context, policyEventStart, 'permission/preset', 'preset', request.presetId!)) {
+    // Existing matching events + a successful preset setter call is the bounded
+    // evidence for the valid idempotent path; do not invent new events.
+    applied.push(`permission:preset=${request.presetId}:idempotent-existing-state`)
+  }
 
   if (reasons.length > 0) {
-    for (const dispose of disposers) {
-      try { dispose() } catch { /* 忽略 */ }
+    disposerRegistry.set(sessionKey(context), disposers)
+    const cleanup = disposeDisposers(context, disposers)
+    if (cleanup.failures.length > 0) {
+      reasons.push(`cleanup 未确认: ${cleanup.failures.map(failure => `#${failure.index} ${failure.detail}`).join('; ')}`)
     }
     return { ok: false, evidenceJson: null, reasons }
   }
@@ -280,16 +400,18 @@ export async function materializeDshEnforcement(
 export async function cleanupDshEnforcement(context: DshEnforcementContext): Promise<CleanupResult> {
   const key = sessionKey(context)
   const disposers = disposerRegistry.get(key) ?? []
-  disposerRegistry.delete(key)
-  let disposed = 0
-  for (const dispose of disposers) {
-    try { dispose(); disposed++ } catch { /* 忽略单个失败 */ }
-  }
+  const summary = disposeDisposers(context, disposers)
   return {
-    ok: true,
+    ok: summary.failures.length === 0,
     evidenceJson: JSON.stringify({
       type: TEARDOWN_EVIDENCE_TYPE,
-      payload: { disposed, sessionRef: context.sessionRef, at: new Date().toISOString() },
+      payload: {
+        disposed: summary.disposed,
+        failed: summary.failures.length,
+        failures: summary.failures,
+        sessionRef: context.sessionRef,
+        at: new Date().toISOString(),
+      },
     }),
   }
 }

@@ -1,0 +1,1732 @@
+version: 1
+feature_id: "gui.local-control-session"
+title: "Local GUI Control Session"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: Direct local GUI activation command
+    trigger: /kingdom gui or /kingdom gui start, with /kingdom gui stop as the revocation entry
+    code:
+      - path: src/index.ts
+        symbol: apply
+
+  D1:
+    kind: decision
+    description: GUI command action is recognized
+    condition: raw input after /kingdom gui is empty, start, or stop
+    code:
+      - path: src/index.ts
+        symbol: directCommandParts
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  A1:
+    kind: action
+    description: Start the local GUI server and await its actual listening address
+    code:
+      - path: src/index.ts
+        symbol: ensureGuiServer
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  A2:
+    kind: action
+    description: Revoke active sessions and close the GUI runtime
+    code:
+      - path: src/index.ts
+        symbol: stopGuiServer
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.dispose
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  D2:
+    kind: decision
+    description: Server has a concrete loopback Origin
+    condition: startGuiServer onListening reports host 127.0.0.1 and an actual port, including port 0
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/index.ts
+        symbol: ensureGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  A3:
+    kind: action
+    description: Capture the exact DSH Agent and mint a one-time in-memory launch ticket without Owner capability
+    code:
+      - path: src/index.ts
+        symbol: LocalControlManager.activate
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.activate
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket redemption is one-time and captures the exact Agent/session without Owner capability"
+
+  A4:
+    kind: action
+    description: Pass the ticket URL only to the local browser opener
+    code:
+      - path: src/index.ts
+        symbol: openLocalConsole
+
+  D3:
+    kind: decision
+    description: Local browser launch reports success
+    condition: platform URL opener returns a successful process status
+    code:
+      - path: src/index.ts
+        symbol: openLocalConsole
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  X1:
+    kind: outcome
+    description: Invalid GUI command grammar is rejected
+    result: INPUT_DENIED with no GUI session mutation
+
+  X2:
+    kind: outcome
+    description: GUI server cannot become available
+    result: RECOVERY_REQUIRED with the external outcome unproven and without a returned launch ticket
+
+  X3:
+    kind: outcome
+    description: Browser launch was requested successfully
+    result: Clean command result contains Origin, expiry, and launch status only
+
+  X4:
+    kind: outcome
+    description: Browser launch failed
+    result: Clean Console URL and honest launch failure; one-time ticket is not printed
+
+  E2:
+    kind: entry
+    description: Browser redeems launch ticket or reads control status
+    trigger: GET /console?ticket or GET /api/control
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D4:
+    kind: decision
+    description: Read transport is exact loopback with null or exact Origin
+    condition: Host and remote address are exact loopback and read Origin is absent or equals expected Origin
+    code:
+      - path: src/gui/local-control.ts
+        symbol: validateTransport
+      - path: src/gui/local-control.ts
+        symbol: isExactLoopbackHost
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "loopback and Origin admission use the exact local transport boundary"
+
+  X5:
+    kind: outcome
+    description: Read transport is foreign
+    result: CONTROL_ORIGIN_DENIED with no session or command effect
+
+  D5:
+    kind: decision
+    description: Launch ticket or session is live and not replayed
+    condition: Ticket exists within TTL for redemption, or cookie identifies a non-expired non-revoked session for inspection
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.redeem
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.sessionFor
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket redemption is one-time and captures the exact Agent/session without Owner capability"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  X6:
+    kind: outcome
+    description: Ticket or session admission failed
+    result: CONTROL_TICKET_INVALID, CONTROL_SESSION_REQUIRED, or CONTROL_SESSION_EXPIRED
+
+  A5:
+    kind: action
+    description: Consume ticket, create bounded session, set transport cookie, and redirect cleanly
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.redeem
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "local control HTTP wiring denies raw POST and passes only broker context"
+
+  A6:
+    kind: action
+    description: Inspect and return the public control view, including canonical session commands, review decisions, sandbox modes, and non-executable Owner-only guidance
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+      - path: src/gui/control-contract.ts
+        symbol: GuiControlPublicView
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "v1 control view advertises session commands and keeps Owner-only actions direct-Slash-only"
+
+  E3:
+    kind: entry
+    description: Browser submits one GUI command
+    trigger: POST /api/commands/:name
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D6:
+    kind: decision
+    description: Mutation transport admission is complete
+    condition: exact Origin, valid cookie and CSRF, unique request id, live session, and no in-flight mutation
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "CSRF, request replay, and concurrent mutation admission fail closed"
+
+  X7:
+    kind: outcome
+    description: Mutation admission failed
+    result: Stable control error before runGuiCommand, Core, or Runtime
+
+  A7:
+    kind: action
+    description: Return captured Agent/session execution context and serialize the mutation
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D7:
+    kind: decision
+    description: Strict command body and captured Role identity are valid
+    condition: Body is one strict JSON object with no duplicate keys, nested Authority-shaped aliases, unrecognized top-level fields, or non-string values; Role identity comes only from the activation context and GUI has no Owner capability
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: parseStrictJsonObject
+      - path: src/gui/server.ts
+        symbol: validateCommandPayload
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "forged browser identity fields have zero effect on the opaque activation context"
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  X8:
+    kind: outcome
+    description: Strict body or captured-authority validation rejected the command
+    result: INVALID_BODY or stable authentication rejection; the admitted slot is finished and runGuiCommand, Core, Runtime, and domain revision remain untouched
+
+  D8:
+    kind: decision
+    description: Select the GUI command branch
+    condition: plan, assign, review, execution.pause/resume/abort, or start matches the canonical session command name
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  A10:
+    kind: action
+    description: GUI forwards the optional non-authoritative capability requirement to core planTask, which creates the Task and requirement in one transaction; no legacy second write remains
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_SESSION_COMMANDS
+      - path: src/gui/control-contract.ts
+        symbol: GUI_COMMAND_PAYLOAD_FIELDS
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/index.ts
+        symbol: MINIMAL_CAPABILITY_JSON
+      - path: src/core/task-service.ts
+        symbol: planTask
+      - path: src/core/db.ts
+        symbol: KingdomStore.insertTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "fresh governed setup prerequisites keep Worker unbound and prepare ceiling/profile/task requirement"
+
+  X11:
+    kind: outcome
+    description: Task planning prepared Capability Gate coverage
+    result: When the plan transaction commits, the new Task has the optional capability requirement; Task and requirement do not split across the transaction boundary
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  X28:
+    kind: outcome
+    description: Task, requirement, or plan event write fails
+    result: The plan transaction rolls back; no partial Task or capability requirement remains
+
+  A11:
+    kind: action
+    description: Run the existing session-bound assign command
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: assignTask
+
+  X12:
+    kind: outcome
+    description: Assignment command settles
+    result: CommandResultView and Projection refresh retain the existing assignment and live allowedActions semantics
+
+  A12:
+    kind: action
+    description: Use shared governed persistent start with captured Agent, separate Grant, and the exact validated sandbox mode
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    external_call:
+      system: DeepSeek Harness governed runtime
+      timeout: 1000ms x 60 polling window
+      failure_behavior: Preserve fail-closed denial or RECOVERY_REQUIRED with the external outcome unproven; do not auto-retry or select LEGACY_COMPAT
+      failure_nodes: [D10, X13]
+      retry:
+        max_attempts: 1
+        backoff: No automatic retry; require manual Projection reconciliation before a new direct command
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup"
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  D10:
+    kind: decision
+    description: Existing Supervisor, capability, and runtime gates allow governed execution
+    condition: Captured session resolves in scope, Grant is valid, and Capability Gate is GRANTED plus ENFORCED
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 已认证 Supervisor 的 malformed Grant 是 INPUT_DENIED，且不准备 runner"
+
+  X13:
+    kind: outcome
+    description: Governed start denied or externally uncertain
+    result: CAPABILITY_DENIED, AUTHZ_DENIED, or RECOVERY_REQUIRED with the external outcome unproven; no automatic legacy fallback
+
+  X14:
+    kind: outcome
+    description: Governed Worker result is a Claim in REVIEW
+    result: Supervisor review alone may produce DONE, REWORK, FAIL, or an atomic HANDOFF to RUNNING
+    tests:
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+
+  D11:
+    kind: decision
+    description: Classify the requested HTTP command name before broker authorization
+    condition: Name is a canonical session command, a deny-only Owner action, or unrecognized
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_SESSION_COMMANDS
+      - path: src/gui/control-contract.ts
+        symbol: GUI_OWNER_ONLY_HTTP_COMMANDS
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "v1 control view advertises session commands and keeps Owner-only actions direct-Slash-only"
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  D12:
+    kind: decision
+    description: Validate review state, Supervisor scope, decision payload, and HANDOFF target
+    condition: Task is in REVIEW; the caller supervises its Territory; decision is canonical; HANDOFF includes reason and an ACTIVE target Worker binding in the same Territory
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  D13:
+    kind: decision
+    description: Validate requested execution control against live execution state and Supervisor scope
+    condition: Exact captured session resolves to the in-scope Supervisor and canonical Core LEGACY_COMPAT control semantics admit pause, resume, or abort for the current execution state; GOVERNED_PERSISTENT remains fail-closed
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  D14:
+    kind: decision
+    description: Governed start sandbox mode is canonical
+    condition: sandbox_mode is absent or exactly workspace-write or read-only
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_START_SANDBOX_MODES
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  A13:
+    kind: action
+    description: Forward the complete ACCEPT, REWORK, FAIL, or HANDOFF review payload to Core
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  A14:
+    kind: action
+    description: Invoke the canonical pause, resume, or abort Core operation
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  X15:
+    kind: outcome
+    description: Owner-only HTTP command name is fenced before broker or Core dispatch
+    result: HTTP 403 DIRECT_SLASH_REQUIRED; advertised action remains executable=false and domain state is unchanged
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "v1 control view advertises session commands and keeps Owner-only actions direct-Slash-only"
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  X16:
+    kind: outcome
+    description: Unrecognized command, invalid payload, illegal state, unauthorized caller, replay, expiry, revoke, or aborted context is rejected
+    result: Stable error and zero additional assignment, execution, follow-up, Core, or Runtime effect
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  X17:
+    kind: outcome
+    description: Legal execution control settles through the existing state machine
+    result: Only the canonical execution runtime fact changes; Task governance state is not invented or widened
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  X18:
+    kind: outcome
+    description: Review settles through the existing Supervisor gate
+    result: ACCEPT, REWORK, and FAIL retain existing semantics; HANDOFF atomically closes the old assignment and creates the linked target assignment
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  G1:
+    kind: safeguard
+    description: Direct activation provenance and exact Agent capture
+    safeguard_type: authentication
+    guarantee: Direct Slash activation binds Role context to the activation-time Agent/session without placing Owner capability in the GUI context
+    protects: [A3, D7]
+    failure_behavior: Missing exact Agent/session returns a stable failure before GUI Core writes or governed start
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.activate
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket redemption is one-time and captures the exact Agent/session without Owner capability"
+
+  G2:
+    kind: safeguard
+    description: Exact local transport boundary with read Origin exception
+    safeguard_type: authorization
+    guarantee: Loopback Host/remote are exact; inspect GET accepts null or exact Origin, while authorize mutation requires exact Origin
+    protects: [D4, D6]
+    failure_behavior: Return CONTROL_ORIGIN_DENIED before Core or Runtime
+    code:
+      - path: src/gui/local-control.ts
+        symbol: validateTransport
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied"
+
+  G3:
+    kind: safeguard
+    description: One-time session, CSRF, replay, and concurrency controls
+    safeguard_type: validation
+    guarantee: A ticket is consumed once; each request id is admitted once; only one mutation is in flight; expiry/revoke/dispose aborts contexts
+    protects: [D5, D6, A7]
+    failure_behavior: Return a stable control failure and leave domain state untouched
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.revoke
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "CSRF, request replay, and concurrent mutation admission fail closed"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  G4:
+    kind: safeguard
+    description: Launch secret privacy boundary
+    safeguard_type: privacy
+    guarantee: Ticket, cookie, CSRF, and request id are not placed in CommandResult text, logger output, or domain/event payloads
+    protects: [A4, X3, X4]
+    failure_behavior: Return only a clean Origin/Console URL/expiry and an honest launch status
+    code:
+      - path: src/index.ts
+        symbol: formatGuiLaunchCommandResult
+      - path: src/index.ts
+        symbol: openLocalConsole
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  G5:
+    kind: safeguard
+    description: Owner capability and browser identity separation
+    safeguard_type: authorization
+    guarantee: Browser payload fields cannot construct Owner capability, principal, Agent, actor, ticket, or CSRF authority; the GUI execution context contains no Owner capability
+    protects: [A7, D7]
+    failure_behavior: Reject forbidden fields before runGuiCommand/Core/Runtime
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "forged browser identity fields have zero effect on the opaque activation context"
+      - path: tests/gui-control-server.test.ts
+        symbol: "local control HTTP wiring denies raw POST and passes only broker context"
+
+  G7:
+    kind: safeguard
+    description: Bounded Task requirement without implied Owner prerequisite setup
+    safeguard_type: authorization
+    guarantee: Core planTask writes only the optional non-authoritative Task requirement in the same transaction as Task creation and cannot initialize or widen Owner facts; missing ceiling or Worker profile fails closed later in governed start
+    protects: [A10, A12, D10]
+    failure_behavior: A Task, requirement, or event write exception rolls back the plan transaction; the single GUI-to-planTask call has no second requirement write, while missing ceiling/profile or an empty requirement remains fail-closed at the governed-start gate when no effective capability exists
+    code:
+      - path: src/index.ts
+        symbol: MINIMAL_CAPABILITY_JSON
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/core/binding.ts
+        symbol: setExecutionProfile
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "fresh governed setup prerequisites keep Worker unbound and prepare ceiling/profile/task requirement"
+
+  G8:
+    kind: safeguard
+    description: Canonical governed start and no automatic fallback
+    safeguard_type: authorization
+    guarantee: GUI start enters the same runGovernedStart seam and never silently selects LEGACY_COMPAT after a persistent failure
+    protects: [A12, D10]
+    failure_behavior: Preserve CAPABILITY_DENIED or RECOVERY_REQUIRED with the external outcome unproven and require operator reconciliation
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "headless route contract: governed failure never suggests legacy fallback"
+
+  G9:
+    kind: safeguard
+    description: Owner-only actions remain direct-Slash-only
+    safeguard_type: authorization
+    guarantee: Canonical init, reset, ceiling, territory, role, session, and profile actions are advertised only as executable=false with DIRECT_SLASH_REQUIRED guidance; retired setup.basic is not advertised, and every Owner-only spelling is deny-only over HTTP
+    protects: [D11, X15]
+    failure_behavior: Return HTTP 403 before broker authorization, Host dispatch, Core, or Runtime
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_OWNER_ONLY_ACTIONS
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "v1 control view advertises session commands and keeps Owner-only actions direct-Slash-only"
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  G10:
+    kind: safeguard
+    description: Complete HANDOFF review payload and atomic Core transition
+    safeguard_type: atomicity
+    guarantee: Host forwards reason and to_binding_id without reconstructing authority; Core validates live state, scope, and target before atomically replacing the assignment
+    protects: [D12, A13, X18]
+    failure_behavior: Missing or invalid target, wrong task state, or out-of-scope caller returns without changing assignment or Task revision
+    code:
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  G11:
+    kind: safeguard
+    description: Execution controls preserve session, scope, state, and replay boundaries
+    safeguard_type: authorization
+    guarantee: pause, resume, and abort use the activation-time session and canonical Core checks; same-request replay, illegal or terminal state, expired/revoked admission, and unauthorized requests are zero-effect. Distinct valid LEGACY_COMPAT pause requests may refresh pause_requested_at, so no cross-request idempotency is claimed
+    protects: [D6, D7, D13, A14, X17]
+    failure_behavior: Return the existing stable admission, authorization, or state error with no additional execution event or runtime effect
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  G12:
+    kind: safeguard
+    description: Exact governed sandbox-mode allowlist
+    safeguard_type: validation
+    guarantee: Only workspace-write and read-only reach governed executor preparation; invalid values never silently widen or fall back to workspace-write
+    protects: [D14, A12]
+    failure_behavior: Return INPUT_DENIED INVALID_SANDBOX_MODE before executor, session, lease, dispatch, or follow-up preparation
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_START_SANDBOX_MODES
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T1:
+    kind: transition
+    description: GUI runtime begins listening
+    entity: LocalGuiRuntime
+    from: INACTIVE
+    to: LISTENING
+    trigger: gui_start_requested
+    code:
+      - path: src/index.ts
+        symbol: ensureGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  T2:
+    kind: transition
+    description: Actual origin is resolved and launch ticket is issued
+    entity: LocalGuiRuntime
+    from: LISTENING
+    to: TICKET_ISSUED
+    trigger: actual_origin_ready
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.activate
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "port=0 activates only against the actual listening Origin and keeps transport secrets out of result/logger/event payloads"
+
+  T3:
+    kind: transition
+    description: Ticket is redeemed into an active control session
+    entity: LocalControlSession
+    from: TICKET_ISSUED
+    to: ACTIVE_SESSION
+    trigger: ticket_redeemed
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.redeem
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket redemption is one-time and captures the exact Agent/session without Owner capability"
+
+  T4:
+    kind: transition
+    description: Unredeemed ticket expires and is deleted
+    entity: LocalControlSession
+    from: TICKET_ISSUED
+    to: EXPIRED
+    trigger: ticket_ttl_elapsed
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.redeem
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  T5:
+    kind: transition
+    description: A mutation enters the serialized in-flight slot
+    entity: LocalControlSession
+    from: ACTIVE_SESSION
+    to: MUTATION_IN_FLIGHT
+    trigger: exact_mutation_admitted
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "CSRF, request replay, and concurrent mutation admission fail closed"
+
+  T6:
+    kind: transition
+    description: Settled command releases the in-flight slot
+    entity: LocalControlSession
+    from: MUTATION_IN_FLIGHT
+    to: ACTIVE_SESSION
+    trigger: command_settled
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/gui/control-contract.ts
+        symbol: GuiControlAuthorized.finish
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "local control HTTP wiring denies raw POST and passes only broker context"
+
+  T7:
+    kind: transition
+    description: Session expires and aborts its context
+    entity: LocalControlSession
+    from: ACTIVE_SESSION
+    to: EXPIRED
+    trigger: session_ttl_elapsed
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.sessionFor
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.revoke
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  T8:
+    kind: transition
+    description: Stop or plugin disposal revokes the session
+    entity: LocalControlSession
+    from: ACTIVE_SESSION
+    to: REVOKED
+    trigger: gui_stop_or_dispose
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.dispose
+      - path: src/index.ts
+        symbol: stopGuiServer
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket/session TTL, revoke, replacement, and dispose abort active control contexts"
+
+  T9:
+    kind: transition
+    description: Failed admission returns to an active session without Core effect
+    entity: LocalControlSession
+    from: MUTATION_IN_FLIGHT
+    to: ACTIVE_SESSION
+    trigger: admission_failure
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied"
+
+  T11:
+    kind: transition
+    description: GUI forwards the optional capability requirement to core planTask, which creates the Task and requirement in one transaction; legacy second-write removal is integrated
+    entity: Task
+    from: ACTIVE_SESSION
+    to: TASK_CREATED
+    trigger: plan_committed
+    code:
+      - path: src/core/task-service.ts
+        symbol: planTask
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/core/db.ts
+        symbol: KingdomStore.insertTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "fresh governed setup prerequisites keep Worker unbound and prepare ceiling/profile/task requirement"
+
+  T12:
+    kind: transition
+    description: Task is assigned to the ensured Worker
+    entity: Task
+    from: TASK_CREATED
+    to: ASSIGNED
+    trigger: assign_committed
+    code:
+      - path: src/core/task-service.ts
+        symbol: assignTask
+    tests:
+      - path: tests/m1d-matrix.test.ts
+        symbol: "M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）"
+
+  T13:
+    kind: transition
+    description: Governed execution submits a Worker Claim for review
+    entity: Task
+    from: ASSIGNED
+    to: REVIEW
+    trigger: governed_claim_submitted
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup"
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+
+  T14:
+    kind: transition
+    description: Supervisor accepts the Claim
+    entity: Task
+    from: REVIEW
+    to: DONE
+    trigger: supervisor_accept
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/m1d-matrix.test.ts
+        symbol: "M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）"
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+
+  T15:
+    kind: transition
+    description: Supervisor returns the Claim for rework
+    entity: Task
+    from: REVIEW
+    to: RUNNING
+    trigger: supervisor_rework
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/m1d-matrix.test.ts
+        symbol: "M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）"
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+
+  T16:
+    kind: transition
+    description: Supervisor fails the Claim
+    entity: Task
+    from: REVIEW
+    to: FAILED
+    trigger: supervisor_fail
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/m1d-matrix.test.ts
+        symbol: "M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）"
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+
+  T17:
+    kind: transition
+    description: Supervisor hands the reviewed Task to a different active Worker binding
+    entity: Task
+    from: REVIEW
+    to: RUNNING
+    trigger: supervisor_handoff
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T18:
+    kind: transition
+    description: Supervisor pauses a LEGACY_COMPAT execution before its run is dispatched
+    entity: Execution
+    from: STARTING
+    to: PAUSED
+    trigger: execution_pause
+    code:
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T19:
+    kind: transition
+    description: Supervisor resumes a paused LEGACY_COMPAT execution
+    entity: Execution
+    from: PAUSED
+    to: RUNNING
+    trigger: execution_resume
+    code:
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T20:
+    kind: transition
+    description: Supervisor aborts a live LEGACY_COMPAT execution
+    entity: Execution
+    from: "STARTING | RUNNING | PAUSED"
+    to: ABORTED
+    trigger: execution_abort
+    code:
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T29:
+    kind: transition
+    description: A LEGACY_COMPAT pause request during RUNNING records deferred pause intent without changing Execution state
+    entity: Execution
+    from: RUNNING
+    to: RUNNING
+    trigger: execution_pause
+    code:
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/core/db.ts
+        symbol: setExecutionPauseRequest
+      - path: src/gui/snapshot.ts
+        symbol: toExecutionView
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+
+  T30:
+    kind: transition
+    description: A LEGACY_COMPAT resume request during RUNNING with pending pause intent clears that intent without changing Execution state
+    entity: Execution
+    from: RUNNING
+    to: RUNNING
+    trigger: execution_resume
+    code:
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/core/db.ts
+        symbol: setExecutionPauseRequest
+      - path: src/gui/snapshot.ts
+        symbol: toExecutionView
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+
+  E4:
+    kind: entry
+    description: State-bearing loopback read request
+    trigger: GET /api/snapshot, /api/tasks/:id, or /api/events
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D15:
+    kind: decision
+    description: State-bearing GET Origin is absent or the exact local GUI Origin
+    condition: request Origin is null or exactly equals the server onListening Origin
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  D16:
+    kind: decision
+    description: State-bearing GET has valid read admission
+    condition: broker validates the control cookie or configured bearer matches; invalid or expired cookie cannot downgrade to bearer
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  A15:
+    kind: action
+    description: Broker returns opaque activation-captured read identity
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+      - path: src/gui/control-contract.ts
+        symbol: GuiControlReadContext
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: "ticket redemption is one-time and captures the exact Agent/session without Owner capability"
+      - path: tests/gui-control-server.test.ts
+        symbol: "local control HTTP wiring denies raw POST and passes only broker context"
+
+  A16:
+    kind: action
+    description: Build bearer-only state response without principal projection context
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  A17:
+    kind: action
+    description: Convert opaque readContext into current Supervisor scope and resource ActionAvailability
+    code:
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+      - path: src/gui/snapshot.ts
+        symbol: firstMissingActionContext
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testGovernedPersistentLatestExecutionBlocksStart
+
+  X19:
+    kind: outcome
+    description: Foreign Origin state read is rejected
+    result: CONTROL_ORIGIN_DENIED before snapshot, task, or event handler
+
+  X20:
+    kind: outcome
+    description: Missing, invalid, or expired read admission is rejected
+    result: Stable control failure before state handler and without raw output
+
+  X21:
+    kind: outcome
+    description: Admitted state read returns a bounded projection
+    result: Valid control cookie may advertise only current in-scope Supervisor actions; opaque context is not serialized and bearer-only actions remain fail-closed
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+
+  D17:
+    kind: decision
+    description: Execution contract has verifiable Runtime control and reconcile evidence
+    condition: only a control implementation backed by Runtime pause, resume, abort, terminal, and reconcile evidence may mutate GOVERNED_PERSISTENT
+    code:
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+    tests:
+      - path: tests/command-recovery.test.ts
+        symbol: "persistent runtime controls fail closed and terminal pause residue cannot resume"
+
+  X22:
+    kind: outcome
+    description: Persistent runtime control is unavailable
+    result: EXECUTOR_UNAVAILABLE with Execution, Task, and event revision unchanged
+
+  D18:
+    kind: decision
+    description: Trusted terminal evidence arrives within the bounded poll window
+    condition: reconstructed evidence has a terminal outcome and required assistant evidence before maxPolls is exhausted
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：interrupted / completed 无 assistant → 不落终态（RECOVERING 语义）"
+
+  D20:
+    kind: decision
+    description: No nonterminal governed persistent Execution already exists for the Task
+    condition: every GOVERNED_PERSISTENT Execution for the Task is terminal, or none exists
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unsettled persistent Execution blocks before Runtime, Session, Lease, or Dispatch effects"
+
+  A18:
+    kind: action
+    description: Atomically move current Execution, Lease, and Dispatch into RECOVERING for ambiguity or post-commit exception
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+      - path: src/dispatch/reconcile.ts
+        symbol: applyRecovery
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 recovery seam rolls back Dispatch and Lease when Execution recovery fails"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  X23:
+    kind: outcome
+    description: Terminal poll exhausted without trusted terminal evidence
+    result: terminal remains null; all three current ledger rows are RECOVERING; Task unchanged; no retry, release, or redispatch
+
+  X27:
+    kind: outcome
+    description: Post-commit governed dispatch step failed after atomic recovery
+    result: Original exception is rethrown after Dispatch, Lease, and Execution become RECOVERING; Task unchanged; AggregateError preserves both errors if recovery also fails
+
+  E5:
+    kind: entry
+    description: Plugin startup reclaims live orphan Executions
+    trigger: apply loads a Kingdom and invokes reclaimOrphanExecutions
+    code:
+      - path: src/index.ts
+        symbol: reclaimOrphanExecutions
+      - path: src/core/task-service.ts
+        symbol: reclaimOrphanExecutions
+
+  D19:
+    kind: decision
+    description: Orphan Execution contract selects the honest recovery branch
+    condition: execution_contract is LEGACY_COMPAT or GOVERNED_PERSISTENT
+    code:
+      - path: src/core/task-service.ts
+        symbol: reclaimOrphanExecutions
+    tests:
+      - path: tests/command-recovery.test.ts
+        symbol: "startup reclaim preserves legacy abort while persistent execution becomes recovery-required"
+
+  X24:
+    kind: outcome
+    description: Legacy one-shot orphan is stopped
+    result: Execution ABORTED plus SESSION_STOPPED; Task governance unchanged
+
+  X25:
+    kind: outcome
+    description: Persistent orphan requires evidence recovery
+    result: Execution RECOVERING with explicit event; Task and Lease unchanged; no SESSION_STOPPED, retry, or release
+
+  X26:
+    kind: outcome
+    description: Existing persistent Execution is unsettled
+    result: EXISTING_EXECUTION_UNSETTLED or EXISTING_EXECUTION_RECOVERING before Agent/Adapter access; Task and governed ledger row counts unchanged
+
+  G13:
+    kind: safeguard
+    description: State-bearing read admission and Origin fence
+    safeguard_type: authentication
+    guarantee: Foreign Origin and missing, invalid, or expired admission cannot call state handlers or obtain raw output
+    protects: [D15, D16, A15]
+    failure_behavior: Return bounded control failure before snapshot, task, or event handler
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  G14:
+    kind: safeguard
+    description: Exact per-command payload grammar
+    safeguard_type: validation
+    guarantee: Duplicate keys, unrecognized fields, wrong types, nested authority aliases, and browser principal injection cannot reach the command handler
+    protects: [D7, X8]
+    failure_behavior: Return INVALID_BODY with zero handler and domain revision effect
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: parseStrictJsonObject
+      - path: src/gui/server.ts
+        symbol: validateCommandPayload
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+
+  G15:
+    kind: safeguard
+    description: Atomic and idempotent three-ledger recovery
+    safeguard_type: atomicity
+    guarantee: Execution, Lease, Dispatch, and recovery events commit together for ambiguity or post-commit exception; repeated recovery emits no duplicate event
+    protects: [A18, X27]
+    failure_behavior: Any recovery validation/write failure rolls back every recovery update and remains visible together with the original exception
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 recovery seam rolls back Dispatch and Lease when Execution recovery fails"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  G16:
+    kind: safeguard
+    description: Existing persistent execution exclusion guard
+    safeguard_type: concurrency
+    guarantee: A Task with any nonterminal GOVERNED_PERSISTENT Execution cannot create or dispatch another governed attempt
+    protects: [D20, X26]
+    failure_behavior: Return EXISTING_EXECUTION_UNSETTLED or EXISTING_EXECUTION_RECOVERING before Runtime, Session, Lease, Capability, Dispatch, or Execution side effects
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unsettled persistent Execution blocks before Runtime, Session, Lease, or Dispatch effects"
+
+  A19:
+    kind: action
+    description: Invoke Runtime dispatch only after Runtime identity verification and the complete atomic TX-3 commit
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/adapter/contract.ts
+        symbol: RuntimeAdapter.dispatch
+    external_call:
+      system: DeepSeek Harness governed runtime
+      timeout: terminal evidence polling is bounded by pollIntervalMs times maxPolls; production entry uses 1000ms times 60
+      failure_behavior: Atomically recover the committed Dispatch, Lease, and Execution then rethrow a post-commit exception; do not redispatch or infer terminality from Receipt
+      failure_nodes: [D18, A18]
+
+  T26:
+    kind: transition
+    description: Atomically create governed Execution, bind Decision, persist Dispatch INTENDED, and advance Lease before Runtime dispatch
+    entity: GovernedDispatch
+    from: DISPATCH_READY
+    to: INTENT_COMMITTED
+    trigger: capability_granted_and_enforced
+    code:
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Runtime identity failure happens before every preparation write"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Intent preparation failure rolls back Execution and Decision binding"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Lease progression failure rolls back Intent, Execution, and Decision binding"
+
+  T27:
+    kind: transition
+    description: Record Runtime acceptance and correlate a turn before any terminal evidence first seen in the same poll; Receipt remains nonterminal
+    entity: GovernedDispatch
+    from: INTENT_COMMITTED
+    to: RECEIPT_RECORDED
+    trigger: runtime_dispatch_receipt
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchReceipt
+      - path: src/core/governed.ts
+        symbol: correlateRuntimeExecution
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  T28:
+    kind: transition
+    description: Trusted correlated evidence settles Dispatch, Execution, and Lease
+    entity: GovernedDispatch
+    from: RECEIPT_RECORDED
+    to: DISPATCH_TERMINAL
+    trigger: trusted_terminal_evidence
+    code:
+      - path: src/core/governed.ts
+        symbol: recordTerminalEvidence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：interrupted / completed 无 assistant → 不落终态（RECOVERING 语义）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  G17:
+    kind: safeguard
+    description: Atomic dispatch preparation and terminal evidence ordering
+    safeguard_type: atomicity
+    guarantee: Runtime identity precedes one atomic Execution/Decision/Intent/Lease commit; Receipt records acceptance only, and a late co-observed turn is correlated before terminal settlement
+    protects: [T26, A19, T27, D18, T28]
+    failure_behavior: Reconcile the committed attempt and move it to RECOVERING when evidence remains indeterminate; never redispatch or invent Terminal
+    code:
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/core/governed.ts
+        symbol: recordDispatchReceipt
+      - path: src/core/governed.ts
+        symbol: recordTerminalEvidence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Runtime identity failure happens before every preparation write"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Intent preparation failure rolls back Execution and Decision binding"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Lease progression failure rolls back Intent, Execution, and Decision binding"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  G18:
+    kind: safeguard
+    description: Opaque read context only informs current Projection action truth
+    safeguard_type: authorization
+    guarantee: Broker-issued activation identity is never serialized or accepted from browser fields; Host re-resolves current session, Supervisor binding, Territory scope, command coverage, and lifecycle before advertising ActionAvailability
+    protects: [A15, A17, X21]
+    failure_behavior: Omit principal Projection context or return executable=false; never convert a state-bearing read into POST or Owner authority
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testGovernedPersistentLatestExecutionBlocksStart
+
+  T21:
+    kind: transition
+    description: Startup reclaims a live legacy one-shot Execution
+    entity: Execution
+    from: "STARTING | RUNNING | PAUSED"
+    to: ABORTED
+    trigger: startup_reclaim LEGACY_COMPAT
+    code:
+      - path: src/core/task-service.ts
+        symbol: reclaimOrphanExecutions
+    tests:
+      - path: tests/command-recovery.test.ts
+        symbol: "startup reclaim preserves legacy abort while persistent execution becomes recovery-required"
+
+  T22:
+    kind: transition
+    description: Startup marks a live persistent Execution recovery-required
+    entity: Execution
+    from: "STARTING | RUNNING | PAUSED"
+    to: RECOVERING
+    trigger: startup_reclaim GOVERNED_PERSISTENT
+    code:
+      - path: src/core/task-service.ts
+        symbol: reclaimOrphanExecutions
+    tests:
+      - path: tests/command-recovery.test.ts
+        symbol: "startup reclaim preserves legacy abort while persistent execution becomes recovery-required"
+
+  T23:
+    kind: transition
+    description: Terminal poll timeout or post-commit exception marks the persistent Execution recovery-required
+    entity: Execution
+    from: "STARTING | RUNNING"
+    to: RECOVERING
+    trigger: dispatch_exception_or_terminal_poll_exhausted
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  T24:
+    kind: transition
+    description: Terminal poll timeout or post-commit exception marks the active Lease recovery-required
+    entity: ExecutionLease
+    from: EXECUTING
+    to: RECOVERING
+    trigger: dispatch_exception_or_terminal_poll_exhausted
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  T25:
+    kind: transition
+    description: Terminal poll timeout or post-commit exception marks the in-flight Dispatch recovery-required
+    entity: DispatchRecord
+    from: "RECEIVED | CORRELATED"
+    to: RECOVERING
+    trigger: dispatch_exception_or_terminal_poll_exhausted
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  D21:
+    kind: decision
+    description: A Runtime turn is observed for this dispatch before bounded polling expires
+    condition: reconstructed dispatch evidence contains a correlated turn during the bounded polling window
+    code:
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  T31:
+    kind: transition
+    description: The observed Runtime turn correlates the Dispatch before terminal settlement
+    entity: GovernedDispatch
+    from: RECEIVED
+    to: CORRELATED
+    trigger: runtime_turn_observed
+    code:
+      - path: src/core/governed.ts
+        symbol: correlateRuntimeExecution
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  E6:
+    kind: entry
+    description: Browser renders a role from the organization projection and requests its character asset
+    trigger: Organization projection contains a Chancellor, Supervisor, or Worker binding
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: "const desktop = await capture"
+
+  A22:
+    kind: action
+    description: Build the public Snapshot, project only ACTIVE organization roles, and project one Stage actor per ACTIVE binding
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildOrganizationProjectionData
+      - path: src/gui/snapshot.ts
+        symbol: projectStage
+      - path: src/gui/snapshot.ts
+        symbol: eventBindingId
+      - path: src/gui/snapshot.ts
+        symbol: eventMatchesBinding
+    tests:
+      - path: tests/gui-stage-cardinality.test.ts
+        symbol: "GUI production path buildSnapshot -> projectStage -> console"
+
+  D22:
+    kind: decision
+    description: Role is ACTIVE and has one exact stage actor for its bindingId and role
+    condition: Organization roles and Snapshot.stage contain only ACTIVE bindings; the console selects exactly one matching bindingId and role; RETIRED, indeterminate, and missing evidence are not promoted from Task status
+    code:
+      - path: src/gui/console-app.ts
+        symbol: isActiveRole
+      - path: src/gui/console-app.ts
+        symbol: exactStageFor
+      - path: src/gui/console-app.ts
+        symbol: visualFor
+      - path: src/gui/console-app.ts
+        symbol: renderKingdomMap
+      - path: src/gui/console-app.ts
+        symbol: renderOrganization
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: stageEvidence
+      - path: tests/gui-stage-cardinality.test.ts
+        symbol: "GUI production path buildSnapshot -> projectStage -> console"
+
+  A20:
+    kind: action
+    description: Map exact stage evidence to the role-specific allowlisted SVG
+    code:
+      - path: src/gui/console-app.ts
+        symbol: visualStateFor
+      - path: src/gui/console-app.ts
+        symbol: applyCharacterVisual
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: normalEmbedded
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceRecovery
+
+  A21:
+    kind: action
+    description: Use an explicit idle visual fallback when a bound role has no exact stage evidence
+    code:
+      - path: src/gui/console-app.ts
+        symbol: visualFor
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: stageEvidence
+
+  X29:
+    kind: outcome
+    description: Absent or unbound role does not receive an inferred character
+    result: Character image is hidden and no actor state is fabricated
+
+  D23:
+    kind: decision
+    description: Character asset name is allowlisted and its source can be read
+    condition: The requested filename is one of the exact 12 assets and source lookup succeeds
+    code:
+      - path: src/gui/server.ts
+        symbol: requestedCharacterAsset
+      - path: src/gui/server.ts
+        symbol: readCharacterAsset
+      - path: src/gui/console-app.ts
+        symbol: isGuiCharacterAssetFile
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: assetChecks
+
+  D24:
+    kind: decision
+    description: Browser image resource remains loadable after the allowlisted URL is assigned
+    condition: The browser either loads the SVG or fires one controlled image error
+    code:
+      - path: src/gui/console-app.ts
+        symbol: applyCharacterVisual
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceFailure
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceRecovery
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCharacterResourceFailureUsesOneHandlerStableSameUrlAndRecoversOnNewUrl
+
+  X30:
+    kind: outcome
+    description: Transparent role-specific SVG is served and rendered
+    result: The SVG's internal animation runs normally and is disabled by its reduced-motion rule
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: reducedEmbedded
+
+  X31:
+    kind: outcome
+    description: Character asset request fails closed
+    result: Unrecognized or unavailable asset returns a stable 404 and the UI does not use an inline placeholder
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: assetChecks
+
+  X32:
+    kind: outcome
+    description: Browser character resource failure is rendered honestly and bounded
+    result: The image is hidden, its source is cleared, bounded Chinese 角色资源不可用 text is shown, and polling does not retry the same failed URL; a changed URL may recover
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceFailure
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceRecovery
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCharacterResourceFailureUsesOneHandlerStableSameUrlAndRecoversOnNewUrl
+
+  G19:
+    kind: safeguard
+    description: Exact character allowlist, source fallback boundary, and package copy boundary
+    safeguard_type: validation
+    guarantee: Only the 12 Owner-authorized SVG names can be requested or copied into the lib-only package; unrecognized and missing assets fail closed
+    protects: [D23, A20, A21, X31]
+    failure_behavior: Return GUI_ASSET_NOT_FOUND or GUI_ASSET_UNAVAILABLE without an inline sprite or open-ended filesystem read
+    code:
+      - path: src/gui/console-app.ts
+        symbol: GUI_CHARACTER_ASSET_FILES
+      - path: src/gui/server.ts
+        symbol: requestedCharacterAsset
+      - path: src/gui/prepare-character-assets.mjs
+        symbol: files
+      - path: package.json
+        symbol: scripts.prepack
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: assetChecks
+
+  G20:
+    kind: safeguard
+    description: ACTIVE binding to exact organization role and Stage actor cardinality with honest fallback
+    safeguard_type: validation
+    guarantee: buildSnapshot organization projection and projectStage emit only ACTIVE bindings, with at most one exact Stage actor per ACTIVE binding; the console renderer also rejects non-ACTIVE role records before selecting a role or pixel node; WORKER_EXECUTION_FAILED requires an ACTIVE SUPERVISOR binding whose id equals the Territory current supervisor pointer; RETIRED/unrecognized-actor/role-mismatch/foreign events cannot cross scope, multiple executions are indeterminate, and unconfirmed-territory Workers remain visible without a fabricated live state
+    protects: [A22, D22, A20, A21, X29]
+    failure_behavior: Keep explicit idle, waiting, indeterminate, or hidden state with evidence markers; never infer working from Task.RUNNING or guess a territory
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildOrganizationProjectionData
+      - path: src/gui/snapshot.ts
+        symbol: projectStage
+      - path: src/gui/snapshot.ts
+        symbol: eventMatchesBinding
+      - path: src/gui/console-app.ts
+        symbol: isActiveRole
+      - path: src/gui/console-app.ts
+        symbol: renderKingdomMap
+      - path: src/gui/console-app.ts
+        symbol: renderOrganization
+      - path: src/gui/console-app.ts
+        symbol: exactStageFor
+      - path: src/gui/console-app.ts
+        symbol: visualFor
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: stageEvidence
+      - path: tests/gui-stage-cardinality.test.ts
+        symbol: "GUI stage excludes RETIRED bindings and uses absent fallback when only retired history remains"
+      - path: tests/gui-stage-cardinality.test.ts
+        symbol: "GUI production path buildSnapshot -> projectStage -> console"
+      - path: tests/gui-stage-cardinality.test.ts
+        symbol: "WORKER_EXECUTION_FAILED requires an ACTIVE Supervisor binding matching the current Territory pointer"
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRendersAuthoritativeOrganizationAndTypedEvidenceRefs
+
+  G21:
+    kind: safeguard
+    description: Stable client character-resource failure handling
+    safeguard_type: validation
+    guarantee: applyCharacterVisual owns one replaceable img.onerror handler and caches each unavailable URL; the same URL is not reset or requested during polling, while a changed URL can recover
+    protects: [D24, X32]
+    failure_behavior: Remove the failed src, hide the image, retain bounded 角色资源不可用 text, and permit retry only after URL change or explicit recovery
+    code:
+      - path: src/gui/console-app.ts
+        symbol: applyCharacterVisual
+    tests:
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceFailure
+      - path: tests/assets/capture-gui-fixture.mjs
+        symbol: resourceRecovery

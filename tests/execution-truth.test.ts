@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { KingdomStore } from '../lib/core/db.js'
 import { bindRole, setExecutionProfile, type AdminAuth } from '../lib/core/binding.js'
+import { issueOwnerControlCapability, ownerControlAuth } from '../lib/core/owner-control.js'
 import { resolveWorkerExecution, buildExecutionProfileSnapshot } from '../lib/core/../worker/executor-factory.js'
 import { DshSubagentExecutor, type SubagentsLike } from '../lib/worker/dsh-subagent.js'
 import { parseStructuredResult } from '../lib/worker/executor.js'
@@ -60,7 +61,7 @@ function seedTask(store: KingdomStore, assignedBindingId: string): ReturnType<Ki
   return store.getTask('task-1')
 }
 
-const ownerAuth = (): AdminAuth => ({ mode: 'session-bound', principalSessionId: OWNER_SESSION })
+const ownerAuth = (): AdminAuth => ownerControlAuth(issueOwnerControlCapability())
 const strangerAuth = (): AdminAuth => ({ mode: 'session-bound', principalSessionId: OTHER_SESSION })
 
 function fakeSubagents(providers = ['spawn', 'fork']): SubagentsLike {
@@ -154,9 +155,9 @@ test('setExecutionProfile：session-bound 下仅 OWNER，其他角色 DENY', () 
   const store = makeStore()
   seedWorker(store)
   const denied = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'spawn', model: 'Model-B' } }, strangerAuth())
-  assert.match(denied, /^错误：组织管理/)
+  assert.match(denied, /^OWNER_CONTROL_REQUIRED:/)
   const noAuth = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'fork' } }, { mode: 'session-bound', principalSessionId: null })
-  assert.match(noAuth, /^错误：组织管理/)
+  assert.match(noAuth, /^OWNER_CONTROL_REQUIRED:/)
   const ok = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'spawn', model: 'Model-B' } }, ownerAuth())
   assert.match(ok, /^角色 WORKER/)
   const row = store.getBindingById('binding-worker')!
@@ -164,16 +165,16 @@ test('setExecutionProfile：session-bound 下仅 OWNER，其他角色 DENY', () 
   // 事件 actor=OWNER
   const ev = store.listEvents(KID, 50).find(e => e.event_type === 'EXECUTION_PROFILE_UPDATED')!
   assert.equal(ev.actor_role, 'OWNER')
-  assert.equal(ev.actor_id, 'binding-owner')
+  assert.equal(ev.actor_id, 'owner-1')
   assert.equal(ev.target_id, 'binding-worker')
 })
 
-test('setExecutionProfile：declarative 演示模式保持现状；clear 清空', () => {
+test('setExecutionProfile：declarative 不能产生 Owner Authority；direct clear 清空', () => {
   const store = makeStore()
   seedWorker(store)
-  const ok = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'fork' } }, { mode: 'declarative', principalSessionId: OTHER_SESSION })
-  assert.match(ok, /^角色 WORKER/)
-  const cleared = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: null }, { mode: 'declarative', principalSessionId: OTHER_SESSION })
+  const denied = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'fork' } }, { mode: 'declarative', principalSessionId: OTHER_SESSION })
+  assert.match(denied, /^OWNER_CONTROL_REQUIRED:/)
+  const cleared = setExecutionProfile(store, { kingdomId: KID, roleType: 'WORKER', profile: null }, ownerAuth())
   assert.match(cleared, /已清空/)
   assert.equal(store.getBindingById('binding-worker')!.execution_profile_json, null)
 })

@@ -90,6 +90,7 @@ export type KingdomErrorCode =
   | 'TASK_OUT_OF_SCOPE'
   | 'EXECUTOR_UNAVAILABLE'
   | 'WORKER_EXECUTION_FAILED'
+  | 'CLAIM_INTEGRITY_BLOCKED'
   | 'EXECUTION_NOT_FOUND'
   | 'ILLEGAL_EXECUTION_STATE'
 
@@ -97,13 +98,13 @@ export type KingdomErrorCode =
  * v0.5.2（M1-B/P0-B）：GUI 写命令守卫。
  *
  * GUI 网关没有可信 DSH Principal（HTTP payload 的 session_id 一律不再被信任），
- * 因此 `session-bound` 模式下所有写命令 fail-closed——宁可少一个按钮能用，
- * 也不能让 GUI 伪造治理身份。`declarative` 是本地可信演示模式，保持可用。
+ * R02 Owner Control ruling：GUI/HTTP 没有可信 direct Owner capability，
+ * 因此所有写命令都 fail-closed；declarative 仅保留为历史 fixture 语义，
+ * 不能解锁产品写入。
  */
 export function guiWriteGuard(authMode: string): { allowed: true } | { allowed: false; code: 'SESSION_AUTH_REQUIRED' } {
-  return authMode === 'session-bound'
-    ? { allowed: false, code: 'SESSION_AUTH_REQUIRED' }
-    : { allowed: true }
+  void authMode
+  return { allowed: false, code: 'SESSION_AUTH_REQUIRED' }
 }
 
 /** GUI 可以呈现为按钮的下一步动作。 */
@@ -113,9 +114,203 @@ export type AllowedAction =
   | 'review:accept'
   | 'review:rework'
   | 'review:fail'
+  | 'review:handoff'
   | 'execution:pause'
   | 'execution:resume'
   | 'execution:abort'
+
+/** v0.9 S1：Projection 的可公开、可追溯来源引用。不得放入 raw payload/session/path。 */
+export type ProjectionSourceType = 'table-row' | 'event' | 'runtime-evidence' | 'derived-rule'
+
+export interface SourceRef {
+  sourceType: ProjectionSourceType
+  entityType: string
+  entityId: string | null
+  eventSeq?: number
+  ruleCode?: string
+}
+
+export interface EntityRef {
+  type: string
+  id: string
+}
+
+export type ProjectionSourceKind = 'GOVERNANCE_FACT' | 'RUNTIME_OBSERVATION'
+
+export interface AuthoritativeState {
+  sourceKind: ProjectionSourceKind
+  value: string
+  sourceRefs: SourceRef[]
+}
+
+export interface AttentionReason {
+  code: string
+  sourceRefs: SourceRef[]
+}
+
+export interface ActionAvailability {
+  action: AllowedAction | string
+  lifecycleAllowed: boolean
+  executable: boolean
+  disabledReason: AttentionReason | null
+  sourceRefs: SourceRef[]
+}
+
+export type ProjectionItemKind =
+  | 'GOVERNANCE_FACT'
+  | 'RUNTIME_OBSERVATION'
+  | 'WORKER_CLAIM'
+  | 'DERIVED_EXPLANATION'
+
+export type ProjectionTerminality = 'NON_TERMINAL' | 'TERMINAL' | 'UNKNOWN'
+
+export interface TimelineItem {
+  id: string
+  kind: ProjectionItemKind
+  occurredAt: string | null
+  entityRef: EntityRef | null
+  authoritativeState: AuthoritativeState | null
+  sourceRefs: SourceRef[]
+  allowedActions: ActionAvailability[] | null
+  attentionReason: AttentionReason | null
+  terminality: ProjectionTerminality
+  summary: string
+  requiresOwnerAction: boolean
+  rawEvidenceAvailable: boolean
+}
+
+export interface AttentionItem {
+  id: string
+  severity: 'ATTENTION' | 'CRITICAL' | 'UNKNOWN'
+  entityRef: EntityRef | null
+  reason: AttentionReason
+  summary: string
+  sourceRefs: SourceRef[]
+}
+
+export interface ProjectionEnvelope<T> {
+  revision: number
+  refreshedAt: string
+  entityRef: EntityRef | null
+  authoritativeState: AuthoritativeState | null
+  sourceRefs: SourceRef[]
+  allowedActions: ActionAvailability[] | null
+  attentionReason: AttentionReason | null
+  data: T
+}
+
+export interface OverviewProjectionData {
+  health: 'OK' | 'ATTENTION' | 'CRITICAL' | 'UNKNOWN'
+  /** Optional business-facing health wording supplied by the projection/fixture. */
+  healthTitle?: string | null
+  healthLabel?: string | null
+  healthMetrics?: {
+    blockedWorkers: number
+    frozenTerritories: number
+    attentionCount: number
+  } | null
+  taskCount: number
+  activeExecutionCount: number
+  statusCounts: Record<string, number>
+  ownerActions: ActionAvailability[]
+}
+
+/** v1.0：组织页使用的有界角色摘要；不包含 session/model/meta/private path。 */
+export interface OrganizationRoleSummary {
+  bindingRef: EntityRef
+  roleType: string
+  roleName: string
+  /**
+   * Canonical organization scope for this binding when one exact territory is
+   * knowable. `null` is intentional for a worker with no current affinity or
+   * with conflicting territory evidence; the GUI must keep that actor visible
+   * in an explicit unassigned/unknown area.
+   */
+  territoryRef: EntityRef | null
+  status: AuthoritativeState
+  sessionBound: boolean
+  sourceRefs: SourceRef[]
+}
+
+/** v1.0：组织页使用的有界 Territory 摘要；workspace path 永不进入 Projection。 */
+export interface OrganizationTerritorySummary {
+  territoryRef: EntityRef
+  name: string
+  status: AuthoritativeState
+  supervisorBindingRef: EntityRef | null
+  taskCount: number
+  sourceRefs: SourceRef[]
+}
+
+export interface OrganizationProjectionData {
+  kingdomName: string | null
+  bindingCount: number
+  territoryCount: number
+  roles: OrganizationRoleSummary[]
+  territories: OrganizationTerritorySummary[]
+  rolesTruncated: boolean
+  territoriesTruncated: boolean
+}
+
+/** v1.0：Execution 导航使用的运行事实摘要；Claim 与治理 Fact 不在此混写。 */
+export interface ExecutionProjectionSummary {
+  executionId: string
+  taskId: string
+  executionRef: EntityRef
+  taskRef: EntityRef
+  workerBindingRef: EntityRef | null
+  attemptNo: number
+  state: string
+  authoritativeState: AuthoritativeState
+  executionContract: string
+  terminality: ProjectionTerminality
+  pausePending: boolean
+  startedAt: string | null
+  endedAt: string | null
+  actionAvailability: ActionAvailability[]
+  attentionReason: AttentionReason | null
+  sourceRefs: SourceRef[]
+}
+
+export interface ExecutionProjectionData {
+  totalExecutionCount: number
+  items: ExecutionProjectionSummary[]
+  truncated: boolean
+}
+
+export interface TaskProjectionData {
+  taskRef: EntityRef
+  status: AuthoritativeState
+  claim: { outcome: string; sourceRefs: SourceRef[] } | null
+  execution: {
+    state: string
+    executionContract: string
+    terminality: ProjectionTerminality
+    sourceRefs: SourceRef[]
+  } | null
+  actionAvailability: ActionAvailability[]
+}
+
+export interface ReadonlySnapshotProjection {
+  overview: ProjectionEnvelope<OverviewProjectionData>
+  organization: ProjectionEnvelope<OrganizationProjectionData>
+  executions: ProjectionEnvelope<ExecutionProjectionData>
+  timeline: ProjectionEnvelope<TimelineItem[]>
+  attention: ProjectionEnvelope<AttentionItem[]>
+}
+
+/**
+ * S1 只读派生所需的 Host-only 可验证上下文；缺任一项时 action 必须 fail-closed。
+ * `principalSessionId` 由 local-control Host 以 opaque context 注入，不来自浏览器
+ * payload，也不表示 Owner principal。
+ */
+export interface ProjectionSecurityContext {
+  principalSessionId?: string | null
+  sessionVerified?: boolean
+  scope?: string[] | null
+  hostContext?: boolean
+  commandCoverage?: string[] | null
+}
 
 export interface EventView {
   seq: number
@@ -134,15 +329,17 @@ export interface BindingView {
   roleType: string
   roleName: string
   runtimeType: string
-  /** v0.5.2（M1-B/P0-C）：脱敏后的会话标识（如 …8f21）。完整 session id 只进审计事件面，不出普通快照。 */
+  /** v0.5.2（M1-B/P0-C）：脱敏后的会话标识（如 …8f21）；完整 id 不进入公共 GUI JSON。 */
   sessionDisplay: string | null
   /** 是否已绑定会话（session-bound 模式下该绑定可被验证身份）。 */
   sessionBound: boolean
-  /** v0.4：会话身份预留字段（模型名 / agent 工具名 / 扩展槽），可空。 */
+  /** v0.4：字段/null shape 兼容；已配置的私有模型值仅返回稳定脱敏标记。 */
   modelName: string | null
+  /** 字段/null shape 兼容；已配置的私有 agent 值仅返回稳定脱敏标记。 */
   agentName: string | null
+  /** 保留 object/null shape；敏感 key 递归脱敏，深度、条目、节点与字符串均有界。 */
   sessionMeta: Record<string, unknown> | null
-  /** v0.6.0（M1-C）：执行配置（ExecutionProfile {provider?, model?}）只读展示；null=未配置（回退全局）。 */
+  /** v0.6.0（M1-C）：保留 ExecutionProfile 字段 shape；配置值脱敏，null=未配置（回退全局）。 */
   executionProfile: { provider: string | null; model: string | null } | null
   createdAt: string
 }
@@ -161,6 +358,7 @@ export interface ClaimView {
   resultId: string
   attemptNo: number
   workerBindingId: string | null
+  /** 与 BindingView 一致的脱敏 session id；字段 shape 保持兼容。 */
   sessionId: string | null
   /** Worker 自称的结果，仅供展示与审查，不驱动状态。 */
   claimedOutcome: string
@@ -176,6 +374,7 @@ export interface ExecutionView {
   taskId: string
   attemptNo: number
   workerBindingId: string | null
+  /** 与 BindingView 一致的脱敏 session id；字段 shape 保持兼容。 */
   sessionId: string | null
   state: string
   detail: string | null
@@ -302,6 +501,12 @@ export interface StageActorView {
   fallbackState: ActorState
   /** 触发本状态的事件序号，便于 GUI 丢弃过期事件。 */
   sourceSeq: number | null
+  /**
+   * Evidence is present but cannot be uniquely attributed (for example two
+   * live executions for one binding) or the actor has no exact territory
+   * scope. The renderer must not turn this into a live-success claim.
+   */
+  indeterminate: boolean
 }
 
 /** 权限诚实度声明。Beta 若未做主体校验，必须让 GUI 能显示这个徽章。 */
@@ -342,6 +547,37 @@ export interface SnapshotView {
   recentEvents: EventView[]
   /** v0.8：Runtime Governance 投影（§32）。Schema 非 v4 时为全空数组。 */
   governance: RuntimeGovernanceView
+  /** v1.0：保留四类证据并 additive 增加 Organization / Execution 摘要。 */
+  projection: ReadonlySnapshotProjection
+}
+
+/** v1.0：Task Detail 的 Assignment Ledger 历史；不包含 session/private payload。 */
+export interface TaskAssignmentHistoryView {
+  assignmentId: string
+  workerBindingId: string
+  assignedByBindingId: string
+  assignedAt: string | null
+  endedAt: string | null
+  endReason: string | null
+  previousAssignmentId: string | null
+  handoffReason: string | null
+  sourceRefs: SourceRef[]
+}
+
+/** v1.0：从治理事件还原的 Supervisor decision；HANDOFF 字段均为有界公开引用。 */
+export interface SupervisorDecisionView {
+  seq: number
+  decision: string
+  reason: string | null
+  reviewerBindingId: string | null
+  reviewedAttemptNo: number | null
+  claimedOutcome: string | null
+  fromAssignmentId: string | null
+  fromWorkerBindingId: string | null
+  toAssignmentId: string | null
+  toWorkerBindingId: string | null
+  sourceRefs: SourceRef[]
+  createdAt: string
 }
 
 /** 任务详情：验收标准、尝试历史、Claim、Supervisor 决策、关联事件、下一步动作。 */
@@ -351,22 +587,17 @@ export interface TaskDetailView {
   task: TaskView
   territory: TerritoryView | null
   assignedBinding: BindingView | null
+  assignments: TaskAssignmentHistoryView[]
   claims: ClaimView[]
   executions: ExecutionView[]
   /** Supervisor 的历次裁定（从 events 还原，不存在 task_reviews 表）。 */
-  reviews: {
-    seq: number
-    decision: string
-    reason: string | null
-    reviewerBindingId: string | null
-    reviewedAttemptNo: number | null
-    claimedOutcome: string | null
-    createdAt: string
-  }[]
+  reviews: SupervisorDecisionView[]
   relatedEvents: EventView[]
   allowedActions: AllowedAction[]
   /** v0.8：本任务的 Runtime Governance 投影（Lease/Decision/Dispatch）。 */
   governance: RuntimeGovernanceView
+  /** v0.9 S1：Task Detail 的只读 Projection Envelope。 */
+  projection: ProjectionEnvelope<TaskProjectionData>
 }
 
 /** 所有写命令的统一返回。GUI 只读结构化字段，不解析 `message`。 */

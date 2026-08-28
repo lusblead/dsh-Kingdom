@@ -80,6 +80,26 @@ test('S4 seam: preset 面无法解析 → 回退 session 装配面（live schema
   assert.deepEqual(set.tools, ['pwsh', 'read', 'edit', 'web_search'])
 })
 
+test('R3 seam: schemas 有 pwsh 但没有 restrict/guard → capabilities 不声称可 enforce', async () => {
+  const context: DshEnforcementContext = {
+    sessionRef: 's-schema-only',
+    agent: {
+      ctx: { tools: { schemas: () => [{ name: 'pwsh' }] } },
+      session: { events: [] },
+    },
+  }
+  const adapter = new DshRuntimeAdapter({
+    runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
+    agents: { agents: new Map(), create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: () => undefined, list: () => [] },
+  })
+  assert.deepEqual(await adapter.capabilities(context), {
+    tools: [], sandboxMode: null, approvalPolicy: null, presetId: null,
+  })
+  assert.deepEqual(await readEnforceableSet(context), {
+    tools: [], sandboxMode: null, approvalPolicy: null, presetId: null,
+  })
+})
+
 test('S4 resolver: 交集语义 effective = grant ∩ ceiling ∩ enforceable', () => {
   const r = resolveEffectiveCapability({
     requirement: { 'tool:pwsh': true, 'filesystem.write': true, 'tool:web_search': true },
@@ -95,23 +115,37 @@ test('S4 resolver: 交集语义 effective = grant ∩ ceiling ∩ enforceable', 
 test('S4 resolver: 无自授（grant 缺）/ 超 ceiling / ceiling 缺失', () => {
   // grant 缺失 → 拒
   const r1 = resolveEffectiveCapability({
-    requirement: { 'tool:pwsh': true }, grant: {}, ceiling: { 'tool:pwsh': true }, enforceable: ENF,
+    requirement: { 'tool:pwsh': true, 'filesystem.write': true }, grant: {},
+    ceiling: { 'tool:pwsh': true, 'filesystem.write': true }, enforceable: ENF,
   })
   assert.deepEqual(r1.effective, {})
   assert.equal(r1.coverage, 'NONE')
   assert.ok(r1.deniedReasons[0]?.includes('Supervisor grant'))
   // 超 ceiling（不在允许清单）→ 拒
   const r2 = resolveEffectiveCapability({
-    requirement: { 'tool:pwsh': true }, grant: { 'tool:pwsh': true }, ceiling: {}, enforceable: ENF,
+    requirement: { 'tool:pwsh': true, 'filesystem.write': true },
+    grant: { 'tool:pwsh': true, 'filesystem.write': true }, ceiling: {}, enforceable: ENF,
   })
   assert.deepEqual(r2.effective, {})
   assert.ok(r2.deniedReasons[0]?.includes('Owner ceiling'))
   // ceiling 缺失 → 全拒（B-7）
   const r3 = resolveEffectiveCapability({
-    requirement: { 'tool:pwsh': true }, grant: { 'tool:pwsh': true }, ceiling: null, enforceable: ENF,
+    requirement: { 'tool:pwsh': true, 'filesystem.write': true },
+    grant: { 'tool:pwsh': true, 'filesystem.write': true }, ceiling: null, enforceable: ENF,
   })
   assert.equal(r3.coverage, 'NONE')
   assert.ok(r3.deniedReasons[0]?.includes('capability ceiling'))
+
+  // Runtime 不可 enforce write → tool 仍可进入交集，但 write 明确不在 effective。
+  const r4 = resolveEffectiveCapability({
+    requirement: { 'tool:pwsh': true, 'filesystem.write': true },
+    grant: { 'tool:pwsh': true, 'filesystem.write': true },
+    ceiling: { 'tool:pwsh': true, 'filesystem.write': true },
+    enforceable: { ...ENF, sandboxMode: 'read-only' },
+  })
+  assert.deepEqual(r4.effective, { 'tool:pwsh': true })
+  assert.equal(r4.coverage, 'PARTIAL')
+  assert.ok(r4.deniedReasons.some(reason => reason.startsWith('filesystem.write: Runtime')))
 })
 
 test('S4 resolver: isEnforceable 映射（未知能力 fail-closed；filesystem.read 只读/写可 enforce）', () => {
@@ -212,6 +246,20 @@ test('S4 enforcement: 缺 sandbox/approval 后端 → CANNOT_ENFORCE（fail-clos
   assert.equal(agent.ctx.tools.disposed, 2, '失败路径必须拆除已注册 disposer')
 })
 
+test('S4 enforcement: read-only no-op sandbox setter 即使已有 approval 事件也不得 ENFORCED', async () => {
+  const agent = makeAgent()
+  agent.session.events.push({ type: 'approval/policy', data: { policy: 'never' } })
+  const deps = makePolicyDeps()
+  deps.sandboxPolicy = { setSandboxMode: () => 0 /* no-op：不改变当前 Session effective state */ }
+
+  const result = await materializeDshEnforcement(deps, ctxOf(agent), {
+    tools: ['pwsh'], territoryPath: 'C:/terr-a', sandboxMode: 'read-only', approvalPolicy: 'never',
+  })
+  assert.equal(result.ok, false)
+  assert.ok(result.reasons.some(reason => reason.includes('sandbox/mode') && reason.includes('无法证明')))
+  assert.equal(agent.ctx.tools.disposed, 2, '失败路径必须拆除已注册 disposer')
+})
+
 test('S4 enforcement: preset 一键路径（permission.set）+ readEnforceableSet 从事件重建', async () => {
   const agent = makeAgent()
   const deps = makePolicyDeps({ permission: true, sandbox: false, approval: false })
@@ -226,6 +274,31 @@ test('S4 enforcement: preset 一键路径（permission.set）+ readEnforceableSe
   assert.equal(set.approvalPolicy, 'never')
   assert.equal(set.presetId, 'worker-safe')
   assert.deepEqual(set.tools, ['pwsh', 'read', 'edit', 'web_search'])
+})
+
+test('R3 enforcement: 有效 preset 重复选择无新增事件时按幂等状态核验', async () => {
+  const agent = makeAgent()
+  agent.session.events.push(
+    { type: 'permission/preset', data: { preset: 'worker-safe' } },
+    { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  )
+  let setCalls = 0
+  const deps = {
+    permission: {
+      set: (_session: unknown, _preset: string): void => { setCalls++ },
+    },
+  }
+  const eventCount = agent.session.events.length
+  const result = await materializeDshEnforcement(deps, ctxOf(agent), {
+    tools: ['pwsh'], territoryPath: 'C:/terr-a', sandboxMode: 'workspace-write', approvalPolicy: 'never', presetId: 'worker-safe',
+  })
+  assert.equal(result.ok, true, `幂等 preset 应复用已核验状态：${result.reasons.join(';')}`)
+  assert.equal(setCalls, 1)
+  assert.equal(agent.session.events.length, eventCount, '重复 PermissionPresetService.set 不应伪造新增事件')
+  const applied = JSON.parse(result.evidenceJson!).payload.applied as string[]
+  assert.ok(applied.some(item => item.includes('idempotent-existing-state')))
+  assert.equal((await cleanupDshEnforcement(ctxOf(agent))).ok, true)
 })
 
 // ── 2b. BLOCKER #2 回归（Owner 指令 A–D：agentPresetId 与 sandboxMode 严格分离 + rejection 不泄漏）──
@@ -297,14 +370,19 @@ test('S4 adapter: capabilities/preflight/materialize/cleanup 全接通', async (
   })
   const agent = makeAgent()
   const ctx = ctxOf(agent)
-  // capabilities：机制可用性（policy 后端齐备）→ 可 enforce 领地写 + 禁扩权 + 工具面
+  // capabilities 必须读取 context-bound 当前 Session；构造期 setter presence 不能伪造 sandbox/approval。
+  assert.deepEqual(await adapter.capabilities(ctx), { tools: ['pwsh', 'read', 'edit', 'web_search'], sandboxMode: null, approvalPolicy: null, presetId: null })
+  agent.session.events.push(
+    { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  )
   assert.deepEqual(await adapter.capabilities(ctx), { tools: ['pwsh', 'read', 'edit', 'web_search'], sandboxMode: 'workspace-write', approvalPolicy: 'never', presetId: null })
-  // 无 policy 后端 → 空集（fail-closed）
+  // 无 policy 后端且当前 Session 也无政策状态 → 空集（fail-closed）
   const bareAdapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: { agents: new Map(), create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: () => undefined, list: () => [] },
   })
-  assert.deepEqual(await bareAdapter.capabilities(ctx), { tools: ['pwsh', 'read', 'edit', 'web_search'], sandboxMode: null, approvalPolicy: null, presetId: null })
+  assert.deepEqual(await bareAdapter.capabilities(ctxOf(makeAgent())), { tools: ['pwsh', 'read', 'edit', 'web_search'], sandboxMode: null, approvalPolicy: null, presetId: null })
   // preflight：approval≠never 拒；机制齐备通过
   const bad = await adapter.preflight({ tools: ['pwsh'], territoryPath: 'C:/terr-a', sandboxMode: 'workspace-write', approvalPolicy: 'ask' }, ctx)
   assert.equal(bad.ok, false)
@@ -333,6 +411,10 @@ function makeGateEnv(): { store: KingdomStore; kingdomId: string; worker: string
   const taskId = `task-${Math.random().toString(36).slice(2, 8)}`
   store.insertTask({ task_id: taskId, territory_id: terrA, parent_task_id: null, title: 'T', description: null, assigned_binding_id: worker, status: 'ASSIGNED', acceptance_criteria: null, result_summary: null, created_at: NOW(), updated_at: NOW() })
   const agent = makeAgent()
+  agent.session.events.push(
+    { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  )
   const adapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: { agents: new Map(), create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: () => undefined, list: () => [] },
@@ -350,6 +432,10 @@ const FULL_REQ = JSON.stringify({ 'tool:pwsh': true, 'filesystem.write': true })
 const FULL_CEIL = JSON.stringify({ 'tool:pwsh': true, 'filesystem.write': true })
 const FULL_GRANT: GrantMap = { 'tool:pwsh': true, 'filesystem.write': true }
 
+function evidencePayload(result: Awaited<ReturnType<typeof runCapabilityGate>>): Record<string, unknown> {
+  return JSON.parse(result.decision.enforcement_evidence_json!).payload as Record<string, unknown>
+}
+
 test('S4 gate: 完整 GRANTED 路径（TX-0D..TX-2S）→ GRANTED+ENFORCED + DISPATCH_READY', async () => {
   const env = makeGateEnv()
   const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
@@ -366,6 +452,9 @@ test('S4 gate: 完整 GRANTED 路径（TX-0D..TX-2S）→ GRANTED+ENFORCED + DIS
   assert.ok(result.decision.enforcement_evidence_json)
   assert.equal(result.lease.state, 'DISPATCH_READY')
   assert.equal(store.getLease(leaseId)?.capability_decision_id, result.decision.decision_id)
+  assert.equal(evidencePayload(result).requestedSandboxMode, 'workspace-write')
+  assert.equal(evidencePayload(result).effectiveSandboxMode, 'workspace-write')
+  assert.equal(evidencePayload(result).boundedNarrowing, false)
   // 计划已持久（materialize 前）
   assert.ok(store.getLease(leaseId)?.enforcement_plan_snapshot)
   // zero execution 未被破坏：无 executions / dispatch
@@ -373,39 +462,236 @@ test('S4 gate: 完整 GRANTED 路径（TX-0D..TX-2S）→ GRANTED+ENFORCED + DIS
   assert.equal(store.listDispatches(kingdomId).length, 0)
 })
 
-test('S4 gate: ceiling 缺失 → DENIED+UNAVAILABLE + zero execution（B-7）', async () => {
+test('S4 gate: ceiling 缺失且不触碰 Runtime → DENIED+NOT_ATTEMPTED + zero execution（B-7）', async () => {
   const env = makeGateEnv()
   const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+  let capabilitiesCalled = false
+  const noRuntimeAdapter = Object.create(adapter) as DshRuntimeAdapter
+  noRuntimeAdapter.capabilities = async () => {
+    capabilitiesCalled = true
+    throw new Error('ceiling missing must not inspect Runtime')
+  }
   const result = await runCapabilityGate({
-    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    store, adapter: noRuntimeAdapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
     leaseId, requirementJson: FULL_REQ, ceilingJson: null, grant: FULL_GRANT,
     sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
   })
   assert.equal(result.materialized, false)
   assert.equal(result.decision.decision, 'DENIED')
-  assert.equal(result.decision.enforcement_status, 'UNAVAILABLE')
+  assert.equal(result.decision.enforcement_status, 'NOT_ATTEMPTED')
   assert.equal(result.decision.reason_code, 'CEILING_NOT_CONFIGURED')
+  assert.equal(capabilitiesCalled, false)
   assert.equal(store.getLease(leaseId)?.state, 'RELEASED', 'zero execution：lease 必须释放')
   assert.equal(store.listExecutions(taskId).length, 0)
   assert.equal(store.listDispatches(kingdomId).length, 0)
 })
 
-test('S4 gate: 无自授/超授权 → coverage≠FULL → DENIED+NOT_ATTEMPTED', async () => {
+test('S4 gate: coverage PARTIAL 仅作信息字段 → 无 write requirement 时有界收窄为 read-only', async () => {
   const env = makeGateEnv()
   const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
-  store.setKingdomCapabilityCeiling(kingdomId, FULL_CEIL)
+  const requirement = JSON.stringify({ 'tool:pwsh': true, 'tool:web_search': true })
+  const ceiling = JSON.stringify({ 'tool:pwsh': true, 'tool:web_search': true })
+  store.setKingdomCapabilityCeiling(kingdomId, ceiling)
   const result = await runCapabilityGate({
     store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
-    leaseId, requirementJson: FULL_REQ, ceilingJson: FULL_CEIL,
-    grant: { 'tool:pwsh': true }, // filesystem.write 未授予
+    leaseId, requirementJson: requirement, ceilingJson: ceiling,
+    grant: { 'tool:pwsh': true }, // tool:web_search 未授予
     sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
   })
-  assert.equal(result.materialized, false)
-  assert.equal(result.decision.decision, 'DENIED')
-  assert.equal(result.decision.enforcement_status, 'NOT_ATTEMPTED')
-  assert.ok(result.decision.reason_code?.includes('filesystem.write'))
+  assert.equal(result.materialized, true)
+  assert.equal(result.decision.decision, 'GRANTED')
+  assert.equal(result.decision.enforcement_status, 'ENFORCED')
+  assert.equal(result.decision.requirement_coverage, 'PARTIAL')
+  assert.deepEqual(JSON.parse(result.decision.effective_snapshot!), { 'tool:pwsh': true })
+  assert.equal(result.decision.reason_code, 'BOUNDED_SANDBOX_NARROWING')
+  assert.equal(evidencePayload(result).sandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).requestedSandboxMode, 'workspace-write')
+  assert.equal(evidencePayload(result).effectiveSandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).boundedNarrowing, true)
+  assert.equal(JSON.parse(store.getLease(leaseId)!.enforcement_plan_snapshot!).payload.sandboxMode, 'read-only')
+  assert.equal(store.getLease(leaseId)?.state, 'DISPATCH_READY')
+  assert.equal(store.listExecutions(taskId).length, 0, '能力闸门通过仍未创建 Execution')
+})
+
+test('S4 gate: coverage NONE 仍可按有效 Grant 执行；Grant 为空仍 fail-closed', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+  const ceiling = JSON.stringify({ 'tool:pwsh': true })
+  store.setKingdomCapabilityCeiling(kingdomId, ceiling)
+  const result = await runCapabilityGate({
+    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    leaseId, requirementJson: null, ceilingJson: ceiling, grant: { 'tool:pwsh': true },
+    sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
+  })
+  assert.equal(result.materialized, true)
+  assert.equal(result.decision.requirement_coverage, 'NONE')
+  assert.equal(result.decision.decision, 'GRANTED')
+  assert.equal(result.decision.reason_code, 'BOUNDED_SANDBOX_NARROWING')
+  assert.equal(evidencePayload(result).sandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).boundedNarrowing, true)
+
+  const deniedEnv = makeGateEnv()
+  const deniedCeiling = JSON.stringify({ 'tool:pwsh': true })
+  deniedEnv.store.setKingdomCapabilityCeiling(deniedEnv.kingdomId, deniedCeiling)
+  const denied = await runCapabilityGate({
+    store: deniedEnv.store, adapter: deniedEnv.adapter, kingdomId: deniedEnv.kingdomId, taskId: deniedEnv.taskId,
+    attemptNo: 1, workerBindingId: deniedEnv.worker, supervisorBindingId: deniedEnv.sup,
+    leaseId: deniedEnv.leaseId, requirementJson: null, ceilingJson: deniedCeiling, grant: {},
+    sandboxMode: 'workspace-write', context: ctxOf(deniedEnv.agent, 's-1'),
+  })
+  assert.equal(denied.materialized, false)
+  assert.equal(denied.decision.decision, 'DENIED')
+  assert.equal(denied.decision.enforcement_status, 'NOT_ATTEMPTED')
+  assert.equal(denied.decision.reason_code, 'GRANT_NOT_CONFIGURED')
+})
+
+test('S4 gate: requested read-only happy path 不扩大也不隐式收窄', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+  const requirement = JSON.stringify({ 'tool:pwsh': true })
+  store.setKingdomCapabilityCeiling(kingdomId, requirement)
+  const result = await runCapabilityGate({
+    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    leaseId, requirementJson: requirement, ceilingJson: requirement, grant: { 'tool:pwsh': true },
+    sandboxMode: 'read-only', context: ctxOf(agent, 's-1'),
+  })
+  assert.equal(result.materialized, true)
+  assert.equal(result.decision.reason_code, null)
+  assert.equal(evidencePayload(result).requestedSandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).effectiveSandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).boundedNarrowing, false)
+})
+
+test('R3 gate: read-only caller 不得把额外 filesystem.write 留在 GRANTED effective snapshot', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+  const requirement = JSON.stringify({ 'tool:pwsh': true })
+  const ceiling = JSON.stringify({ 'tool:pwsh': true, 'filesystem.write': true })
+  const grant: GrantMap = { 'tool:pwsh': true, 'filesystem.write': true }
+  store.setKingdomCapabilityCeiling(kingdomId, ceiling)
+  const result = await runCapabilityGate({
+    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    leaseId, requirementJson: requirement, ceilingJson: ceiling, grant,
+    sandboxMode: 'read-only', context: ctxOf(agent, 's-1'),
+  })
+  assert.equal(result.materialized, true)
+  assert.equal(result.decision.decision, 'GRANTED')
+  assert.equal(result.decision.enforcement_status, 'ENFORCED')
+  assert.deepEqual(JSON.parse(result.decision.effective_snapshot!), { 'tool:pwsh': true })
+  const plan = JSON.parse(store.getLease(leaseId)!.enforcement_plan_snapshot!)
+  assert.deepEqual(plan.payload.effective, { 'tool:pwsh': true })
+  assert.equal(plan.payload.sandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).effectiveSandboxMode, 'read-only')
+  assert.equal(evidencePayload(result).boundedNarrowing, false)
+})
+
+test('R3 service: GRANTED 结果交回同一份实际 materialized EnforcementRequest', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, agent } = env
+  const requirement = JSON.stringify({ 'tool:pwsh': true })
+  const ceiling = JSON.stringify({ 'tool:pwsh': true, 'filesystem.write': true })
+  const grant: GrantMap = { 'tool:pwsh': true, 'filesystem.write': true }
+  store.setKingdomCapabilityCeiling(kingdomId, ceiling)
+
+  const observed: object[] = []
+  const adapter = Object.create(env.adapter) as DshRuntimeAdapter
+  const realPreflight = env.adapter.preflight.bind(env.adapter)
+  const realMaterialize = env.adapter.materialize.bind(env.adapter)
+  adapter.preflight = async (request, context) => {
+    observed.push(request)
+    return realPreflight(request, context)
+  }
+  adapter.materialize = async (request, context) => {
+    assert.strictEqual(request, observed[0], 'materialize 必须消费 preflight 的同一 request 对象')
+    observed.push(request)
+    return realMaterialize(request, context)
+  }
+
+  const context = ctxOf(agent, 's-1')
+  const result = await runCapabilityGate({
+    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    leaseId, requirementJson: requirement, ceilingJson: ceiling, grant,
+    sandboxMode: 'read-only', context,
+  })
+  assert.equal(result.materialized, true)
+  assert.ok(result.enforcementRequest)
+  assert.strictEqual(result.enforcementRequest, observed[0])
+  assert.strictEqual(result.enforcementRequest, observed[1])
+  assert.deepEqual(result.enforcementRequest, {
+    tools: ['pwsh'], territoryPath: 'C:/terr-a', sandboxMode: 'read-only', approvalPolicy: 'never',
+  })
+  assert.equal((await adapter.cleanup(result.enforcementRequest, context)).ok, true)
+})
+
+test('S4 gate: required write 缺失于 Grant/Ceiling/Runtime → DENIED + zero dispatch', async () => {
+  const cases: { name: string; grant: GrantMap; ceiling: string; adapter?: DshRuntimeAdapter; status: string }[] = [
+    {
+      name: 'Grant',
+      grant: { 'tool:pwsh': true },
+      ceiling: FULL_CEIL,
+      status: 'NOT_ATTEMPTED',
+    },
+    {
+      name: 'Ceiling',
+      grant: FULL_GRANT,
+      ceiling: JSON.stringify({ 'tool:pwsh': true }),
+      status: 'NOT_ATTEMPTED',
+    },
+  ]
+
+  for (const scenario of cases) {
+    const env = makeGateEnv()
+    const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+    store.setKingdomCapabilityCeiling(kingdomId, scenario.ceiling)
+    const result = await runCapabilityGate({
+      store, adapter: scenario.adapter ?? adapter, kingdomId, taskId, attemptNo: 1,
+      workerBindingId: worker, supervisorBindingId: sup, leaseId,
+      requirementJson: FULL_REQ, ceilingJson: scenario.ceiling, grant: scenario.grant,
+      sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
+    })
+    assert.equal(result.materialized, false, scenario.name)
+    assert.equal(result.decision.decision, 'DENIED', scenario.name)
+    assert.equal(result.decision.reason_code, 'REQUIRED_WRITE_NOT_EFFECTIVE', scenario.name)
+    assert.equal(result.decision.enforcement_status, scenario.status, scenario.name)
+    assert.equal(store.getLease(leaseId)?.state, 'RELEASED', scenario.name)
+    assert.equal(store.listDispatches(kingdomId).length, 0, scenario.name)
+  }
+
+  const runtimeEnv = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = runtimeEnv
+  store.setKingdomCapabilityCeiling(kingdomId, FULL_CEIL)
+  const runtimeCannotWrite = Object.create(adapter) as DshRuntimeAdapter
+  runtimeCannotWrite.capabilities = async () => ({
+    tools: ['pwsh'], sandboxMode: 'read-only', approvalPolicy: 'never', presetId: null,
+  })
+  const runtimeResult = await runCapabilityGate({
+    store, adapter: runtimeCannotWrite, kingdomId, taskId, attemptNo: 1,
+    workerBindingId: worker, supervisorBindingId: sup, leaseId,
+    requirementJson: FULL_REQ, ceilingJson: FULL_CEIL, grant: FULL_GRANT,
+    sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
+  })
+  assert.equal(runtimeResult.materialized, false, 'Runtime')
+  assert.equal(runtimeResult.decision.reason_code, 'REQUIRED_WRITE_NOT_EFFECTIVE')
+  assert.equal(runtimeResult.decision.enforcement_status, 'UNAVAILABLE')
   assert.equal(store.getLease(leaseId)?.state, 'RELEASED')
-  assert.equal(store.listExecutions(taskId).length, 0)
+  assert.equal(store.listDispatches(kingdomId).length, 0)
+
+  const readOnlyEnv = makeGateEnv()
+  const { store: readOnlyStore, kingdomId: readOnlyKingdomId, taskId: readOnlyTaskId,
+    worker: readOnlyWorker, sup: readOnlySup, leaseId: readOnlyLeaseId,
+    adapter: readOnlyAdapter, agent: readOnlyAgent } = readOnlyEnv
+  readOnlyStore.setKingdomCapabilityCeiling(readOnlyKingdomId, FULL_CEIL)
+  const readOnlyResult = await runCapabilityGate({
+    store: readOnlyStore, adapter: readOnlyAdapter, kingdomId: readOnlyKingdomId,
+    taskId: readOnlyTaskId, attemptNo: 1, workerBindingId: readOnlyWorker,
+    supervisorBindingId: readOnlySup, leaseId: readOnlyLeaseId,
+    requirementJson: FULL_REQ, ceilingJson: FULL_CEIL, grant: FULL_GRANT,
+    sandboxMode: 'read-only', context: ctxOf(readOnlyAgent, 's-1'),
+  })
+  assert.equal(readOnlyResult.materialized, false, 'required write cannot use read-only request')
+  assert.equal(readOnlyResult.decision.reason_code, 'REQUIRED_WRITE_NOT_REQUESTED')
+  assert.equal(readOnlyStore.getLease(readOnlyLeaseId)?.state, 'RELEASED')
+  assert.equal(readOnlyStore.listDispatches(readOnlyKingdomId).length, 0)
 })
 
 test('S4 gate: materialize 失败 → DENIED+FAILED + cleanup + zero execution（TX-2F）', async () => {
@@ -431,4 +717,56 @@ test('S4 gate: materialize 失败 → DENIED+FAILED + cleanup + zero execution�
   assert.equal(store.getLease(leaseId)?.state, 'RELEASED')
   assert.equal(store.listExecutions(taskId).length, 0, 'materialize 失败绝不允许产生 Execution')
   assert.equal(store.listDispatches(kingdomId).length, 0)
+})
+
+test('S4 gate: cleanup 不可确认 → Lease 保留 RECOVERING 且原因写入 Ledger', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, adapter, agent } = env
+  store.setKingdomCapabilityCeiling(kingdomId, FULL_CEIL)
+
+  const uncertainCleanup = Object.create(adapter) as DshRuntimeAdapter
+  uncertainCleanup.preflight = async () => ({ ok: false, reasons: ['preflight rejected'] })
+  uncertainCleanup.cleanup = async () => ({ ok: false, evidenceJson: null })
+
+  const result = await runCapabilityGate({
+    store, adapter: uncertainCleanup, kingdomId, taskId, attemptNo: 1,
+    workerBindingId: worker, supervisorBindingId: sup, leaseId,
+    requirementJson: FULL_REQ, ceilingJson: FULL_CEIL, grant: FULL_GRANT,
+    sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
+  })
+
+  assert.equal(result.materialized, false)
+  assert.equal(result.decision.decision, 'DENIED')
+  assert.equal(result.decision.enforcement_status, 'UNAVAILABLE')
+  assert.equal(result.lease.state, 'RECOVERING')
+  assert.equal(store.getLease(leaseId)?.state, 'RECOVERING')
+  assert.equal(store.getLease(leaseId)?.release_reason, 'capability-denied:UNAVAILABLE')
+  assert.equal(store.getLease(leaseId)?.release_evidence_json, null)
+})
+
+test('R3 gate: 真实 DSH adapter disposer 抛错 → cleanup 未确认且 Lease 保留 RECOVERING', async () => {
+  const env = makeGateEnv()
+  const { store, kingdomId, taskId, worker, sup, leaseId, agent } = env
+  store.setKingdomCapabilityCeiling(kingdomId, FULL_CEIL)
+  agent.ctx.tools.restrict = () => () => { throw new Error('restrict disposer failed') }
+
+  const adapter = Object.create(env.adapter) as DshRuntimeAdapter
+  const realMaterialize = env.adapter.materialize.bind(env.adapter)
+  adapter.materialize = async (request, context) => {
+    const materialized = await realMaterialize(request, context)
+    assert.equal(materialized.ok, true, `测试需要先注册真实 disposer：${materialized.reasons.join(';')}`)
+    return { ok: false, evidenceJson: null, reasons: ['forced post-materialize failure'] }
+  }
+
+  const result = await runCapabilityGate({
+    store, adapter, kingdomId, taskId, attemptNo: 1, workerBindingId: worker, supervisorBindingId: sup,
+    leaseId, requirementJson: FULL_REQ, ceilingJson: FULL_CEIL, grant: FULL_GRANT,
+    sandboxMode: 'workspace-write', context: ctxOf(agent, 's-1'),
+  })
+  assert.equal(result.materialized, false)
+  assert.equal(result.decision.decision, 'DENIED')
+  assert.equal(result.decision.enforcement_status, 'FAILED')
+  assert.equal(result.lease.state, 'RECOVERING')
+  assert.equal(store.getLease(leaseId)?.state, 'RECOVERING')
+  assert.equal(store.getLease(leaseId)?.release_evidence_json, null)
 })

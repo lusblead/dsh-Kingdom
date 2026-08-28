@@ -58,11 +58,16 @@ export function createTerritory(store: KingdomStore, input: CreateTerritoryInput
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_CREATED',
-    actor_role: null,
-    actor_id: null,
+    actor_role: admin.owner ? 'OWNER' : null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
-    payload_json: JSON.stringify({ name, workspace_path: territory.workspace_path }),
+    payload_json: JSON.stringify({
+      operation: 'territory.create',
+      name,
+      workspace_path: territory.workspace_path,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+    }),
     created_at: now,
   })
   return `已创建领地「${name}」（id=${territory.territory_id}${territory.workspace_path ? `，工作区 ${territory.workspace_path}` : ''}）。`
@@ -78,7 +83,7 @@ export function listTerritories(store: KingdomStore, kingdomId: string): string 
 
 /**
  * v0.7.0（M2）：设置 Territory 主理 Supervisor（Topology Administration Plane）。
- * - session-bound 下仅真实 OWNER 可执行（requireAdmin）；
+ * - 仅 direct Owner Control capability 可执行（requireAdmin → requireOwnerControl）；
  * - supervisorBindingId=null → 未指派 → fail-closed（TERRITORY_SUPERVISOR_MISSING，无 Supervisor 可治理）；
  * - 指派必须是当前王国的 ACTIVE SUPERVISOR 绑定。
  */
@@ -111,13 +116,14 @@ export function setTerritorySupervisor(
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_SUPERVISOR_UPDATED',
     actor_role: admin.owner ? 'OWNER' : null,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
     payload_json: JSON.stringify({
       name: territory.name,
       supervisor_binding_id: input.supervisorBindingId,
       unassigned: input.supervisorBindingId === null,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: new Date().toISOString(),
   })
@@ -131,7 +137,7 @@ export function setTerritorySupervisor(
  *
  * 治理语义（Owner 裁决 2026-08-18 + M2 修订）：
  * - 删除 = **tombstone**（status→DELETED，不物理删行，历史任务归属永远可解析）；
- * - session-bound 下仅真实 OWNER 可执行（Topology Administration Plane）；
+ * - 仅 direct Owner Control capability 可执行（Topology Owner Control Plane）；
  * - 有任务且未 force：拒绝；有任务且 force：未终态任务统一标记 FAILED、
  *   活跃 Execution ABORTED、终态不篡改；`TERRITORY_DELETED` 留痕（payload 含任务清单）。
  */
@@ -175,8 +181,8 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
       event_id: randomUUID(),
       kingdom_id: input.kingdomId,
       event_type: 'TASK_FAILED',
-      actor_role: null,
-      actor_id: null,
+      actor_role: admin.owner ? 'OWNER' : null,
+      actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
       target_type: 'task',
       target_id: task.task_id,
       payload_json: JSON.stringify({
@@ -184,6 +190,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
         cascade_from_territory: territory.territory_id,
         territory_name: territory.name,
         original_status: original,
+        ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
       }),
       created_at: now,
     })
@@ -196,7 +203,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_DELETED',
     actor_role: admin.owner ? 'OWNER' : null,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
     payload_json: JSON.stringify({
@@ -208,6 +215,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
       task_count: tasks.length,
       aborted_executions: abortedExecutions,
       tasks: cascade,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: now,
   })

@@ -1,0 +1,227 @@
+version: 1
+feature_id: "owner-control.local-slash"
+title: "Direct local Owner Control Plane"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: false
+  persisted_state: true
+  external_dependencies: false
+  retry_or_compensation: true
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: Direct local Owner Slash command
+    trigger: /kingdom init, status, or exact Owner configuration subcommand
+    code:
+      - path: src/index.ts
+        symbol: directCommandParts
+  D1:
+    kind: decision
+    description: Exact command grammar and envelope are valid
+    condition: one known subcommand, one JSON object where required, no unrecognized keys or extra tokens
+    code:
+      - path: src/index.ts
+        symbol: parseJsonEnvelope
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  A1:
+    kind: action
+    description: Atomically initialize Kingdom and Owner projection
+    code:
+      - path: src/core/kingdom.ts
+        symbol: KingdomManager.init
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  A2:
+    kind: action
+    description: Enter Core Owner gate and transaction boundary
+    code:
+      - path: src/core/owner-control.ts
+        symbol: requireOwnerControl
+      - path: src/core/db.ts
+        symbol: KingdomStore.withImmediateTransaction
+  D2:
+    kind: decision
+    description: Owner command domain validation succeeds
+    condition: target exists, role/session policy is valid, and capability/profile values pass schema checks
+    code:
+      - path: src/index.ts
+        symbol: parseJsonEnvelope
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  D3:
+    kind: decision
+    description: Init commit and readback are certain
+    condition: the transaction outcome and canonical status readback agree
+    code:
+      - path: src/core/kingdom.ts
+        symbol: KingdomManager.init
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  A3:
+    kind: action
+    description: Persist the Owner fact and auditable event
+    code:
+      - path: src/core/binding.ts
+        symbol: bindRole
+      - path: src/core/territory.ts
+        symbol: createTerritory
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  T1:
+    kind: transition
+    description: Empty store becomes initialized
+    entity: Kingdom
+    from: EMPTY
+    to: INITIALIZED
+    trigger: init_commit
+    code:
+      - path: src/core/kingdom.ts
+        symbol: KingdomManager.init
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  T2:
+    kind: transition
+    description: Repeated init attaches without a second Owner
+    entity: Kingdom
+    from: INITIALIZED
+    to: INITIALIZED
+    trigger: repeat_init
+    code:
+      - path: src/core/kingdom.ts
+        symbol: KingdomManager.init
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  T3:
+    kind: transition
+    description: Valid direct Owner command persists configuration
+    entity: OwnerConfiguration
+    from: INITIALIZED
+    to: CONFIGURED
+    trigger: owner_write_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  T4:
+    kind: transition
+    description: Repeat configuration obeys domain idempotency/no-op rules
+    entity: OwnerConfiguration
+    from: CONFIGURED
+    to: CONFIGURED
+    trigger: repeat_owner_write
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  T5:
+    kind: transition
+    description: Uncertain transaction outcome requires reconciliation
+    entity: OwnerConfiguration
+    from: INITIALIZED
+    to: RECOVERY_REQUIRED
+    trigger: uncertain_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  G1:
+    kind: safeguard
+    description: Opaque direct Owner capability
+    safeguard_type: authentication
+    guarantee: Only the direct Slash adapter can mint the capability used by Core Owner writes
+    protects: [D1, A2]
+    failure_behavior: Agent/GUI/HTTP calls return OWNER_CONTROL_REQUIRED with zero writes
+    code:
+      - path: src/core/owner-control.ts
+        symbol: issueOwnerControlCapability
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  G2:
+    kind: safeguard
+    description: Immediate transaction atomicity
+    safeguard_type: atomicity
+    guarantee: Kingdom, Owner projection, and creation event commit together
+    protects: [A1, A2]
+    failure_behavior: Roll back and return RECOVERY_REQUIRED when outcome is indeterminate
+    code:
+      - path: src/core/db.ts
+        symbol: KingdomStore.withImmediateTransaction
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  G3:
+    kind: safeguard
+    description: Tool and GUI write boundary
+    safeguard_type: authorization
+    guarantee: Non-Slash ingress cannot create an Owner write or event
+    protects: [D1, A3]
+    failure_behavior: Return OWNER_CONTROL_REQUIRED or SESSION_AUTH_REQUIRED before persistence
+    code:
+      - path: src/index.ts
+        symbol: ownerToolDenied
+      - path: src/gui/contract.ts
+        symbol: guiWriteGuard
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  G4:
+    kind: safeguard
+    description: Owner principal/session separation
+    safeguard_type: authorization
+    guarantee: Owner actor is Kingdom.owner_id and OWNER.session_id never supplies authority
+    protects: [A1, A2, A3]
+    failure_behavior: Reject Owner Session rebinding and leave session_id null
+    code:
+      - path: src/core/owner-control.ts
+        symbol: requireOwnerControl
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  C1:
+    kind: compensation
+    description: Manual reconciliation after an uncertain transaction
+    restores_or_resolves: Operator reads /kingdom status before deciding any retry
+    failure_behavior: Keep the outcome indeterminate and do not guess committed state
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  X1:
+    kind: outcome
+    description: Invalid Owner command rejected
+    result: INPUT_DENIED with zero governance writes
+  X2:
+    kind: outcome
+    description: Domain validation rejected
+    result: Error response and no committed transaction effect
+  X3:
+    kind: outcome
+    description: Uncertain result requires manual reconciliation
+    result: RECOVERY_REQUIRED with no automatic retry
+  X4:
+    kind: outcome
+    description: Direct Owner command confirmed
+    result: COMMITTED fact/event or idempotent attach response with Owner actor evidence

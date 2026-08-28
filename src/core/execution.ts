@@ -35,7 +35,7 @@ export type ExecutionState = (typeof EXECUTION_STATES)[number]
 /**
  * 合法转移。
  *
- * - `STARTING → RUNNING`：宿主确认执行已真正开始。
+ * - `STARTING → RUNNING | PAUSED`：宿主确认执行已开始，或 Supervisor 在分派前暂停。
  * - `RUNNING ↔ PAUSED`：暂停/恢复（见 `./execution.ts` 关于 one-shot 的诚实边界说明）。
  * - `* → RECOVERING`：v0.8（M3-S2 v6）——Kingdom 无法确认 Execution 真实 Runtime 状态、
  *   正在重建证据（Dispatch Intent 有 / Adapter 失联 / host 重启）。**不改 Task 治理状态**；
@@ -45,7 +45,7 @@ export type ExecutionState = (typeof EXECUTION_STATES)[number]
  * - `* → ABORTED`：被显式终止（会话停止/用户取消），与 FAILED 区分开。
  */
 export const EXECUTION_TRANSITIONS: Record<ExecutionState, readonly ExecutionState[]> = {
-  STARTING: ['RUNNING', 'RECOVERING', 'FAILED', 'ABORTED'],
+  STARTING: ['RUNNING', 'PAUSED', 'RECOVERING', 'FAILED', 'ABORTED'],
   RUNNING: ['PAUSED', 'RECOVERING', 'COMPLETED', 'FAILED', 'ABORTED'],
   PAUSED: ['RUNNING', 'RECOVERING', 'ABORTED', 'FAILED'],
   RECOVERING: ['RUNNING', 'RECOVERING', 'COMPLETED', 'FAILED', 'ABORTED'],

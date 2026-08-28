@@ -1,0 +1,615 @@
+version: 1
+feature_id: "real-dsh-provider-v10-e2e-runner"
+title: "Bounded runner modes and fail-closed REAL context boundary"
+status: "proposed"
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  E3:
+    kind: entry
+    description: "Product creates the package-root RunnerContext lifecycle"
+    trigger: "createRunnerContextBrokerProductLifecycle with an absolute runRoot"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  D7:
+    kind: decision
+    description: "Lifecycle input is one absolute runRoot and no Product epoch is already active"
+    condition: "runRoot is an absolute non-root path and activeProductLaunch is empty"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: validation
+      - path: src/runner-context-broker.ts
+        symbol: safeRunRoot
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle rejects unsafe input without widening its public contract"
+
+  A8:
+    kind: action
+    description: "Activate the Product launch and await descriptor-backed serialized bootstrap"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  A9:
+    kind: action
+    description: "Register canonical RunnerContext only through the existing post-TX-3 Product dispatch path"
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+        role: orchestration
+      - path: src/runner-context-broker.ts
+        symbol: registerProductRunnerContext
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  E1:
+    kind: entry
+    description: "Explicit runner CLI invocation"
+    trigger: "node scripts/e2e/real-dsh-provider-v10.mjs"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: main
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "parseRunnerArgs rejects caller-supplied runner IDs"
+
+  E2:
+    kind: entry
+    description: "Explicit contract simulation API invocation"
+    trigger: "runContractSimulation with simulationOptIn=true"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+
+  D1:
+    kind: decision
+    description: "CLI input is explicit and contains no caller-supplied Runner context IDs"
+    condition: "Alias/model are explicit and task, attempt, kingdom dispatch, and session flags are absent"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: parseRunnerArgs
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "parseRunnerArgs rejects caller-supplied runner IDs"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "public runner surface excludes low-level observer/control/proof constructors and production provenance shims"
+
+  A7:
+    kind: action
+    description: "Read Product serialized broker bootstrap and connect through the public package root"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: readProductBrokerSerializedEnvironment
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: connectProductRunnerContextBroker
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION consumes only Product serialized bootstrap through package root and fails before opportunity on stale rendezvous"
+    external_call:
+      system: "dsh-kingdom public package root RunnerContext broker connector"
+      timeout: "bounded connector and broker protocol timeout"
+      failure_behavior: "Return BLOCKED before layout, durable opportunity reservation, runtime construction, route lookup, or Provider activity; do not create a broker or retry"
+      failure_nodes: [D6, X2]
+
+  D2:
+    kind: decision
+    description: "Simulation is explicitly opted in and has only a high-level runtime seam"
+    condition: "simulationOptIn is true and runtimeFactory is callable"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY requires explicit opt-in and a high-level runtime seam"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION fail-closes before any injected callback, ledger, runtime, or route surface"
+
+  D6:
+    kind: decision
+    description: "Product broker view is the exact pre-dispatch canonical context"
+    condition: "The root connector returns a bounded view with phase ACQUIRED, dispatch INTENDED, execution STARTING, lease EXECUTING, no receipt/correlation/terminal/cleanup/claim, and a non-negative revision"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: validateProductContextView
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION consumes only Product serialized bootstrap through package root and fails before opportunity on stale rendezvous"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION proves the private Provider-boundary counter stays zero without Provider activity"
+
+
+  D3:
+    kind: decision
+    description: "Bounded preflight, stage, and public route preconditions are usable for simulation"
+    condition: "Injected preflight/stage succeed and the public route surface lists the requested pair"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: resolvePublicConfiguredRoute
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: isBoundedRouteEvidence
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects non-contiguous event envelopes and non-numeric turn evidence"
+
+  D4:
+    kind: decision
+    description: "Each event envelope is contiguous and exact numeric-turn ordering is enforced"
+    condition: "The first event.seq establishes a baseline, every later notification uses lastEventSeq+1, frames in one envelope share that seq, and receipt, turn/start, target user, assistant, completed turn/end, and idle are ordered"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createBoundedSessionEventObserver
+        role: orchestration
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: normalizeSessionNotification
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects pre-turn user, duplicate, cross-turn, missing assistant, interrupted, and foreign direct events irreversibly"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects non-contiguous event envelopes and non-numeric turn evidence"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "synthetic same-envelope inserted frames share one seq without false duplicate rejection"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "post-end next-turn start and plugin/inject/goal frames are out of bounds"
+
+  D5:
+    kind: decision
+    description: "Internal hard gates accept only the complete same-attempt simulation evidence"
+    condition: "Internal observer, controlled lifecycle, route observation, cleanup, and lease release are all exact"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: hasCompleteSimulationEvidence
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: evaluateStopGates
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects non-contiguous event envelopes and non-numeric turn evidence"
+
+  A1:
+    kind: action
+    description: "Run the no-prompt KEYLESS_COMPOSITION path"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runKeylessCompositionProbe
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "public runner surface excludes low-level observer/control/proof constructors and production provenance shims"
+
+  A2:
+    kind: action
+    description: "Create the runner-owned temporary layout and initialize the durable ledger"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createRunnerLayout
+        role: side_effect
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: initializeOpportunityLedger
+        role: side_effect
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+
+  A3:
+    kind: action
+    description: "Run bounded simulation preflight, overlay, route check, and stage seam"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: orchestration
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: writeProfileOverlay
+        role: side_effect
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "bounded overlay contains only the two runner-owned entries"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+
+  A4:
+    kind: action
+    description: "Construct the internal observer and subscribe before the one simulation prompt"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createPromptObservationPlan
+        role: orchestration
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: subscribeOfficialSessionEvents
+        role: side_effect
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+    external_call:
+      system: "high-level runtime factory used only by contract simulation"
+      timeout: "bounded activity timeout"
+      failure_behavior: "Stop the simulation before governance and retain the durable reservation"
+      failure_nodes: [D4, C1]
+
+  A5:
+    kind: action
+    description: "After subscription is established, reserve one durable opportunity and invoke the high-level runtime prompt once"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: reserveProviderOpportunityAtomically
+        role: side_effect
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createPromptObservationPlan
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable opportunity reservation is atomic under concurrency and repeat"
+
+  A6:
+    kind: action
+    description: "Settle cleanup and release only the internal simulation lifecycle; governance remains not run"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: orchestration
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: writeBoundedEvidence
+        role: side_effect
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+
+  A10:
+    kind: action
+    description: "Runner child closes only its authenticated broker client"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runRealAttemptBranch
+        role: cleanup
+      - path: src/runner-context-broker.ts
+        symbol: connectClientTarget
+        role: cleanup
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  A11:
+    kind: action
+    description: "Product final close joins one memoized cleanup and derives its receipt internally"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: cleanup
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  D8:
+    kind: decision
+    description: "All lifecycle-owned resources reached a proven terminal zero state"
+    condition: "active connections, registrations, and servers are zero; descriptor is absent; endpoint is absent or platform NOT_APPLICABLE"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  C2:
+    kind: compensation
+    description: "Fail closed when Product-owned transport cleanup cannot be proven"
+    restores_or_resolves: "No bounded cleanup receipt or Lease settlement claim is emitted from uncertain transport state"
+    failure_behavior: "Reject lifecycle close with CLEANUP_UNCERTAIN and require explicit recovery"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: compensation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle keeps cleanup uncertainty rejected and memoized without settlement claims"
+
+  T1:
+    kind: transition
+    description: "Commit the one durable opportunity reservation"
+    entity: "Provider opportunity ledger"
+    from: AVAILABLE
+    to: RESERVED
+    trigger: "first non-Slash potential-model wrapper"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: reserveProviderOpportunityAtomically
+        role: persistence
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: transitionProviderOpportunity
+        role: transition
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable opportunity reservation is atomic under concurrency and repeat"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "opportunity state machine keeps Slash and extra attempts closed"
+
+  T2:
+    kind: transition
+    description: "Retain RESERVED after enqueue failure"
+    entity: "Provider opportunity ledger"
+    from: RESERVED
+    to: RESERVED
+    trigger: "enqueue callback fails after durable rename"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: reserveProviderOpportunityAtomically
+        role: compensation_boundary
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable reservation consumes once when enqueue fails and never retries or falls back"
+
+  C1:
+    kind: compensation
+    description: "Write bounded failure evidence and require a new run after any consumed-attempt failure"
+    restores_or_resolves: "No second opportunity is created and no simulation failure is promoted to governance"
+    failure_behavior: "Keep the durable reservation consumed, close owned simulation resources, and return a bounded non-success status"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: writeBoundedEvidence
+        role: compensation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: orchestration
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects pre-turn user, duplicate, cross-turn, missing assistant, interrupted, and foreign direct events irreversibly"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable reservation consumes once when enqueue fails and never retries or falls back"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "post-end next-turn start and plugin/inject/goal frames are out of bounds"
+
+  G1:
+    kind: safeguard
+    description: "Close public proof, control, and evaluator construction surfaces"
+    safeguard_type: validation
+    guarantee: "Caller code cannot import or invoke the observer/control/proof constructors or submit copied hard-gate evidence"
+    protects: [D1, D2, D5]
+    failure_behavior: "Keep the symbols non-exported and ignore forged proof, boolean, count, observer, and governance fields"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "public runner surface excludes low-level observer/control/proof constructors and production provenance shims"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+  G2:
+    kind: safeguard
+    description: "Package-root Product connector and exact bounded context gate all REAL work before the Provider opportunity"
+    safeguard_type: validation
+    guarantee: "Only Product serialized bootstrap and an ACQUIRED/INTENDED/STARTING/EXECUTING bounded view can leave the REAL pre-provider gate; every other condition returns BLOCKED with providerCalls=0"
+    protects: [A7, D6, X2]
+    failure_behavior: "Reject missing, malformed, stale, foreign, unavailable, recovering, released, terminal, or wrong-order context before ledger, runtime, route, or Provider activity"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runRealAttemptBranch
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: validateProductContextView
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION fail-closes before any injected callback, ledger, runtime, or route surface"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION consumes only Product serialized bootstrap through package root and fails before opportunity on stale rendezvous"
+
+  G3:
+    kind: safeguard
+    description: "Use the real durable atomic reservation helper"
+    safeguard_type: atomicity
+    guarantee: "At most one concurrent or repeated reservation commits, and a failed enqueue never retries or restores the token"
+    protects: [A5, T1, T2, C1]
+    failure_behavior: "Reject lock contention, consumed ledgers, Slash, retry, and fallback paths"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: reserveProviderOpportunityAtomically
+        role: persistence
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable opportunity reservation is atomic under concurrency and repeat"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "durable reservation consumes once when enqueue fails and never retries or falls back"
+
+  G4:
+    kind: safeguard
+    description: "Enforce bounded event sequence and numeric-turn ordering"
+    safeguard_type: concurrency
+    guarantee: "The first accepted event envelope establishes a baseline, every later envelope is exactly lastEventSeq+1, same-envelope frames share one seq, and gap/duplicate/decrease or invalid turn order can never become exact"
+    protects: [D4, C1]
+    failure_behavior: "Permanently reject pre-turn, gap, duplicate, decrease, cross-turn, foreign direct, non-numeric, and post-end events with bounded counters/reason"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createBoundedSessionEventObserver
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: normalizeSessionNotification
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects pre-turn user, duplicate, cross-turn, missing assistant, interrupted, and foreign direct events irreversibly"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "contract simulation rejects non-contiguous event envelopes and non-numeric turn evidence"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "synthetic same-envelope inserted frames share one seq without false duplicate rejection"
+
+  G5:
+    kind: safeguard
+    description: "Require internally derived same-attempt evidence for hard gates"
+    safeguard_type: validation
+    guarantee: "Generated correlation, observer counts, assistant route, cleanup, and lease state are evaluated from internal sources, never caller copies"
+    protects: [D5, A6]
+    failure_behavior: "Return a bounded negative result and keep governance NOT_RUN when any gate is missing or mismatched"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: evaluateStopGates
+        role: validation
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: hasCompleteSimulationEvidence
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "post-end next-turn start and plugin/inject/goal frames are out of bounds"
+
+  G6:
+    kind: safeguard
+    description: "Separate mode labels and evidence levels"
+    safeguard_type: observability
+    guarantee: "KEYLESS_COMPOSITION, CONTRACT_SIMULATION_ONLY, and REAL_PRODUCTION cannot be reported as one production or governance result"
+    protects: [A1, A6, X2, X4, X5, X7]
+    failure_behavior: "Keep simulation governance NOT_RUN; report a connected Product context as pre-provider only and never promote it to Provider or governance completion"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runRealAttemptBranch
+        role: result
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runContractSimulation
+        role: result
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION fail-closes before any injected callback, ledger, runtime, or route surface"
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "CONTRACT_SIMULATION_ONLY uses generated correlation and cannot be promoted by caller proof/counts"
+
+  G7:
+    kind: safeguard
+    description: "Keep the Product lifecycle input/output DTO boundary strict"
+    safeguard_type: validation
+    guarantee: "Only one absolute runRoot enters; only Product serialized bootstrap and bounded cleanup receipt leave"
+    protects: [D7, A8]
+    failure_behavior: "Reject unsafe paths, second epochs, extra input fields, and any non-Product bootstrap"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: validation
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle rejects unsafe input without widening its public contract"
+
+  G8:
+    kind: safeguard
+    description: "Separate client close from memoized Product final cleanup"
+    safeguard_type: idempotency
+    guarantee: "Repeated lifecycle close executes one cleanup and emits a receipt only after all owned resources are terminal zero"
+    protects: [A11, D8, C2]
+    failure_behavior: "Share the first close promise and reject uncertain cleanup without a Lease claim"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerProductLifecycle
+        role: cleanup
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once"
+
+  G9:
+    kind: safeguard
+    description: "Count only the actual potential Provider/model call boundary"
+    safeguard_type: observability
+    guarantee: "A module-private monotonic non-injectable counter increments immediately before client.prompt; REAL context-only reports start=0 end=0 increments=0"
+    protects: [A5, D6, X7]
+    failure_behavior: "Reject overflow; never accept a caller counter, setter, reset, proof, or count"
+    code:
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: createPromptObservationPlan
+        role: observability
+      - path: scripts/e2e/real-dsh-provider-v10.mjs
+        symbol: runRealAttemptBranch
+        role: observability
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "REAL_PRODUCTION proves the private Provider-boundary counter stays zero without Provider activity"
+
+  X1:
+    kind: outcome
+    description: "Invalid CLI input is rejected"
+    result: "No runner lifecycle or side effect starts"
+
+  X2:
+    kind: outcome
+    description: "REAL_PRODUCTION is blocked by missing, malformed, stale, foreign, unavailable, or wrong-order Product context"
+    result: "BLOCKED before opportunity ledger, runtime, route, or Provider activity with providerCalls=0"
+
+  X7:
+    kind: outcome
+    description: "Product context is connected but the Provider attempt remains deferred"
+    result: "REAL_PRODUCTION_CONTEXT_CONNECTED with an exact bounded pre-dispatch view, no governance IDs in evidence, private counter start=0 end=0 increments=0, providerOutcome=NOT_RUN, and no opportunity reservation"
+
+  X8:
+    kind: outcome
+    description: "Product lifecycle cleanup is internally proven"
+    result: "One bounded transport-only receipt with zero active connections, registrations, and servers plus absent or platform-not-applicable paths"
+
+  X9:
+    kind: outcome
+    description: "Unsafe lifecycle creation is rejected"
+    result: "No fallback, caller context, or second Product epoch is created"
+
+  X10:
+    kind: outcome
+    description: "Product lifecycle cleanup remains blocked because terminal zero state is uncertain"
+    result: "CLEANUP_UNCERTAIN with explicit recovery required and no bounded receipt, settlement, or Lease-release claim"
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: "package-root Product lifecycle keeps cleanup uncertainty rejected and memoized without settlement claims"
+
+  X3:
+    kind: outcome
+    description: "Contract simulation is blocked before exact evidence"
+    result: "Bounded non-success result; any committed opportunity remains consumed"
+
+  X4:
+    kind: outcome
+    description: "Contract simulation completes its internal checks"
+    result: "CONTRACT_SIMULATION_ONLY with hard gates accepted, synthetic route observation only, Provider outcome NOT_RUN, governance NOT_RUN, and no GOV_DONE"
+
+  X5:
+    kind: outcome
+    description: "Keyless composition remains separate"
+    result: "KEYLESS_COMPOSITION result with Worker dispatch and Provider observation not run by design"
+
+  X6:
+    kind: outcome
+    description: "A bounded simulation failure is rejected"
+    result: "No retry, fallback, or governance promotion; recovery requires a new bounded run"

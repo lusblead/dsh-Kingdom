@@ -65,14 +65,24 @@ export function resolveEffectiveCapability(input: CapabilityInputs): Resolution 
 
   if (ceiling === null) {
     // B-4/B-7：NULL ceiling 的王国不得进入 GOVERNED_PERSISTENT（交集为空，全部拒绝）
-    for (const cap of Object.keys(requirement)) {
+    const relevant = new Set([
+      ...Object.keys(requirement),
+      ...Object.keys(grant).filter(cap => grant[cap] === true),
+    ])
+    for (const cap of relevant) {
       deniedReasons.push(`${cap}: kingdom 未配置 capability ceiling（B-7：NULL ceiling 不得进入 GOVERNED_PERSISTENT）`)
     }
     return { effective, coverage: 'NONE', deniedReasons }
   }
 
   const required = Object.keys(requirement).filter(cap => requirement[cap] === true)
-  for (const cap of required) {
+  // Requirement 只用于 coverage 观察；effective 的候选域来自本次 Grant，
+  // 再与 Owner Ceiling 和 context-bound EnforceableSet 求交集。
+  const candidates = new Set([
+    ...required,
+    ...Object.keys(grant).filter(cap => grant[cap] === true),
+  ])
+  for (const cap of candidates) {
     const granted = grant[cap] === true
     const ceilingOk = ceiling[cap] === true
     const enforceableNow = isEnforceable(cap, enforceable)
@@ -93,9 +103,12 @@ export function resolveEffectiveCapability(input: CapabilityInputs): Resolution 
 
   let coverage: Resolution['coverage']
   if (required.length === 0) coverage = 'NONE'
-  else if (Object.keys(effective).length === required.length) coverage = 'FULL'
-  else if (Object.keys(effective).length > 0) coverage = 'PARTIAL'
-  else coverage = 'NONE'
+  else {
+    const covered = required.filter(cap => effective[cap] === true).length
+    if (covered === required.length) coverage = 'FULL'
+    else if (covered > 0) coverage = 'PARTIAL'
+    else coverage = 'NONE'
+  }
 
   return { effective, coverage, deniedReasons }
 }

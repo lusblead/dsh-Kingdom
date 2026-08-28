@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, type ExecutionRow } from '../lib/core/db.js'
 import { bindRole, setExecutionProfile, type AdminAuth } from '../lib/core/binding.js'
+import { issueOwnerControlCapability, ownerControlAuth } from '../lib/core/owner-control.js'
 import { planTask, assignTask, startTask, reviewTask } from '../lib/core/task-service.js'
 import type { ExecutorInfo, WorkerExecutor } from '../lib/worker/executor.js'
 
@@ -22,7 +23,8 @@ const S = {
   WORKER: 'session-worker',
   STRANGER: 'session-stranger',
 }
-const authBound: AdminAuth = { mode: 'session-bound', principalSessionId: null }
+const ACTIVE_SUPERVISOR_SESSION_REQUIRED = /当前调用者没有与该 session 匹配的 ACTIVE SUPERVISOR binding，拒绝执行/
+const directOwnerAuth = (): AdminAuth => ownerControlAuth(issueOwnerControlCapability())
 
 function makeStore(): KingdomStore {
   const store = new KingdomStore(':memory:')
@@ -76,9 +78,9 @@ test('M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）', async
   assert.match(plan(null).message, /不是 CHANCELLOR/)
 
   // assign：仅 SUPERVISOR PASS
-  assert.match(assign(S.CHANCELLOR, taskId), /不是 SUPERVISOR/)
-  assert.match(assign(S.WORKER, taskId), /不是 SUPERVISOR/)
-  assert.match(assign(S.STRANGER, taskId), /不是 SUPERVISOR/)
+  assert.match(assign(S.CHANCELLOR, taskId), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
+  assert.match(assign(S.WORKER, taskId), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
+  assert.match(assign(S.STRANGER, taskId), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
   assert.match(assign(S.SUPERVISOR, taskId), /已把任务/)
 
   // start：仅 SUPERVISOR PASS（fake executor）
@@ -93,25 +95,25 @@ test('M1-D 身份矩阵：4+1 Session × 治理命令（session-bound）', async
     }),
   }
   const start = async (sessionId: string) => (await startTask(store, fake, ctx(sessionId), { taskId })).message
-  assert.match(await start(S.WORKER), /不是 SUPERVISOR/)
-  assert.match(await start(S.STRANGER), /不是 SUPERVISOR/)
+  assert.match(await start(S.WORKER), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
+  assert.match(await start(S.STRANGER), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
   assert.match(await start(S.SUPERVISOR), /REVIEW/)
 
   // review：仅 SUPERVISOR PASS → DONE
-  assert.match(review(S.WORKER, taskId), /不是 SUPERVISOR/)
-  assert.match(review(S.STRANGER, taskId), /不是 SUPERVISOR/)
+  assert.match(review(S.WORKER, taskId), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
+  assert.match(review(S.STRANGER, taskId), ACTIVE_SUPERVISOR_SESSION_REQUIRED)
   assert.match(review(S.SUPERVISOR, taskId), /DONE/)
   assert.equal(store.getTask(taskId)!.status, 'DONE')
 
   // 管理面（Trusted Admin Plane）：仅 OWNER
   const setProfile = (sessionId: string | null) => setExecutionProfile(
     store, { kingdomId: KID, roleType: 'WORKER', profile: { provider: 'spawn' } },
-    { mode: 'session-bound', principalSessionId: sessionId },
+    sessionId === S.OWNER ? directOwnerAuth() : { mode: 'session-bound', principalSessionId: sessionId },
   )
-  assert.match(setProfile(S.CHANCELLOR), /只有 OWNER/)
-  assert.match(setProfile(S.SUPERVISOR), /只有 OWNER/)
-  assert.match(setProfile(S.WORKER), /只有 OWNER/)
-  assert.match(setProfile(S.STRANGER), /只有 OWNER/)
+  assert.match(setProfile(S.CHANCELLOR), /OWNER_CONTROL_REQUIRED/)
+  assert.match(setProfile(S.SUPERVISOR), /OWNER_CONTROL_REQUIRED/)
+  assert.match(setProfile(S.WORKER), /OWNER_CONTROL_REQUIRED/)
+  assert.match(setProfile(S.STRANGER), /OWNER_CONTROL_REQUIRED/)
   assert.match(setProfile(S.OWNER), /执行配置已更新/)
 })
 
@@ -123,9 +125,9 @@ test('M1-D 身份矩阵：换届后旧 Supervisor Session DENY，新任 PASS', a
   assert.equal(store.getTask(taskId)!.status, 'CREATED')
   // 换届：OWNER 把 SUPERVISOR 改绑到新会话
   const { rebindSession } = await import('../lib/core/binding.js')
-  rebindSession(store, { kingdomId: KID, roleType: 'SUPERVISOR', sessionId: 'session-supervisor-2' }, { mode: 'session-bound', principalSessionId: S.OWNER })
+  rebindSession(store, { kingdomId: KID, roleType: 'SUPERVISOR', sessionId: 'session-supervisor-2' }, directOwnerAuth())
   const assignOld = assignTask(store, ctx(S.SUPERVISOR), { taskId }).message
-  assert.match(assignOld, /不是 SUPERVISOR/) // 旧 Session 已被解职
+  assert.match(assignOld, ACTIVE_SUPERVISOR_SESSION_REQUIRED) // 旧 Session 已被解职
   const assignNew = assignTask(store, ctx('session-supervisor-2'), { taskId }).message
   assert.match(assignNew, /已把任务/) // 新任 Session 可用
 })

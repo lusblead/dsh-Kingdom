@@ -12,6 +12,8 @@
  *
  * - 所有写命令返回结构化 {@link CommandResultView}，GUI 不再解析中文字符串。
  * - 每次 Worker 执行独立建 Execution 行（运行事实），与 Task.status（治理事实）分开。
+ * - 本模块同时服务 canonical `GOVERNED_PERSISTENT` 与显式 `LEGACY_COMPAT`；
+ *   legacy 的 one-shot 语义不得被普通 headless 文案当成默认路径。
  * - 命令回传本次产生的事件（已带单调 seq），GUI 可直接接到事件流尾部。
  */
 import { randomUUID } from 'node:crypto'
@@ -173,24 +175,27 @@ function loadTask(
 }
 
 /**
- * v0.7.0（M2-E）：Supervisor scope 校验（scope relation，非权限层级）。
+ * Resolve the exact ACTIVE Supervisor named by the Task Territory.
  *
- * - Territory 未指派主理（supervisor_binding_id IS NULL）→ **fail-closed（全局生效）**
- *   （TERRITORY_SUPERVISOR_MISSING：不知道谁管就不允许任何人代管）；
- * - 主理 ≠ 调用者 → TASK_OUT_OF_SCOPE——**仅在调用者身份可证明时强制**（session-bound，
- *   principal 来自 DSH Runtime）；declarative 演示模式无调用者身份概念，
- *   快照已如实标注 local-demo，匹配检查跳过（未指派 fail-closed 仍然生效）；
- * - 领地已删除（tombstone）→ 不可治理。
+ * Session-bound callers must prove that the named binding belongs to their
+ * Runtime session. A caller that proves a different ACTIVE Supervisor role is
+ * out of scope; a caller that proves no ACTIVE Supervisor role is unauthorized.
+ * Declarative/local-demo keeps its historical low-trust behavior, but still
+ * resolves the Territory pointer instead of attributing writes to an arbitrary
+ * first Supervisor row.
  */
-function checkTerritoryScope(
+function resolveTaskSupervisor(
   store: KingdomStore,
   ctx: CommandContext,
-  supervisorBindingId: string,
   task: TaskRow,
-): { ok: true } | { ok: false; code: KingdomErrorCode; message: string } {
+): { ok: true; binding: RoleBindingRow } | { ok: false; code: KingdomErrorCode; message: string } {
   const territory = store.getTerritoryById(task.territory_id)
   if (!territory || territory.kingdom_id !== ctx.kingdomId || territory.status === 'DELETED') {
-    return { ok: false, code: 'TERRITORY_NOT_IN_KINGDOM', message: `错误：任务「${task.title}」的领地不存在或已删除，无法执行治理操作。` }
+    return {
+      ok: false,
+      code: 'TERRITORY_NOT_IN_KINGDOM',
+      message: `错误：任务「${task.title}」的领地不存在或已删除，无法执行治理操作。`,
+    }
   }
   if (!territory.supervisor_binding_id) {
     return {
@@ -199,48 +204,87 @@ function checkTerritoryScope(
       message: `错误：领地「${territory.name}」未指派主理 Supervisor，任何 Supervisor 都不能治理（fail-closed）。请由 OWNER 执行 kingdom_set_territory_supervisor 指派。`,
     }
   }
-  // session-bound 下调用者身份是 DSH Runtime 证明的 → 强制 scope 匹配；
-  // declarative 演示模式（requireRole 只查绑定存在、快照标注 local-demo）跳过匹配检查。
-  if (ctx.auth.mode === 'session-bound' && territory.supervisor_binding_id !== supervisorBindingId) {
+
+  const binding = store.getBindingById(territory.supervisor_binding_id)
+  if (!binding
+    || binding.kingdom_id !== ctx.kingdomId
+    || binding.role_type !== 'SUPERVISOR'
+    || binding.status !== 'ACTIVE') {
     return {
       ok: false,
-      code: 'TASK_OUT_OF_SCOPE',
-      message: `错误：任务「${task.title}」属于领地「${territory.name}」（由其他 Supervisor 主理），超出当前 Supervisor 的治理范围。`,
+      code: 'TERRITORY_SUPERVISOR_MISSING',
+      message: `错误：领地「${territory.name}」未指派有效的 ACTIVE Supervisor，任何 Supervisor 都不能治理（fail-closed）。请由 OWNER 重新指派。`,
     }
   }
-  return { ok: true }
+
+  if (ctx.auth.mode === 'session-bound') {
+    const caller = ctx.principal?.sessionId ?? null
+    const callerBindings = caller
+      ? store.getBindingsByRole(ctx.kingdomId, 'SUPERVISOR')
+        .filter(candidate => candidate.session_id === caller)
+      : []
+    if (callerBindings.length === 0) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED_PRINCIPAL',
+        message: '错误：当前调用者没有与该 session 匹配的 ACTIVE SUPERVISOR binding，拒绝执行。',
+      }
+    }
+    if (!callerBindings.some(candidate => candidate.binding_id === binding.binding_id)) {
+      return {
+        ok: false,
+        code: 'TASK_OUT_OF_SCOPE',
+        message: `错误：任务「${task.title}」属于领地「${territory.name}」（由其他 Supervisor 主理），超出当前 Supervisor 的治理范围。`,
+      }
+    }
+  }
+
+  return { ok: true, binding }
 }
 
-/** SUPERVISOR 角色 + Territory scope 组合校验。 */
-function requireSupervisorInScope(
+/** 公共 governed start 只能由真实 session-bound Supervisor 进入执行器前的授权门。 */
+export function resolveGovernedStartSupervisor(
   store: KingdomStore,
   ctx: CommandContext,
-  task: TaskRow,
-): { ok: true; binding: RoleBindingRow } | { ok: false; code: KingdomErrorCode; message: string } {
-  const role = requireRole(store, ctx, 'SUPERVISOR')
-  if (!role.ok) return role
-  const scope = checkTerritoryScope(store, ctx, role.binding.binding_id, task)
-  if (!scope.ok) return scope
-  return role
+  taskId: string,
+): { ok: true; task: TaskRow; binding: RoleBindingRow } | { ok: false; code: KingdomErrorCode; message: string } {
+  if (ctx.auth.mode !== 'session-bound') {
+    return {
+      ok: false,
+      code: 'SESSION_AUTH_REQUIRED',
+      message: '错误：public governed start 必须由已绑定角色的真实 DSH Session 发起。',
+    }
+  }
+  if (!ctx.principal?.sessionId) {
+    return {
+      ok: false,
+      code: 'UNAUTHORIZED_PRINCIPAL',
+      message: '错误：public governed start 未取得调用者 session，拒绝执行。',
+    }
+  }
+  const loaded = loadTask(store, ctx.kingdomId, taskId)
+  if (!loaded.ok) return loaded
+
+  const supervisor = resolveTaskSupervisor(store, ctx, loaded.task)
+  if (!supervisor.ok) return supervisor
+  return { ok: true, task: loaded.task, binding: supervisor.binding }
 }
 
 // ── 加载期回收（热插拔正确性）──────────────────────────────────
 
 /**
- * 插件加载时回收孤儿 Execution。
+ * 插件加载时按 Execution Contract 处理孤儿 Execution。
  *
- * **为什么这是安全的**：Worker 以 **one-shot in-process subagent** 执行，
- * 它的生命周期完全绑在插件 fiber 上。插件一旦卸载/重载，那个 subagent
- * 就不可能还活着。因此**开库时看到的任何"活跃" Execution，都必然是
- * 上一个进程留下的残骸** —— 这不是推测，是由执行模型保证的。
+ * `LEGACY_COMPAT` 是 one-shot in-process 执行，不能跨插件生命周期存活，
+ * 因此 live row 可诚实收敛为 `ABORTED`。`GOVERNED_PERSISTENT` 的 Runtime
+ * outcome 在 Host 重启后未知；它只能进入 `RECOVERING`，等待显式证据对账。
  *
  * 不回收会怎样：Execution 永远停在 RUNNING，
  * - GUI 看到骑士永远在工作（谎报运行状态）；
  * - 该任务再也无法 start（被"已有未结束的 Execution"挡住）。
  *
- * 回收判定为 `ABORTED` 而不是 `FAILED`：这是宿主观察到的**中断**，
- * 不是"executor 没跑出合法结果"，两者语义必须分开。
- * 任务的治理状态**不动** —— 回收只处理运行事实，不替 Supervisor 做裁定。
+ * 两条路径都不改变 Task 治理状态。Persistent 路径还不得声称 Session
+ * 已停止，不自动 retry，不释放 Lease。
  *
  * @returns 被回收的 Execution 数量。
  */
@@ -250,19 +294,39 @@ export function reclaimOrphanExecutions(store: KingdomStore, kingdomId: string):
 
   const collector = new EventCollector(store, kingdomId)
   for (const orphan of orphans) {
-    const reclaimed = store.transitionExecution(orphan, 'ABORTED', {
-      detail: '插件重载/宿主重启时回收：one-shot 执行无法跨越插件生命周期',
-    })
-    collector.emit('SESSION_STOPPED',
-      { role: 'WORKER', id: orphan.worker_binding_id },
-      { type: 'execution', id: reclaimed.execution_id },
-      {
-        task_id: orphan.task_id,
-        attempt_no: orphan.attempt_no,
-        reason: 'reclaimed-on-load',
-        previous_state: orphan.state,
-        last_heartbeat_at: orphan.heartbeat_at,
+    store.withImmediateTransaction(() => {
+      if (orphan.execution_contract === 'GOVERNED_PERSISTENT') {
+        const recovering = store.transitionExecution(orphan, 'RECOVERING', {
+          detail: 'Host/plugin restart: persistent Runtime outcome UNKNOWN; recovery evidence required',
+        })
+        collector.emit('EXECUTION_RECOVERING',
+          { role: 'SYSTEM', id: 'kingdom-core' },
+          { type: 'execution', id: recovering.execution_id },
+          {
+            task_id: orphan.task_id,
+            attempt_no: orphan.attempt_no,
+            reason: 'recovery-required-on-load',
+            previous_state: orphan.state,
+            last_heartbeat_at: orphan.heartbeat_at,
+            execution_contract: orphan.execution_contract,
+          })
+        return
+      }
+
+      const reclaimed = store.transitionExecution(orphan, 'ABORTED', {
+        detail: '插件重载/宿主重启时回收：one-shot 执行无法跨越插件生命周期',
       })
+      collector.emit('SESSION_STOPPED',
+        { role: 'WORKER', id: orphan.worker_binding_id },
+        { type: 'execution', id: reclaimed.execution_id },
+        {
+          task_id: orphan.task_id,
+          attempt_no: orphan.attempt_no,
+          reason: 'reclaimed-on-load',
+          previous_state: orphan.state,
+          last_heartbeat_at: orphan.heartbeat_at,
+        })
+    })
   }
   return orphans.length
 }
@@ -274,6 +338,8 @@ export interface PlanTaskInput {
   title: string
   description?: string
   acceptanceCriteria?: string
+  /** Task 的非权威 Capability Requirement；与新 Task 同一事务写入。 */
+  capabilityRequirementJson?: string | null
 }
 
 /** 创建 Task → CREATED。要求 CHANCELLOR binding。 */
@@ -305,6 +371,7 @@ export function planTask(
   }
 
   const ts = now()
+  const capabilityRequirementJson = input.capabilityRequirementJson?.trim() || null
   const task: TaskRow = {
     task_id: randomUUID(),
     territory_id: territoryId,
@@ -315,16 +382,24 @@ export function planTask(
     status: 'CREATED',
     acceptance_criteria: input.acceptanceCriteria?.trim() || null,
     result_summary: null,
+    capability_requirement_json: capabilityRequirementJson,
     created_at: ts,
     updated_at: ts,
   }
-  store.insertTask(task)
 
   const collector = new EventCollector(store, ctx.kingdomId)
-  collector.emit('TASK_PLANNED',
-    { role: 'CHANCELLOR', id: role.binding.binding_id },
-    { type: 'task', id: task.task_id },
-    { title, territory_id: territoryId, acceptance_criteria: task.acceptance_criteria })
+  store.withImmediateTransaction(() => {
+    store.insertTask(task)
+    collector.emit('TASK_PLANNED',
+      { role: 'CHANCELLOR', id: role.binding.binding_id },
+      { type: 'task', id: task.task_id },
+      {
+        title,
+        territory_id: territoryId,
+        acceptance_criteria: task.acceptance_criteria,
+        has_capability_requirement: capabilityRequirementJson !== null,
+      })
+  })
 
   return succeed(store, ctx.kingdomId,
     `已创建任务「${title}」（id=${task.task_id}，状态 CREATED）。`
@@ -348,7 +423,7 @@ export function assignTask(
 ): CommandResultView {
   const loaded = loadTask(store, ctx.kingdomId, input.taskId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
 
   const status = asTaskStatus(loaded.task.status)
@@ -412,7 +487,8 @@ export function assignTask(
 
   return succeed(store, ctx.kingdomId,
     `已把任务「${task.title}」派给 ${worker.role_name}（状态 ASSIGNED，assignment=${assignment.assignment_id}）。`
-    + '\n下一步：kingdom_start_task 触发 Worker 执行。',
+    + '\n下一步：正常 headless 请调用 kingdom_start_task_governed 触发 Persistent Worker；'
+    + '只有明确选择 LEGACY_COMPAT 时才调用 kingdom_start_task。',
     task, null, collector)
 }
 
@@ -443,7 +519,7 @@ export async function startTask(
 ): Promise<CommandResultView> {
   const loaded = loadTask(store, ctx.kingdomId, input.taskId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const status = asTaskStatus(loaded.task.status)
   if (status !== 'ASSIGNED' && status !== 'RUNNING') {
@@ -489,7 +565,8 @@ export async function startTask(
     heartbeat_at: now(),
     ended_at: null,
     pause_requested_at: null,
-    // v0.8（M3-S2 v6）：旧 one-shot 路径 = LEGACY_COMPAT（显式声明，非 governed）
+    // v0.8（M3-S2 v6）：此函数只由显式选择的 LEGACY_COMPAT one-shot 入口调用。
+    // canonical headless 入口是 kingdom_start_task_governed，由 governed executor 自己建账。
     execution_contract: 'LEGACY_COMPAT',
     lease_id: null,
     capability_decision_id: null,
@@ -541,7 +618,8 @@ export async function startTask(
       `Worker 执行已结束，但结算写入失败：${reason}\n`
       + `最可能的原因是本次执行期间插件被卸载或重载（SQLite 连接已关闭）。\n`
       + `Execution ${execution.execution_id} 会在插件下次加载时被自动回收为 ABORTED，`
-      + `任务「${task.title}」的治理状态不受影响，可重新 kingdom_start_task。`,
+      + `任务「${task.title}」的治理状态不受影响；正常 headless 请重新调用 kingdom_start_task_governed，`
+      + `只有明确选择 LEGACY_COMPAT 时才调用 kingdom_start_task。`,
       { cause: error },
     )
   }
@@ -681,6 +759,28 @@ function claimSummary(resultJson: string): string | undefined {
   }
 }
 
+/**
+ * Exact ACCEPT-gate query: correlate the current Claim attempt to its
+ * Dispatch ledger rows, then ask the Store for the exact open incident.  This
+ * deliberately does not use bounded listEvents()/GUI projections.
+ */
+function openIntegrityIncidentForClaim(
+  store: KingdomStore,
+  taskId: string,
+  attemptNo: number,
+): { dispatchId: string; incidentSeq: number } | null {
+  for (const dispatch of store.listDispatchesForTaskAttempt(taskId, attemptNo)) {
+    const incident = store.getOpenDispatchTerminalIntegrityIncident(
+      dispatch.kingdom_id,
+      dispatch.dispatch_id,
+      taskId,
+      attemptNo,
+    )
+    if (incident) return { dispatchId: dispatch.dispatch_id, incidentSeq: incident.seq }
+  }
+  return null
+}
+
 // ── review（SUPERVISOR，唯一能产生 DONE 的路径）──────────────────
 
 export interface ReviewTaskInput {
@@ -706,7 +806,7 @@ export function reviewTask(
 ): CommandResultView {
   const loaded = loadTask(store, ctx.kingdomId, input.taskId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
 
   const decision = input.decision.trim().toUpperCase()
@@ -791,7 +891,8 @@ export function reviewTask(
           `已 HANDOFF：任务「${task.title}」从 ${store.getBindingById(active.worker_binding_id)?.role_name ?? active.worker_binding_id}`
           + ` 转交 ${target.role_name}（理由：${reason}），回到 RUNNING。\n`
           + `Assignment ${active.assignment_id} 已关闭，新 Assignment ${assignment.assignment_id} 生效（previous 链可追溯）。\n`
-          + '下一步：kingdom_start_task 由新 Worker 以 attempt+1 继续执行。',
+          + '下一步：正常 headless 请调用 kingdom_start_task_governed 以 attempt+1 继续执行；'
+          + '只有明确选择 LEGACY_COMPAT 时才调用 kingdom_start_task。',
           task, null, collector)
       })
     } catch (error: unknown) {
@@ -801,13 +902,65 @@ export function reviewTask(
   }
 
   // isHandoff 分支已 return；此处 verdict 必为三种 ReviewDecision。
-  const task = store.transitionTask(loaded.task, REVIEW_DECISION_TARGET[verdict as ReviewDecision])
-  const eventType = verdict === 'ACCEPT'
-    ? 'TASK_ACCEPTED'
-    : verdict === 'REWORK' ? 'TASK_REWORK_REQUESTED' : 'TASK_FAILED'
+  if (verdict === 'ACCEPT') {
+    /**
+     * ACCEPT is the only path that can create DONE.  Re-read Task, Claim,
+     * and the exact post-TX-4 incident relation in the same transaction as
+     * the status/assignment/event writes.  REWORK and FAIL intentionally keep
+     * their existing governance semantics and are not blocked by this gate.
+     */
+    const collector = new EventCollector(store, ctx.kingdomId)
+    return store.withImmediateTransaction(() => {
+      const currentTask = store.getTask(input.taskId)
+      if (!currentTask) return fail(store, ctx.kingdomId, 'TASK_NOT_FOUND', `错误：找不到任务 ${input.taskId}。`)
+      const currentTerritory = store.getTerritoryById(currentTask.territory_id)
+      if (!currentTerritory || currentTerritory.kingdom_id !== ctx.kingdomId) {
+        return fail(store, ctx.kingdomId, 'TASK_NOT_IN_KINGDOM', `错误：任务 ${input.taskId} 不属于当前王国。`)
+      }
+      if (asTaskStatus(currentTask.status) !== 'REVIEW') {
+        return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
+          `错误：任务当前状态为 ${currentTask.status}，只有 REVIEW 状态的任务可以审查。`)
+      }
 
-  // 终态（ACCEPT/FAIL）：关闭 active assignment（task-terminal）；REWORK 保持 ACTIVE。
-  if (verdict === 'ACCEPT' || verdict === 'FAIL') {
+      const currentClaim = store.latestWorkerResult(input.taskId)
+      const incident = currentClaim
+        ? openIntegrityIncidentForClaim(store, input.taskId, currentClaim.attempt_no)
+        : null
+      if (incident) {
+        return fail(
+          store,
+          ctx.kingdomId,
+          'CLAIM_INTEGRITY_BLOCKED',
+          `错误：第 ${currentClaim?.attempt_no ?? 0} 次 Claim 关联的 Dispatch 存在未关闭完整性事故（incident=${incident.incidentSeq}），`
+            + '已阻止 ACCEPT；请先完成 Runtime 对账/Owner 处置。',
+        )
+      }
+
+      const task = store.transitionTask(currentTask, 'DONE')
+      store.closeActiveAssignment(input.taskId, 'task-terminal')
+      collector.emit('TASK_ACCEPTED',
+        { role: 'SUPERVISOR', id: role.binding.binding_id },
+        { type: 'task', id: task.task_id },
+        {
+          decision: verdict,
+          reason,
+          reviewer_binding_id: role.binding.binding_id,
+          reviewed_attempt_no: currentClaim?.attempt_no ?? 0,
+          claimed_outcome: currentClaim?.outcome ?? null,
+        })
+
+      return succeed(store, ctx.kingdomId,
+        `已 ACCEPT 第 ${currentClaim?.attempt_no ?? 0} 次尝试的结果。任务「${task.title}」→ **DONE**（终态）。\n`
+        + `Worker 的 Claim 至此才成为组织事实，已记 TASK_ACCEPTED（reviewer=${role.binding.role_name}）。`,
+        task, null, collector)
+    })
+  }
+
+  const task = store.transitionTask(loaded.task, REVIEW_DECISION_TARGET[verdict as ReviewDecision])
+  const eventType = verdict === 'REWORK' ? 'TASK_REWORK_REQUESTED' : 'TASK_FAILED'
+
+  // FAIL：关闭 active assignment（task-terminal）；REWORK 保持 ACTIVE。
+  if (verdict === 'FAIL') {
     store.closeActiveAssignment(input.taskId, 'task-terminal')
   }
 
@@ -821,18 +974,14 @@ export function reviewTask(
       reviewer_binding_id: role.binding.binding_id,
       reviewed_attempt_no: attemptNo,
       claimed_outcome: claim?.outcome ?? null,
-    })
+  })
 
   switch (verdict) {
-    case 'ACCEPT':
-      return succeed(store, ctx.kingdomId,
-        `已 ACCEPT 第 ${attemptNo} 次尝试的结果。任务「${task.title}」→ **DONE**（终态）。\n`
-        + `Worker 的 Claim 至此才成为组织事实，已记 TASK_ACCEPTED（reviewer=${role.binding.role_name}）。`,
-        task, null, collector)
     case 'REWORK':
       return succeed(store, ctx.kingdomId,
         `已判 REWORK（理由：${reason}）。任务「${task.title}」回到 **RUNNING**，保持同一 Worker Binding（Assignment 保持 ACTIVE）。\n`
-        + `下一步：再次 kingdom_start_task，将以 attempt_no=${attemptNo + 1} 起一个**新的** Execution 与 subagent session。\n`
+        + `下一步：正常 headless 请再次调用 kingdom_start_task_governed（attempt_no=${attemptNo + 1}，复用同一 Persistent Worker Session）。\n`
+        + '只有明确选择 LEGACY_COMPAT 时才调用 kingdom_start_task；该入口会起新的 one-shot Session。\n'
         + '注意：此刻还没有新的 Execution，Worker 处于等待状态，并不在工作。',
         task, null, collector)
     default:
@@ -867,8 +1016,9 @@ function loadExecution(
 /**
  * 请求暂停一次执行。
  *
- * **诚实的语义边界**：Worker 是 one-shot subagent，宿主无法在一次 turn 中途
- * 真正挂起它。因此：
+ * **诚实的语义边界**：下述本地状态行为只适用于显式
+ * `LEGACY_COMPAT` one-shot。`GOVERNED_PERSISTENT` 在 Runtime control 与
+ * terminal/reconcile evidence seam 未实现前一律 fail-closed。因此 legacy：
  * - 执行**尚未真正开始**（STARTING）→ 直接转 PAUSED，人物可以睡觉；
  * - 执行**正在进行**（RUNNING）→ 只登记 `pause_requested_at`，状态保持 RUNNING，
  *   `ExecutionView.pausePending = true`。GUI 应表现为"准备休息"，
@@ -881,12 +1031,16 @@ export function pauseExecution(
 ): CommandResultView {
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
   if (!isLiveExecutionState(state) || state === 'PAUSED') {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
       `错误：Execution 当前为 ${state}，无法暂停。`)
+  }
+  if (loaded.execution.execution_contract === 'GOVERNED_PERSISTENT') {
+    return fail(store, ctx.kingdomId, 'EXECUTOR_UNAVAILABLE',
+      'GOVERNED_RUNTIME_CONTROL_UNAVAILABLE: 尚未实现可验证的 Runtime pause 与 reconcile evidence；未修改 Execution/Task。')
   }
 
   const collector = new EventCollector(store, ctx.kingdomId)
@@ -914,7 +1068,7 @@ export function pauseExecution(
     loaded.task, execution, collector)
 }
 
-/** 恢复执行：撤销暂停请求，或把 PAUSED 转回 RUNNING。 */
+/** LEGACY_COMPAT 恢复执行；GOVERNED_PERSISTENT 在可验证 Runtime seam 前拒绝。 */
 export function resumeExecution(
   store: KingdomStore,
   ctx: CommandContext,
@@ -922,9 +1076,17 @@ export function resumeExecution(
 ): CommandResultView {
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
+  if (!isLiveExecutionState(state)) {
+    return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
+      `错误：Execution 当前为 ${state}，无法恢复。`)
+  }
+  if (loaded.execution.execution_contract === 'GOVERNED_PERSISTENT') {
+    return fail(store, ctx.kingdomId, 'EXECUTOR_UNAVAILABLE',
+      'GOVERNED_RUNTIME_CONTROL_UNAVAILABLE: 尚未实现可验证的 Runtime resume 与 reconcile evidence；未修改 Execution/Task。')
+  }
   if (state !== 'PAUSED' && loaded.execution.pause_requested_at === null) {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
       `错误：Execution 当前为 ${state} 且无暂停请求，无需恢复。`)
@@ -962,12 +1124,16 @@ export function abortExecution(
 ): CommandResultView {
   const loaded = loadExecution(store, ctx.kingdomId, input.executionId)
   if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = requireSupervisorInScope(store, ctx, loaded.task)
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
   if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
   const state = asExecutionState(loaded.execution.state)
   if (!isLiveExecutionState(state)) {
     return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
       `错误：Execution 当前为 ${state}（已终结），无法终止。`)
+  }
+  if (loaded.execution.execution_contract === 'GOVERNED_PERSISTENT') {
+    return fail(store, ctx.kingdomId, 'EXECUTOR_UNAVAILABLE',
+      'GOVERNED_RUNTIME_CONTROL_UNAVAILABLE: 尚未实现可验证的 Runtime abort、terminal evidence 与 reconcile；未修改 Execution/Task。')
   }
 
   const execution = store.transitionExecution(loaded.execution, 'ABORTED', {

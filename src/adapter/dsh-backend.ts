@@ -23,7 +23,14 @@ import type {
   PreflightResult,
   ReconcileResult,
   RuntimeAdapter,
+  RuntimeEvent,
   RuntimeEnforceableSet,
+  RuntimeTrustFence,
+  RuntimeTrustFenceCheck,
+  RuntimeTrustFenceExpectation,
+  RuntimeTrustFenceInput,
+  RuntimeTrustFenceOutcome,
+  RuntimeTrustFencePhase,
   SessionHandle,
   SessionObservation,
 } from './contract.js'
@@ -58,6 +65,70 @@ interface AgentLike {
   whenIdle(): Promise<void>
   cancel(cause: unknown): void
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T>
+}
+
+type FenceState = {
+  readonly token: DshTrustFenceToken
+  readonly leaseId: string
+  readonly sessionRef: string
+  runtimeDispatchRef: string | null
+  readonly agent: AgentLike
+  readonly session: SessionLike
+  readonly baselineKeys: readonly string[]
+  lastKeys: string[]
+  /** Monotonic observation generation; it never moves backwards. */
+  generation: number
+  lastPhase: RuntimeTrustFencePhase | null
+  status: 'OPEN' | 'TAINTED' | 'RELEASED'
+  taintReason: string | null
+  cleanupUsed: boolean
+  maintenanceRelease: (() => void) | null
+  maintenance: Promise<void> | null
+  readonly reservation: 'SERIALIZED'
+}
+
+/** Deliberately not exported: only this backend can issue a fence token. */
+class DshTrustFenceToken {
+  // Runtime identity is checked through an Adapter-instance-private WeakMap;
+  // prevents a plain object from being mistaken for an issued token by code
+  // that happens to hold the structural type.
+  readonly #opaque = true
+}
+
+const FENCE_PHASE_ORDER: Record<RuntimeTrustFencePhase, number> = {
+  'terminal-write': 0,
+  'cleanup-reserved': 1,
+  cleanup: 2,
+  settlement: 3,
+  release: 4,
+}
+
+function eventKey(event: RuntimeEvent): string {
+  try {
+    return JSON.stringify(event)
+  } catch {
+    return '<unserializable-event>'
+  }
+}
+
+function eventMessageId(event: RuntimeEvent): string | null {
+  const id = event.data?.id ?? (event.data?.message as { id?: unknown } | undefined)?.id
+  return typeof id === 'string' ? id : null
+}
+
+function boundedFenceReason(value: string): string {
+  const text = value.trim()
+  return text.length <= 512 ? text : `${text.slice(0, 511)}…`
+}
+
+function fenceResult(
+  ok: boolean,
+  status: RuntimeTrustFenceCheck['status'],
+  reservation: RuntimeTrustFenceCheck['reservation'],
+  generation: number | null,
+  reason: string,
+): RuntimeTrustFenceCheck {
+  return { ok, status, reservation, generation, reason: boundedFenceReason(reason) }
 }
 
 interface AgentHandleLike {
@@ -161,6 +232,8 @@ export function reconstructExecutionObservation(
 /** DSH RuntimeAdapter 实现。 */
 export class DshRuntimeAdapter implements RuntimeAdapter {
   readonly runtimeType = 'dsh'
+  /** Fence tokens are accepted only by the exact Adapter instance that issued them. */
+  private readonly trustFenceStates = new WeakMap<object, FenceState>()
   private readonly deps: Required<Pick<DshBackendDeps, 'runtimeInstanceRef' | 'provider'>> & {
     model: string | null
     agents: AgentsLike
@@ -269,26 +342,327 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     await handle.dispose()
   }
 
+  // ── Governed terminal trust fence ─────────────────────────────────────────
+
+  /**
+   * Read the current live projection through the exact registry object.  A
+   * fence never trusts a copied Session/Agent-shaped object supplied by a
+   * caller; the registry identity is the Runtime-local authority.
+   */
+  private currentFenceEvents(state: FenceState): readonly RuntimeEvent[] {
+    const current = this.deps.agents.get(state.sessionRef)
+    if (!current || current !== state.agent || current.id !== state.sessionRef || current.session !== state.session) {
+      throw new Error(`trust fence session ${state.sessionRef} is no longer the exact live registry object`)
+    }
+    const events = state.session.events
+    if (!Array.isArray(events)) throw new Error(`trust fence session ${state.sessionRef} has no readable event projection`)
+    return events as readonly RuntimeEvent[]
+  }
+
+  private taintFence(state: FenceState, reason: string): RuntimeTrustFenceCheck {
+    state.status = 'TAINTED'
+    state.taintReason = boundedFenceReason(reason)
+    return fenceResult(false, 'TAINTED', state.reservation, state.generation, state.taintReason)
+  }
+
+  private asFenceState(fence: RuntimeTrustFence): FenceState | undefined {
+    return this.trustFenceStates.get(fence as unknown as object)
+  }
+
+  private checkFenceExpectation(
+    state: FenceState,
+    expectation: RuntimeTrustFenceExpectation | undefined,
+    operation: string,
+  ): RuntimeTrustFenceCheck | null {
+    if (!expectation || !expectation.leaseId.trim() || !expectation.sessionRef.trim()) {
+      return this.taintFence(state, `${operation} 缺少完整 lease/session expectation`)
+    }
+    if (expectation.leaseId !== state.leaseId || expectation.sessionRef !== state.sessionRef) {
+      return this.taintFence(
+        state,
+        `${operation} expectation 不匹配：fence=${state.leaseId}/${state.sessionRef} `
+          + `received=${expectation.leaseId}/${expectation.sessionRef}`,
+      )
+    }
+    return null
+  }
+
+  private inspectFence(
+    state: FenceState,
+    phase: RuntimeTrustFencePhase,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck {
+    const expectationFailure = this.checkFenceExpectation(state, expectation, `trust fence ${phase}`)
+    if (expectationFailure) return expectationFailure
+    if (state.status === 'RELEASED') {
+      return fenceResult(false, 'RELEASED', state.reservation, state.generation, 'trust fence 已释放')
+    }
+    if (state.status === 'TAINTED') {
+      return fenceResult(false, 'TAINTED', state.reservation, state.generation, state.taintReason ?? 'trust fence 已污染')
+    }
+    const previousPhase = state.lastPhase ? FENCE_PHASE_ORDER[state.lastPhase] : -1
+    if (FENCE_PHASE_ORDER[phase] < previousPhase) {
+      return this.taintFence(state, `trust fence phase regression: ${state.lastPhase} -> ${phase}`)
+    }
+
+    let events: readonly RuntimeEvent[]
+    try {
+      events = this.currentFenceEvents(state)
+    } catch (error: unknown) {
+      return this.taintFence(state, error instanceof Error ? error.message : String(error))
+    }
+    const keys = events.map(eventKey)
+    if (keys.length < state.lastKeys.length) {
+      return this.taintFence(state, 'Runtime event generation moved backwards')
+    }
+    for (let i = 0; i < state.lastKeys.length; i++) {
+      if (keys[i] !== state.lastKeys[i]) {
+        return this.taintFence(state, `Runtime event prefix changed at index ${i}`)
+      }
+    }
+    for (let i = 0; i < state.baselineKeys.length; i++) {
+      if (keys[i] !== state.baselineKeys[i]) {
+        return this.taintFence(state, `Runtime baseline event prefix changed at index ${i}`)
+      }
+    }
+
+    if (state.runtimeDispatchRef !== null) {
+      const dispatchIndex = events.findIndex(event => eventKey(event).includes(state.runtimeDispatchRef!))
+      // Every user/message appended after the baseline must be the exact
+      // owned dispatch message. This catches foreign ingress that arrived
+      // while the Lease was active but before the owned Runtime ref existed;
+      // slicing only from the owned ref would hide that history.
+      for (let i = state.baselineKeys.length; i < events.length; i++) {
+        const event = events[i]
+        if (event.type !== 'user/message') continue
+        const messageId = eventMessageId(event)
+        if (messageId !== state.runtimeDispatchRef || (dispatchIndex >= 0 && i < dispatchIndex)) {
+          return this.taintFence(state, `foreign user message crossed trust fence${messageId ? `: ${messageId}` : ''}`)
+        }
+      }
+    }
+
+    if (keys.length > state.lastKeys.length) state.generation += 1
+    state.lastKeys = keys
+    state.lastPhase = phase
+    return fenceResult(true, 'VALID', state.reservation, state.generation, 'trust fence valid')
+  }
+
+  async openTrustFence(input: RuntimeTrustFenceInput): Promise<RuntimeTrustFence> {
+    const sessionRef = input.sessionRef.trim()
+    if (!input.leaseId.trim() || !sessionRef) throw new Error('trust fence requires leaseId and sessionRef')
+    const agent = this.deps.agents.get(sessionRef)
+    if (!agent || agent.id !== sessionRef) throw new Error(`trust fence cannot resolve exact live Agent ${sessionRef}`)
+    if (agent.status !== 'idle') throw new Error(`trust fence requires idle Agent ${sessionRef}`)
+    if (typeof agent.runMaintenance !== 'function') {
+      throw new Error(`trust fence Runtime ingress reservation seam missing for Agent ${sessionRef}`)
+    }
+    const currentEvents = agent.session?.events
+    if (!Array.isArray(currentEvents)) throw new Error(`trust fence cannot read Session events for ${sessionRef}`)
+    const baselineKeys = currentEvents.map(eventKey)
+    const suppliedKeys = input.baselineEvents.map(eventKey)
+    if (baselineKeys.length !== suppliedKeys.length || baselineKeys.some((key, i) => key !== suppliedKeys[i])) {
+      throw new Error(`trust fence baseline is stale for Session ${sessionRef}`)
+    }
+    if (input.runtimeDispatchRef !== null && input.runtimeDispatchRef.trim() === '') {
+      throw new Error('trust fence runtimeDispatchRef must be null or non-empty')
+    }
+    const token = new DshTrustFenceToken()
+    this.trustFenceStates.set(token, {
+      token,
+      leaseId: input.leaseId,
+      sessionRef,
+      runtimeDispatchRef: input.runtimeDispatchRef,
+      agent,
+      session: agent.session,
+      baselineKeys,
+      lastKeys: [...baselineKeys],
+      generation: 0,
+      lastPhase: null,
+      status: 'OPEN',
+      taintReason: null,
+      cleanupUsed: false,
+      maintenanceRelease: null,
+      maintenance: null,
+      reservation: 'SERIALIZED',
+    })
+    return token as unknown as RuntimeTrustFence
+  }
+
+  bindTrustFence(
+    fence: RuntimeTrustFence,
+    runtimeDispatchRef: string,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck {
+    const state = this.asFenceState(fence)
+    if (!state) return fenceResult(false, 'UNKNOWN', 'UNKNOWN', null, 'unknown trust fence token')
+    const expectationFailure = this.checkFenceExpectation(state, expectation, 'trust fence bind')
+    if (expectationFailure) return expectationFailure
+    if (!runtimeDispatchRef.trim()) return this.taintFence(state, 'runtimeDispatchRef missing at fence bind')
+    if (state.runtimeDispatchRef !== null && state.runtimeDispatchRef !== runtimeDispatchRef) {
+      return this.taintFence(state, 'runtimeDispatchRef changed after fence bind')
+    }
+    state.runtimeDispatchRef = runtimeDispatchRef
+    return this.inspectFence(state, 'terminal-write', expectation)
+  }
+
+  checkTrustFence(
+    fence: RuntimeTrustFence,
+    phase: RuntimeTrustFencePhase,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck {
+    const state = this.asFenceState(fence)
+    if (!state) return fenceResult(false, 'UNKNOWN', 'UNKNOWN', null, 'unknown trust fence token')
+    return this.inspectFence(state, phase, expectation)
+  }
+
+  /**
+   * Execute the disposer while the Runtime's own maintenance ingress
+   * reservation is held.  Normal followup calls are queued by DSH until the
+   * hold is released; an already-running/unmanaged ingress makes the
+   * reservation fail and the fence is tainted before any disposer call.
+   */
+  private async cleanupWithFence(
+    request: EnforcementRequest,
+    context: DshEnforcementContext,
+    fence: RuntimeTrustFence,
+    state: FenceState,
+    expectation: RuntimeTrustFenceExpectation,
+  ): Promise<CleanupResult> {
+    if (state.cleanupUsed) throw new Error('trust fence cleanup is exactly-once')
+    state.cleanupUsed = true
+    if (
+      context.sessionRef !== state.sessionRef
+      || (context.agent as unknown) !== (state.agent as unknown)
+      || (context.agent.session as unknown) !== (state.session as unknown)
+    ) {
+      this.taintFence(state, 'cleanup context is not bound to the fenced Agent/Session')
+      throw new Error('cleanup context does not match trust fence')
+    }
+
+    let resultResolve!: (result: CleanupResult) => void
+    let resultReject!: (error: unknown) => void
+    let resultSettled = false
+    const resultPromise = new Promise<CleanupResult>((resolve, reject) => {
+      resultResolve = resolve
+      resultReject = reject
+    })
+    let releaseHold!: () => void
+    const hold = new Promise<void>(resolve => { releaseHold = resolve })
+    state.maintenanceRelease = releaseHold
+
+    const settleResult = (result: CleanupResult): void => {
+      if (resultSettled) return
+      resultSettled = true
+      resultResolve(result)
+    }
+    const rejectResult = (error: unknown): void => {
+      if (resultSettled) return
+      resultSettled = true
+      resultReject(error)
+    }
+
+    try {
+      const maintenance = (state.agent as AgentLike).runMaintenance(async (signal: AbortSignal) => {
+        if (signal.aborted) {
+          this.taintFence(state, 'Runtime maintenance reservation aborted')
+          rejectResult(new Error('Runtime maintenance reservation aborted'))
+          await hold
+          return
+        }
+        const reserved = this.inspectFence(state, 'cleanup-reserved', expectation)
+        if (!reserved.ok) {
+          rejectResult(new Error(reserved.reason))
+          await hold
+          return
+        }
+        const cleanupCheck = this.inspectFence(state, 'cleanup', expectation)
+        if (!cleanupCheck.ok) {
+          rejectResult(new Error(cleanupCheck.reason))
+          await hold
+          return
+        }
+        try {
+          settleResult(await cleanupDshEnforcement(context))
+        } catch (error: unknown) {
+          rejectResult(error)
+        }
+        await hold
+      })
+      state.maintenance = maintenance.then(() => undefined, error => {
+        // A rejected reservation is an ingress-fence failure, not merely a
+        // cleanup Promise failure.  Taint before propagating so the caller's
+        // subsequent settlement check cannot persist terminal evidence or
+        // release a Lease on an unprotected Runtime path.
+        this.taintFence(
+          state,
+          `Runtime maintenance reservation rejected: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        rejectResult(error)
+      })
+    } catch (error: unknown) {
+      this.taintFence(state, `Runtime maintenance reservation failed: ${error instanceof Error ? error.message : String(error)}`)
+      rejectResult(error)
+      state.maintenance = null
+    }
+    return resultPromise
+  }
+
+  cleanup(
+    request: EnforcementRequest,
+    context: unknown,
+    fence?: RuntimeTrustFence,
+    expectation?: RuntimeTrustFenceExpectation,
+  ): Promise<CleanupResult> {
+    const ctx = context as DshEnforcementContext | undefined
+    if (!ctx?.agent?.session) return Promise.resolve({ ok: false, evidenceJson: null })
+    if (!fence) return cleanupDshEnforcement(ctx)
+    const state = this.asFenceState(fence)
+    if (!state) return Promise.reject(new Error('cleanup received unknown trust fence token'))
+    const expectationFailure = this.checkFenceExpectation(state, expectation, 'trust fence cleanup')
+    if (expectationFailure) return Promise.reject(new Error(expectationFailure.reason))
+    const checked = this.inspectFence(state, 'cleanup-reserved', expectation!)
+    if (!checked.ok) return Promise.reject(new Error(checked.reason))
+    return this.cleanupWithFence(request, ctx, fence, state, expectation!)
+  }
+
+  releaseTrustFence(
+    fence: RuntimeTrustFence,
+    outcome: RuntimeTrustFenceOutcome,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck {
+    const state = this.asFenceState(fence)
+    if (!state) return fenceResult(false, 'UNKNOWN', 'UNKNOWN', null, 'unknown trust fence token')
+    const expectationFailure = this.checkFenceExpectation(state, expectation, 'trust fence release')
+    if (expectationFailure) return expectationFailure
+    if (state.status === 'RELEASED') return fenceResult(true, 'RELEASED', state.reservation, state.generation, 'trust fence already released')
+    if (outcome === 'RELEASED') {
+      const checked = this.inspectFence(state, 'release', expectation)
+      if (!checked.ok) return checked
+    }
+    state.status = 'RELEASED'
+    const release = state.maintenanceRelease
+    state.maintenanceRelease = null
+    release?.()
+    return fenceResult(true, 'RELEASED', state.reservation, state.generation, `trust fence released (${outcome})`)
+  }
+
   // ── Capability（S4：context-bound 集合 + preflight/materialize/cleanup）────────
 
   /**
    * context-bound Runtime Enforceable Set：回答「这次 Session 下**能** enforce 什么」。
-   * - tools：A∩B（A=真实 `tools.schemas()` Runtime inventory；B=preset 声明面，回退 session 装配面）——
-   *   Owner S4 seam 裁决（A+B 组合），见 `readEnforceableSet`；
-   * - sandboxMode：有 confining 后端（sandboxPolicy 或 permission preset）→ 'workspace-write'；
-   * - approvalPolicy：有禁扩权机制（approval 或 permission preset）→ 'never'。
+   * - tools：只有当前 context 同时暴露 `restrict`/`guard` 时，才计算
+   *   A∩B（A=真实 `tools.schemas()` Runtime inventory；B=preset 声明面，回退 session 装配面）；
+   *   schemas 单独存在只代表声明，不进入 RuntimeEnforceableSet，见 `readEnforceableSet`；
+   * - sandboxMode/approvalPolicy：只从当前 context-bound Session 的最新政策事件重建；
+   *   构造期 setter 是否存在不能证明这次 Session 当前已经可 enforce。
    */
   async capabilities(context: unknown): Promise<RuntimeEnforceableSet> {
     const ctx = context as DshEnforcementContext | undefined
-    const tools = ctx?.agent?.session ? (await readEnforceableSet(ctx, { presets: this.deps.presets })).tools : []
-    const hasSandbox = Boolean(this.deps.policy.sandboxPolicy || this.deps.policy.permission)
-    const hasApproval = Boolean(this.deps.policy.approval || this.deps.policy.permission)
-    return {
-      tools,
-      sandboxMode: hasSandbox ? 'workspace-write' : null,
-      approvalPolicy: hasApproval ? 'never' : null,
-      presetId: null,
+    if (!ctx?.agent?.session) {
+      return { tools: [], sandboxMode: null, approvalPolicy: null, presetId: null }
     }
+    return readEnforceableSet(ctx, { presets: this.deps.presets })
   }
 
   /** preflight：纯检查、零副作用（M3-S1 Stage 3）。 */
@@ -298,7 +672,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     if (request.approvalPolicy !== 'never') {
       reasons.push('governed Execution 要求 approvalPolicy=never（禁扩权）；收到 ' + request.approvalPolicy)
     }
-    if (!ctx?.agent?.ctx?.tools?.restrict || !ctx.agent.ctx.tools.guard) {
+    if (typeof ctx?.agent?.ctx?.tools?.restrict !== 'function' || typeof ctx.agent.ctx.tools.guard !== 'function') {
       reasons.push('agent.ctx.tools 无 restrict/guard（工具面不可 enforce）')
     }
     if (!request.presetId && !this.deps.policy.sandboxPolicy) {
@@ -318,13 +692,6 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     const ctx = context as DshEnforcementContext | undefined
     if (!ctx?.agent?.session) return { ok: false, evidenceJson: null, reasons: ['materialize: 缺少 live session context'] }
     return materializeDshEnforcement(this.deps.policy, ctx, request)
-  }
-
-  /** cleanup：拆除 per-execution guard/restrict（session 级政策保留）。 */
-  async cleanup(_request: EnforcementRequest, context: unknown): Promise<CleanupResult> {
-    const ctx = context as DshEnforcementContext | undefined
-    if (!ctx?.agent?.session) return { ok: false, evidenceJson: null }
-    return cleanupDshEnforcement(ctx)
   }
 
   // ── Dispatch / Evidence / Reconcile ────────────────────────────────────────

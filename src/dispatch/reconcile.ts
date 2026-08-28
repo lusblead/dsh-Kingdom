@@ -9,11 +9,7 @@
  * - G12：外来活动检测到 → 标记 untrusted → RECOVERING（禁止 settle/release 并声称可信）。
  */
 import type { KingdomStore, DispatchRecordRow, LeaseRow, ExecutionRow } from '../core/db.js'
-import {
-  markLeaseRecovering,
-  markDispatchRecovering,
-  markExecutionRecovering,
-} from '../core/governed.js'
+import { markGovernedDispatchRecovering } from '../core/governed.js'
 import type { DispatchEvidence } from './evidence.js'
 
 export type RecoveryAction =
@@ -68,12 +64,10 @@ export function applyRecovery(
   if (decision.action !== 'RECOVERING' && decision.action !== 'UNTRUSTED_RECOVERING') {
     return { dispatch, lease: store.getLease(dispatch.lease_id), execution: store.getExecution(dispatch.execution_id) }
   }
-  const updatedDispatch = markDispatchRecovering(store, dispatch.dispatch_id)
-  const lease = store.getLease(dispatch.lease_id)
-  const updatedLease = lease && lease.state !== 'RELEASED' ? markLeaseRecovering(store, lease.lease_id) : null
-  const execution = store.getExecution(dispatch.execution_id)
-  const updatedExecution = execution && execution.state !== 'RECOVERING' && !['COMPLETED', 'FAILED', 'ABORTED'].includes(execution.state)
-    ? markExecutionRecovering(store, execution.execution_id)
-    : null
-  return { dispatch: updatedDispatch, lease: updatedLease, execution: updatedExecution }
+  const recovered = markGovernedDispatchRecovering(
+    store,
+    dispatch.dispatch_id,
+    decision.action === 'UNTRUSTED_RECOVERING' ? 'RECONCILE_UNTRUSTED' : 'RECONCILE_UNKNOWN',
+  )
+  return recovered
 }

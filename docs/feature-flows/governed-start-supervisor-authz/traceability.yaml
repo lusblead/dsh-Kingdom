@@ -1,0 +1,1491 @@
+version: 1
+feature_id: "governed-start.supervisor-authz"
+title: "Authorize and dispatch public governed start through the DSH caller session"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+
+nodes:
+  E0:
+    kind: entry
+    description: Human Owner independently invokes the direct local capability-ceiling Slash command
+    trigger: /kingdom ceiling with a boolean map or clear=true
+    code:
+      - path: src/index.ts
+        symbol: "case 'ceiling'"
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: clear is an auditable fail-closed reset"
+
+  E1:
+    kind: entry
+    description: Headless user requests governed Task execution after plan and assign
+    trigger: kingdom_start_task_governed Tool invocation
+    code:
+      - path: src/index.ts
+        symbol: kingdom_start_task_governed
+
+  E2:
+    kind: entry
+    description: Caller independently invokes the legacy one-shot compatibility Tool
+    trigger: kingdom_start_task Tool invocation
+    code:
+      - path: src/index.ts
+        symbol: kingdom_start_task
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "LEGACY_COMPAT machine gate rejects implicit one-shot selection"
+
+  D0:
+    kind: decision
+    description: Separate legacy compatibility request explicitly opts in
+    condition: kingdom_start_task receives legacy_opt_in exactly true
+    code:
+      - path: src/index.ts
+        symbol: kingdom_start_task
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "headless route contract: governed is canonical and legacy requires explicit opt-in"
+      - path: tests/owner-control-plane.test.ts
+        symbol: "LEGACY_COMPAT machine gate rejects implicit one-shot selection"
+
+  A0:
+    kind: action
+    description: Enter the canonical governed persistent start seam independently of Owner ceiling setup and the legacy Tool
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/index.ts
+        symbol: kingdom_start_task_governed
+
+  A5:
+    kind: action
+    description: Persist or clear the capability ceiling and append its audit event through direct local Owner Slash
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+    tests:
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: only direct Owner Control may configure a ceiling"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: clear is an auditable fail-closed reset"
+
+  D5:
+    kind: decision
+    description: Ceiling set or clear request has direct Owner control and valid input
+    condition: direct OwnerControlCapability is present and the request is clear=true or a JSON object whose keys are non-empty and values are booleans; an empty object is valid
+    code:
+      - path: src/core/owner-control.ts
+        symbol: requireOwnerControl
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+    tests:
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: only direct Owner Control may configure a ceiling"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: malformed and non-boolean ceiling input is rejected"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: clear is an auditable fail-closed reset"
+
+  X0:
+    kind: outcome
+    description: Explicit legacy request enters the one-shot compatibility path
+    result: Only the independent kingdom_start_task call with legacy_opt_in=true may select LEGACY_COMPAT
+
+  A1:
+    kind: action
+    description: Resolve the trusted caller session from the complete DSH registry seam
+    code:
+      - path: src/index.ts
+        symbol: resolveTrustedToolSession
+
+  D1:
+    kind: decision
+    description: The DSH caller session is trusted and currently active
+    condition: current initiator, agents.get/list, sessions.get, Agent/Session identity, running status, and non-aborted signal all match; a non-empty session_id alone is insufficient
+    code:
+      - path: src/index.ts
+        symbol: resolveTrustedToolSession
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
+
+  A2:
+    kind: action
+    description: Resolve the caller-owned active Supervisor binding and Task Territory scope
+    code:
+      - path: src/index.ts
+        symbol: governedStartCommandContext
+      - path: src/core/task-service.ts
+        symbol: resolveGovernedStartSupervisor
+
+  D2:
+    kind: decision
+    description: Caller session is the active Supervisor for the Task Territory
+    condition: active Supervisor binding has the caller session_id and is named by the Task Territory
+    code:
+      - path: src/core/task-service.ts
+        symbol: resolveGovernedStartSupervisor
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 同一 DSH session 的多个 Supervisor 必须解析为 Territory 指定 binding"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: fallback propagates non-auth binding lookup errors without execution"
+
+  A3:
+    kind: action
+    description: Parse the authenticated Supervisor capability Grant
+    code:
+      - path: src/index.ts
+        symbol: parseSupervisorGrant
+
+  D3:
+    kind: decision
+    description: Grant is a non-empty JSON object with boolean capability values
+    condition: grant_json parses to a non-null non-array object whose values are booleans
+    code:
+      - path: src/index.ts
+        symbol: parseSupervisorGrant
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 已认证 Supervisor 的 malformed Grant 是 INPUT_DENIED，且不准备 runner"
+
+  D6:
+    kind: decision
+    description: The latest governed persistent Execution is terminal or absent
+    condition: no Task Execution has execution_contract GOVERNED_PERSISTENT with STARTING, RUNNING, PAUSED, or RECOVERING state
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/core/execution.ts
+        symbol: isTerminalExecutionState
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unsettled persistent Execution blocks before Runtime, Session, Lease, or Dispatch effects"
+
+  D11:
+    kind: decision
+    description: Worker Session side effects are allowed only after affinity and active Lease recovery guard
+    condition: adapter identity is present and matches the current Worker affinity, and no Lease for that affinity or Worker is in any state other than RELEASED; the guard runs before live-handle lookup, resume, or create
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: guardBeforeWorkerSessionSideEffect
+      - path: src/core/db.ts
+        symbol: getActiveLeaseForSession
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "GI-CAP-002: cleanup false 后 RECOVERING guard 在 Session resume/create 前拒绝第二次运行"
+
+  A4:
+    kind: action
+    description: After the pre-session affinity/Lease guard, establish or resume the persistent Worker Session, rebuild context-bound Runtime enforceability, and run the Capability Gate with an effective sandbox upper bound
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+      - path: src/adapter/session-store.ts
+        symbol: ensureWorkerSession
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/adapter/dsh-backend.ts
+        symbol: capabilities
+      - path: src/capability/dsh-enforcement.ts
+        symbol: readEnforceableSet
+
+  D4:
+    kind: decision
+    description: Capability Gate grants and enforces context-bound effective capabilities and required write access
+    condition: Effective capability is Grant intersect Ceiling intersect the current Session EnforceableSet; coverage is informational, but a required filesystem.write must be effective or the attempt is DENIED before dispatch, and a missing ceiling is NOT_ATTEMPTED without Runtime inspection
+    code:
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/capability/resolver.ts
+        symbol: resolveEffectiveCapability
+      - path: src/adapter/dsh-backend.ts
+        symbol: capabilities
+      - path: src/capability/dsh-enforcement.ts
+        symbol: materializeDshEnforcement
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: DENIED → zero execution（无 Execution/Dispatch 落库）"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage PARTIAL 仅作信息字段 → 无 write requirement 时有界收窄为 read-only"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: required write 缺失于 Grant/Ceiling/Runtime → DENIED + zero dispatch"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: cleanup 不可确认 → Lease 保留 RECOVERING 且原因写入 Ledger"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: ceiling 缺失且不触碰 Runtime → DENIED+NOT_ATTEMPTED + zero execution（B-7）"
+
+  D9:
+    kind: decision
+    description: Requested sandbox mode is within the effective write upper bound
+    condition: workspace-write is retained only when effective.filesystem.write is true; otherwise a non-write-required request takes the read-only branch, while a read-only request for a write-required Task is denied
+    code:
+      - path: src/capability/service.ts
+        symbol: selectSandboxMode
+      - path: src/capability/resolver.ts
+        symbol: resolveEffectiveCapability
+    tests:
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage PARTIAL 仅作信息字段 → 无 write requirement 时有界收窄为 read-only"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage NONE 仍可按有效 Grant 执行；Grant 为空仍 fail-closed"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: requested read-only happy path 不扩大也不隐式收窄"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: required write 缺失于 Grant/Ceiling/Runtime → DENIED + zero dispatch"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 enforcement: read-only no-op sandbox setter 即使已有 approval 事件也不得 ENFORCED"
+
+  A8:
+    kind: action
+    description: Bound a workspace-write request to read-only and persist bounded narrowing in the plan, Decision, and enforcement evidence
+    code:
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/capability/service.ts
+        symbol: annotateSandboxEvidence
+    tests:
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage PARTIAL 仅作信息字段 → 无 write requirement 时有界收窄为 read-only"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage NONE 仍可按有效 Grant 执行；Grant 为空仍 fail-closed"
+
+  T1:
+    kind: transition
+    description: Atomically prepare the governed Execution, Decision binding, Dispatch Intent, and executing Lease
+    entity: GovernedAttempt
+    from: PREPARED
+    to: INTENT_COMMITTED
+    trigger: capability_granted_and_enforced
+    code:
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Runtime identity failure happens before every preparation write"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Intent preparation failure rolls back Execution and Decision binding"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Lease progression failure rolls back Intent, Execution, and Decision binding"
+
+  A17:
+    kind: action
+    description: After TX-3 commit, create and acquire the exact local canonical RunnerContext Port for this dispatch before any Runtime fence or dispatch side effect; normal apply creates no broker epoch
+    code:
+      - path: src/core/governed.ts
+        symbol: createRunnerContextPort
+      - path: src/runner-context-broker.ts
+        symbol: registerProductRunnerContext
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: "loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 Product epoch activation is single-owner"
+
+  D20:
+    kind: decision
+    description: Decide whether the caller explicitly created an active public run-scoped Product broker lifecycle for this dispatch
+    condition: activeProductLaunch exists because an external caller explicitly invoked createRunnerContextBrokerProductLifecycle; normal apply never creates or closes it
+    code:
+      - path: src/index.ts
+        symbol: apply
+      - path: src/runner-context-broker.ts
+        symbol: registerProductRunnerContext
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 Product epoch activation is single-owner"
+
+  A18:
+    kind: action
+    description: When and only when an explicit public run-scoped lifecycle is active, register one exact Port in that epoch, issue one transport ticket, and expose only serialized bootstrap to a cross-realm consumer
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: registerRunnerContextBrokerContext
+      - path: src/runner-context-broker.ts
+        symbol: registerProductRunnerContext
+      - path: src/runner-context-broker.ts
+        symbol: connectRunnerContextBroker
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 public broker exposes only bootstrap/connect/close and bounded no-ID view"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R20 serialized cross-realm consumer connects to the existing Product broker and rejects tamper/stale/foreign bootstrap"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 exact request replay is cached, mismatched replay/stale revision/foreign ticket do zero Product action"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R18 TX-3 broker registration failure recovers all three ledgers before Runtime dispatch"
+
+  A11:
+    kind: action
+    description: Open an Adapter-instance-private Runtime trust fence bound to the exact lease and Session before the governed dispatch side effect
+    code:
+      - path: src/adapter/contract.ts
+        symbol: RuntimeTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: openTrustFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: trusted terminal 后 exactly-once cleanup 使用同一 request/context"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 G14 exact fence binding: cross-adapter/cross-lease/cross-session 均 fail-closed 且不释放"
+
+  A6:
+    kind: action
+    description: Invoke the Runtime dispatch side effect only after the Intent commit point
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/adapter/contract.ts
+        symbol: RuntimeAdapter.dispatch
+    external_call:
+      system: DeepSeek Harness governed runtime
+      timeout: terminal evidence polling is bounded by pollIntervalMs times maxPolls; production entry uses 1000ms times 60
+      failure_behavior: Move the committed Dispatch, Lease, and Execution to RECOVERING on post-commit exception or indeterminate evidence; do not redispatch or infer Terminal from a Receipt
+      failure_nodes: [C1]
+
+  T3:
+    kind: transition
+    description: Record Runtime Receipt by advancing Dispatch from INTENDED through DISPATCHED to RECEIVED; Receipt remains nonterminal
+    entity: GovernedAttempt
+    from: INTENT_COMMITTED
+    to: RECEIVED
+    trigger: runtime_dispatch_receipt
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchReceipt
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.bindRuntimeReceipt
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: session.events 是 getter（真实 DSH 每次访问返回新数组）→ 轮询每轮重读仍达 terminal（正式入口 E2E seam）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  A12:
+    kind: action
+    description: Bind the accepted Runtime dispatch reference to the same fence with the exact Adapter/lease/Session expectation and advance its monotonic observation generation
+    code:
+      - path: src/adapter/dsh-backend.ts
+        symbol: bindTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: checkTrustFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 active Lease owned-ref 前 foreign activity 不可被 ref slicing 隐藏"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "live path: foreign user message 即使伴随 completed terminal 也只能 RECOVERING，不 cleanup/release"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 G14 exact fence binding: cross-adapter/cross-lease/cross-session 均 fail-closed 且不释放"
+
+  D8:
+    kind: decision
+    description: A turn for this dispatch is observed before bounded polling is exhausted
+    condition: reconstructed evidence for the Runtime dispatch has a non-null turnObserved during the bounded correlation or terminal polling windows
+    code:
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: session.events 是 getter（真实 DSH 每次访问返回新数组）→ 轮询每轮重读仍达 terminal（正式入口 E2E seam）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  T8:
+    kind: transition
+    description: Correlate the observed Runtime turn and advance the Execution from STARTING to RUNNING before terminal settlement
+    entity: GovernedAttempt
+    from: RECEIVED
+    to: CORRELATED
+    trigger: runtime_turn_observed
+    code:
+      - path: src/core/governed.ts
+        symbol: correlateRuntimeExecution
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.correlateRuntimeExecution
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  D7:
+    kind: decision
+    description: Trusted terminal evidence is available for this correlated dispatch
+    condition: reconstructed evidence has a trusted terminal outcome, completed also requires assistant message evidence, and foreignUserMessages is empty; foreign activity is untrusted even when a completed terminal-looking chain exists
+    code:
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：aborted→ABORTED；blocked/error/max-tokens→FAILED（执行终态落账）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：interrupted / completed 无 assistant → 不落终态（RECOVERING 语义）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "live path: foreign user message 即使伴随 completed terminal 也只能 RECOVERING，不 cleanup/release"
+
+  T4:
+    kind: transition
+    description: After the same Runtime fence passes the pre-terminal cleanup reservation checks, persist terminal Dispatch evidence, terminal Execution, and Lease SETTLING state
+    entity: GovernedAttempt
+    from: CORRELATED
+    to: TERMINAL_PROVEN
+    trigger: trusted_terminal_evidence_and_fence_settlement_valid
+    code:
+      - path: src/core/governed.ts
+        symbol: recordTerminalEvidence
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.observeTerminal
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：aborted→ABORTED；blocked/error/max-tokens→FAILED（执行终态落账）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0"
+
+  C1:
+    kind: compensation
+    description: Atomically move the related Dispatch, Lease, and Execution into RECOVERING
+    restores_or_resolves: Preserve the unproven Runtime outcome without duplicate execution, false release, or Task mutation
+    failure_behavior: Validate all relationships first; on a post-commit exception recover all three rows then rethrow the original error, or expose both errors through AggregateError if recovery fails
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+      - path: src/dispatch/reconcile.ts
+        symbol: applyRecovery
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 recovery seam rolls back Dispatch and Lease when Execution recovery fails"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  T5:
+    kind: transition
+    description: Indeterminate or untrusted evidence makes the governed attempt recovery-required
+    entity: GovernedAttempt
+    from: "INTENT_COMMITTED | RECEIVED | CORRELATED"
+    to: RECOVERING
+    trigger: dispatch_exception_or_terminal_poll_exhausted_or_foreign_user_message_or_reconcile_indeterminate
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+      - path: src/dispatch/reconcile.ts
+        symbol: decideRecovery
+      - path: src/dispatch/reconcile.ts
+        symbol: applyRecovery
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 crash matrix: 各 Crash 点的恢复决策（不改 Task 治理、不重复执行、不伪造 terminal）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "live path: foreign user message 即使伴随 completed terminal 也只能 RECOVERING，不 cleanup/release"
+
+  A7:
+    kind: action
+    description: Check the exact Adapter/lease/Session terminal-write fence, reserve Runtime ingress, and invoke exactly-once cleanup with the exact materialized request and same context
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: cleanupAfterTrustedTerminal
+      - path: src/adapter/dsh-backend.ts
+        symbol: cleanupWithFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: trusted terminal 后 exactly-once cleanup 使用同一 request/context"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14 reservation: cleanup receipt 返回后至 release 前隔离 unmanaged followup，release 后才出队"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 terminal evidence 后的 fence check 发现 late foreign 时不进入 cleanup"
+
+  A13:
+    kind: action
+    description: Keep the exact Runtime reservation while the cleanup Promise is pending and prevent or queue unmanaged ingress until it resolves
+    code:
+      - path: src/adapter/dsh-backend.ts
+        symbol: cleanupWithFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "R5 G14 pending cleanup Promise: reservation 期间并发 unmanaged ingress 被排队隔离"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14 reservation: cleanup receipt 返回后至 release 前隔离 unmanaged followup，release 后才出队"
+
+  D14:
+    kind: decision
+    description: The same exact Adapter/lease/Session opaque fence remains valid after cleanup reservation and before terminal ledger settlement
+    condition: cleanup reservation completed with a bounded receipt and checkTrustFence(settlement) is VALID for the issuing Adapter instance and captured lease/session; foreign, cross-Adapter, cross-lease, cross-session, tainted, unrecognized, or generation-mismatched observations fail closed
+    code:
+      - path: src/adapter/dsh-backend.ts
+        symbol: checkTrustFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 settlement target binding: cross-lease/cross-session explicit settlement keeps target Lease RECOVERING"
+
+  D15:
+    kind: decision
+    description: The post-TX-4 settlement target still matches the exact terminal relation and issuing fence before release
+    condition: the exact Dispatch→Task/attempt→Execution→Lease relation is valid and the same Adapter-instance-private fence accepts the expected lease/session; any cross-Adapter, cross-Lease, cross-Session, tainted, missing, or released-target mismatch fails closed
+    code:
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+      - path: src/core/governed.ts
+        symbol: recordDispatchTerminalIntegrityIncident
+      - path: src/core/db.ts
+        symbol: getOpenDispatchTerminalIntegrityIncident
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 settlement cross-Adapter/cross-Lease/cross-Session all fail closed on a complete terminal fixture"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 RELEASED mismatch escalates without rolling back immutable terminal history"
+
+  D16:
+    kind: decision
+    description: The Supervisor review decision is ACCEPT rather than an explicit REWORK or FAIL
+    condition: reviewTask receives ACCEPT, REWORK, or FAIL; only ACCEPT enters the terminal-integrity gate
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  D17:
+    kind: decision
+    description: The exact current Task and Claim have no open terminal integrity incident before ACCEPT may create DONE
+    condition: inside one write transaction the re-read Task is REVIEW, the latest Claim attempt is correlated to exact Dispatch rows, and the Store finds no open incident for that exact Dispatch/Task/attempt relation
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/task-service.ts
+        symbol: openIntegrityIncidentForClaim
+      - path: src/core/db.ts
+        symbol: getOpenDispatchTerminalIntegrityIncident
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+
+  A14:
+    kind: action
+    description: Apply an explicit Supervisor REWORK or FAIL decision without using the ACCEPT-only integrity gate
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  A15:
+    kind: action
+    description: Atomically accept the exact Claim, transition Task REVIEW to DONE, close the active assignment, and emit TASK_ACCEPTED
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+
+  A16:
+    kind: action
+    description: Derive the canonical Runner context from the committed terminal relation and consume the same opaque handle/version for settlement before any Worker Claim write
+    code:
+      - path: src/core/governed.ts
+        symbol: createRunnerContextPort
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.settle
+      - path: src/runner-context-broker.ts
+        symbol: getRunnerContextPort
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 RunnerContext happy path consumes one handle through acquire/receipt/terminal/settle"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: settlement precedes Worker Claim insertion"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unproven terminal relation blocks Claim insertion"
+
+  A10:
+    kind: action
+    description: Persist the Worker Claim and Task REVIEW only after settlement has returned RELEASED or an explicitly recorded recovery outcome
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: happy path → session/gate/dispatch/terminal + claim 摘要"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: trusted terminal cleanup failure 保留 Claim/REVIEW 并进入 Lease RECOVERING"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: settlement precedes Worker Claim insertion"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unproven terminal relation blocks Claim insertion"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 crash: 完整 TX-3..TX-5 派发 + settle release 前置"
+
+  D10:
+    kind: decision
+    description: Cleanup receipt proves the exact enforcement teardown
+    condition: cleanup status is CONFIRMED and evidenceJson is non-empty and bounded
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: cleanupReceiptFromAdapterResult
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: cleanup false/throw/missing evidence 保留 trusted terminal，不伪造 cleanup 成功"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 settlement: false/throw/missing evidence 均保持 RECOVERING，只有 confirmed 才 RELEASED"
+
+  D19:
+    kind: decision
+    description: Settlement returned a bounded RELEASED outcome or an explicitly recorded RECOVERING outcome before Claim insertion
+    condition: RunnerContextPort.settle completed with exact terminal Dispatch/Execution and Lease RELEASED or RECOVERING; a thrown/unproven relation produces no Claim
+    code:
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.settle
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 wrong order, duplicate token, and recovery/released contexts cannot be reused"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: settlement precedes Worker Claim insertion"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unproven terminal relation blocks Claim insertion"
+
+  A9:
+    kind: action
+    description: Settle the Lease with ReleaseEvidence and emit SESSION_STOPPED only after confirmed cleanup
+    code:
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+      - path: src/index.ts
+        symbol: runGovernedStart
+      - path: src/adapter/dsh-backend.ts
+        symbol: releaseTrustFence
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 crash: 完整 TX-3..TX-5 派发 + settle release 前置"
+
+  C2:
+    kind: compensation
+    description: Preserve the trusted terminal Claim/REVIEW while moving the Lease to RECOVERING after unconfirmed cleanup
+    restores_or_resolves: Prevent false release, Session reuse, and new Dispatch while retaining bounded terminal evidence and Claim governance
+    failure_behavior: Keep the Lease RECOVERING if cleanup is false, throws, or lacks evidence; require reconciliation before reuse
+    code:
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 settlement: false/throw/missing evidence 均保持 RECOVERING，只有 confirmed 才 RELEASED"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: trusted terminal cleanup failure 保留 Claim/REVIEW 并进入 Lease RECOVERING"
+
+  C3:
+    kind: compensation
+    description: Atomically handle a post-TX-4 terminal integrity mismatch without rewriting terminal Dispatch or Execution history
+    restores_or_resolves: Preserve the trusted terminal observation and Claim/REVIEW while recovering a non-released Lease and recording one bounded redacted incident; a RELEASED Lease remains immutable and is escalated
+    failure_behavior: Re-read the exact Dispatch/Task/attempt/Execution/Lease relation in one BEGIN IMMEDIATE; recover only SETTLING or RELEASING Lease rows, keep terminal rows unchanged, and make incident replay a zero-event readback
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchTerminalIntegrityIncident
+      - path: src/core/db.ts
+        symbol: getOpenDispatchTerminalIntegrityIncident
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 post-TX-4 incident uses full relation, recovers only Lease, and replays idempotently"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 settlement cross-Adapter/cross-Lease/cross-Session all fail closed on a complete terminal fixture"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ordinary cleanup false/throw/missing keeps terminal Claim/REVIEW and adds no integrity incident"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 RELEASED mismatch escalates without rolling back immutable terminal history"
+
+  T10:
+    kind: transition
+    description: Confirmed cleanup releases the governed Execution Lease before the Worker Claim and Task REVIEW are recorded
+    entity: ExecutionLease
+    from: SETTLING | RELEASING
+    to: RELEASED
+    trigger: cleanup_confirmed
+    code:
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+      - path: src/core/governed.ts
+        symbol: releaseExecutionLease
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 crash: 完整 TX-3..TX-5 派发 + settle release 前置"
+
+  T11:
+    kind: transition
+    description: Unconfirmed cleanup moves the Lease to RECOVERING before the terminal Claim and Task REVIEW are recorded
+    entity: ExecutionLease
+    from: SETTLING | RELEASING
+    to: RECOVERING
+    trigger: cleanup_false_or_throw_or_missing_evidence
+    code:
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 settlement: false/throw/missing evidence 均保持 RECOVERING，只有 confirmed 才 RELEASED"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: trusted terminal cleanup failure 保留 Claim/REVIEW 并进入 Lease RECOVERING"
+
+  T12:
+    kind: transition
+    description: A post-TX-4 identity or fence mismatch recovers the non-released Lease before the terminal Claim and Task REVIEW are recorded, while preserving terminal Dispatch and Execution
+    entity: GovernedAttempt
+    from: SETTLING | RELEASING
+    to: RECOVERING
+    trigger: post_tx4_integrity_mismatch
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchTerminalIntegrityIncident
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 post-TX-4 incident uses full relation, recovers only Lease, and replays idempotently"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 settlement cross-Adapter/cross-Lease/cross-Session all fail closed on a complete terminal fixture"
+
+  T13:
+    kind: transition
+    description: A late mismatch against an immutable RELEASED Lease appends an escalation incident without rolling back terminal history
+    entity: ExecutionLease
+    from: RELEASED
+    to: RELEASED
+    trigger: late_post_tx4_mismatch
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchTerminalIntegrityIncident
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 RELEASED mismatch escalates without rolling back immutable terminal history"
+
+  T14:
+    kind: transition
+    description: Incident-free Supervisor ACCEPT turns the reviewed Task into DONE
+    entity: Task
+    from: REVIEW
+    to: DONE
+    trigger: accept_without_open_incident
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+
+  T15:
+    kind: transition
+    description: Supervisor REWORK keeps the active assignment and returns the Task to RUNNING
+    entity: Task
+    from: REVIEW
+    to: RUNNING
+    trigger: supervisor_rework
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  T16:
+    kind: transition
+    description: Supervisor FAIL closes the active assignment and marks the Task FAILED
+    entity: Task
+    from: REVIEW
+    to: FAILED
+    trigger: supervisor_fail
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  T17:
+    kind: transition
+    description: An open exact incident leaves the Task in REVIEW when ACCEPT is rejected
+    entity: Task
+    from: REVIEW
+    to: REVIEW
+    trigger: accept_open_incident
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/db.ts
+        symbol: getOpenDispatchTerminalIntegrityIncident
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+
+  T6:
+    kind: transition
+    description: A bounded RELEASED or explicitly recorded RECOVERING settlement outcome yields a Worker Claim that awaits Supervisor review
+    entity: GovernedAttempt
+    from: "LEASE_RELEASED | TERMINAL_RECOVERING"
+    to: CLAIM_REVIEW
+    trigger: settlement_consumed_then_claim_recorded
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: happy path → session/gate/dispatch/terminal + claim 摘要"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: settlement precedes Worker Claim insertion"
+
+  T7:
+    kind: transition
+    description: Reconciliation remains recovery-required while terminal evidence is still indeterminate
+    entity: GovernedAttempt
+    from: RECOVERING
+    to: RECOVERING
+    trigger: reconcile_still_indeterminate
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+      - path: src/dispatch/reconcile.ts
+        symbol: decideRecovery
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+
+  G1:
+    kind: safeguard
+    description: Caller identity comes from the complete trusted DSH execution context
+    safeguard_type: authentication
+    guarantee: An unresolvable caller session cannot enter Supervisor authorization or governed preparation
+    protects: [A1, D1]
+    failure_behavior: Return AUTHZ_DENIED before Runtime, Session, Lease, Decision, Execution, Dispatch, or Claim effects
+    code:
+      - path: src/index.ts
+        symbol: resolveTrustedToolSession
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
+
+  G2:
+    kind: safeguard
+    description: Caller-owned Supervisor binding and exact Territory scope gate
+    safeguard_type: authorization
+    guarantee: A caller without the exact active in-scope Supervisor binding cannot submit a Grant or enter the executor
+    protects: [A2, D2, A4]
+    failure_behavior: Return AUTHZ_DENIED and preserve zero governed artifacts
+    code:
+      - path: src/core/task-service.ts
+        symbol: resolveGovernedStartSupervisor
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 同一 DSH session 的多个 Supervisor 必须解析为 Territory 指定 binding"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
+
+  G3:
+    kind: safeguard
+    description: Capability enforceability remains separate from caller authorization
+    safeguard_type: authorization
+    guarantee: Only the non-empty effective intersection Grant ∩ Ceiling ∩ EnforceableSet may reach GRANTED plus ENFORCED and atomically prepare a governed Execution, Decision binding, Dispatch Intent, and executing Lease; coverage remains informational
+    protects: [D4, T1]
+    failure_behavior: Preserve existing denial cleanup without Runtime dispatch or Claim
+    code:
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/capability/resolver.ts
+        symbol: resolveEffectiveCapability
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: DENIED → zero execution（无 Execution/Dispatch 落库）"
+
+  G4:
+    kind: safeguard
+    description: Governed persistent and LEGACY_COMPAT are independent entries
+    safeguard_type: authorization
+    guarantee: Only a separate explicit legacy_opt_in request can enter one-shot execution; governed failure never selects it
+    protects: [E2, D0, A0]
+    failure_behavior: Return the governed failure and preserve the persistent recovery state
+    code:
+      - path: src/index.ts
+        symbol: kingdom_start_task_governed
+      - path: src/index.ts
+        symbol: kingdom_start_task
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "headless route contract: governed failure never suggests legacy fallback"
+
+  G5:
+    kind: safeguard
+    description: Capability ceiling setup is direct-Slash-only, validated, and auditable
+    safeguard_type: authorization
+    guarantee: Agent/GUI callers and malformed set/clear requests cannot configure the ceiling; a valid empty map or clear remains an auditable fail-closed ceiling fact rather than an execution authorization
+    protects: [A5, D5]
+    failure_behavior: Return CONFIG_DENIED before persistence and emit the audit event only after a valid Owner write
+    code:
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+      - path: src/core/owner-control.ts
+        symbol: requireOwnerControl
+    tests:
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: only direct Owner Control may configure a ceiling"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: malformed and non-boolean ceiling input is rejected"
+
+  G6:
+    kind: safeguard
+    description: Unproven external outcome has no automatic retry or fallback
+    safeguard_type: validation
+    guarantee: Missing or untrusted evidence remains RECOVERING and cannot create a new attempt, redispatch, release, or select one-shot
+    protects: [D7, X8]
+    failure_behavior: Return fail-closed recovery-required state and require evidence reconciliation
+    code:
+      - path: src/dispatch/reconcile.ts
+        symbol: decideRecovery
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 crash matrix: 各 Crash 点的恢复决策（不改 Task 治理、不重复执行、不伪造 terminal）"
+
+  G7:
+    kind: safeguard
+    description: Durable Dispatch Intent precedes the Runtime side effect
+    safeguard_type: atomicity
+    guarantee: RuntimeAdapter.dispatch is never called before Dispatch INTENDED is transactionally committed
+    protects: [T1, A6]
+    failure_behavior: Runtime identity or any TX-3 preparation failure rolls back every prepared row and event before Runtime dispatch; a committed Intent is preserved for recovery and never blindly repeated
+    code:
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Runtime identity failure happens before every preparation write"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Intent preparation failure rolls back Execution and Decision binding"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 TX-3: Lease progression failure rolls back Intent, Execution, and Decision binding"
+
+  G8:
+    kind: safeguard
+    description: Receipt, Correlation, and terminal evidence remain distinct
+    safeguard_type: validation
+    guarantee: A Dispatch Receipt proves acceptance only; the observed turn advances Dispatch RECEIVED to CORRELATED and Execution STARTING to RUNNING before trusted terminal settlement, including when turn and terminal first appear together
+    protects: [T3, D8, T8, D7, T4]
+    failure_behavior: Move or retain the attempt in RECOVERING rather than persisting false Terminal evidence
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchReceipt
+      - path: src/core/governed.ts
+        symbol: correlateRuntimeExecution
+      - path: src/core/governed.ts
+        symbol: recordTerminalEvidence
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+    tests:
+      - path: tests/m3s2-v4-domain.test.ts
+        symbol: "Domain: Receipt → Correlation → Terminal Evidence（TX-3R/TX-4）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 outcome 收敛：interrupted / completed 无 assistant → 不落终态（RECOVERING 语义）"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+
+  G11:
+    kind: safeguard
+    description: Independent direct Owner ceiling setup and Capability Gate consumption
+    safeguard_type: authorization
+    guarantee: Direct Owner Slash only updates the persisted ceiling fact; governed start does not invoke that administration path, and only the Capability Gate may consume the fact to authorize a prepared attempt
+    protects: [A5, D4]
+    failure_behavior: A missing, cleared, empty, or insufficient ceiling fails closed in the Capability Gate without Runtime inspection/dispatch; the missing-ceiling branch is DENIED + NOT_ATTEMPTED; Agent Tool and GUI/HTTP ceiling spellings remain zero-write denied
+    code:
+      - path: src/capability/admin.ts
+        symbol: setCapabilityCeiling
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/index.ts
+        symbol: kingdom_set_capability_ceiling
+    tests:
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: only direct Owner Control may configure a ceiling"
+      - path: tests/capability-ceiling-admin.test.ts
+        symbol: "setCapabilityCeiling: clear is an auditable fail-closed reset"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup"
+
+  G12:
+    kind: safeguard
+    description: Effective filesystem write is the upper bound for requested sandbox mode
+    safeguard_type: authorization
+    guarantee: A caller cannot turn Grant/Ceiling/Runtime without filesystem.write into workspace-write; non-write-required attempts are explicitly narrowed to read-only, and required-write gaps are denied before dispatch
+    protects: [D4, D9, T1]
+    failure_behavior: Record REQUIRED_WRITE_NOT_EFFECTIVE or REQUIRED_WRITE_NOT_REQUESTED as DENIED with zero dispatch, or persist BOUNDED_SANDBOX_NARROWING in the granted Decision and typed evidence when read-only narrowing is safe
+    code:
+      - path: src/capability/resolver.ts
+        symbol: resolveEffectiveCapability
+      - path: src/capability/service.ts
+        symbol: selectSandboxMode
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/capability/dsh-enforcement.ts
+        symbol: materializeDshEnforcement
+    tests:
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 resolver: 无自授（grant 缺）/ 超 ceiling / ceiling 缺失"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: required write 缺失于 Grant/Ceiling/Runtime → DENIED + zero dispatch"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 gate: coverage PARTIAL 仅作信息字段 → 无 write requirement 时有界收窄为 read-only"
+
+  G13:
+    kind: safeguard
+    description: Current Session policy state and context-bound enforcement seams must prove materialization
+    safeguard_type: validation
+    guarantee: DSH capabilities require the current context to expose restrict/guard as well as schemas; direct sandbox/approval setters must append exact requested events and match effective state, while an optional repeated valid preset may use a no-new-event idempotent path only when sandbox/approval/preset state all match
+    protects: [D4, D9]
+    failure_behavior: Schemas without restrict/guard, a missing/no-op/mismatched direct setter, or a mismatched preset yields DENIED before dispatch; cleanup failures remain unconfirmed and preserve recovery, while the current canonical route does not pass presetId and makes no real DSH preset-runtime claim
+    code:
+      - path: src/adapter/dsh-backend.ts
+        symbol: capabilities
+      - path: src/capability/dsh-enforcement.ts
+        symbol: readEnforceableSet
+      - path: src/capability/dsh-enforcement.ts
+        symbol: materializeDshEnforcement
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+    tests:
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 adapter: capabilities/preflight/materialize/cleanup 全接通"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "S4 enforcement: read-only no-op sandbox setter 即使已有 approval 事件也不得 ENFORCED"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "R3 seam: schemas 有 pwsh 但没有 restrict/guard → capabilities 不声称可 enforce"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "R3 enforcement: 有效 preset 重复选择无新增事件时按幂等状态核验"
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "R3 gate: 真实 DSH adapter disposer 抛错 → cleanup 未确认且 Lease 保留 RECOVERING"
+
+  G14:
+    kind: safeguard
+    description: An Adapter-instance-private opaque Runtime trust fence carries the exact governed dispatch from pre-dispatch through cleanup and settlement
+    safeguard_type: compensation
+    guarantee: A successful Capability Gate returns the same EnforcementRequest object consumed by preflight and materialize; the issuing Adapter instance privately binds the fence to the exact lease, Session, Runtime dispatch ref, and monotonic generation so only the same request/context can reach one cleanup call, and the reservation remains held through a pending cleanup Promise until settlement/release
+    protects: [A11, A12, A7, A13, D14, T4, D10, A9]
+    failure_behavior: Cross-Adapter, cross-lease, cross-Session, unrecognized, tainted, stale, or generation-mismatched fences fail closed before the disposer; rejected, synchronously thrown, or aborted-at-entry maintenance reservations taint before cleanup error propagation; failed gates return no teardown request, unmanaged ingress during a pending cleanup window is prevented or queued, and unconfirmed cleanup preserves the terminal Claim/REVIEW path with Lease RECOVERING. After terminal persistence, a mismatch is handled by the Core incident seam: terminal Dispatch/Execution remain unchanged, SETTLING/RELEASING Lease becomes RECOVERING, the bounded redacted incident is idempotent, and RELEASED history is escalated without rollback.
+    code:
+      - path: src/adapter/contract.ts
+        symbol: RuntimeTrustFence
+      - path: src/adapter/contract.ts
+        symbol: RuntimeTrustFenceExpectation
+      - path: src/adapter/dsh-backend.ts
+        symbol: openTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: bindTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: checkTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: releaseTrustFence
+      - path: src/adapter/dsh-backend.ts
+        symbol: cleanupWithFence
+      - path: src/capability/service.ts
+        symbol: runCapabilityGate
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/m3s2-v4-s4-capability.test.ts
+        symbol: "R3 service: GRANTED 结果交回同一份实际 materialized EnforcementRequest"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: trusted terminal 后 exactly-once cleanup 使用同一 request/context"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14 reservation: cleanup receipt 返回后至 release 前隔离 unmanaged followup，release 后才出队"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "R5 G14 pending cleanup Promise: reservation 期间并发 unmanaged ingress 被排队隔离"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 G14 exact fence binding: cross-adapter/cross-lease/cross-session 均 fail-closed 且不释放"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 settlement target binding: cross-lease/cross-session explicit settlement keeps target Lease RECOVERING"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 terminal evidence 后的 fence check 发现 late foreign 时不进入 cleanup"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "R6 G14/G17 maintenance reservation failure taints fence before cleanup error propagation"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 settlement cross-Adapter/cross-Lease/cross-Session all fail closed on a complete terminal fixture"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 RELEASED mismatch escalates without rolling back immutable terminal history"
+
+  G15:
+    kind: safeguard
+    description: Cleanup settlement is evidence-bearing and fail-closed
+    safeguard_type: compensation
+    guarantee: Only a bounded CONFIRMED cleanup receipt can move Lease SETTLING/RELEASING to RELEASED; false, throw, or missing evidence keeps RECOVERING and blocks Session reuse/new Dispatch
+    protects: [D10, A9, C2, T10, T11]
+    failure_behavior: Persist a bounded recovery reason, retain the trusted terminal Claim and Task REVIEW, omit SESSION_STOPPED, and require reconciliation before reuse
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: cleanupAfterTrustedTerminal
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+      - path: src/adapter/dsh-backend.ts
+        symbol: releaseTrustFence
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: terminal 不可信时不提前 cleanup"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "governed runner: trusted terminal 后 exactly-once cleanup 使用同一 request/context"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 settlement: false/throw/missing evidence 均保持 RECOVERING，只有 confirmed 才 RELEASED"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: trusted terminal cleanup failure 保留 Claim/REVIEW 并进入 Lease RECOVERING"
+
+  G16:
+    kind: safeguard
+    description: Pre-session active Lease and affinity identity guard
+    safeguard_type: concurrency
+    guarantee: Before getLiveHandle, resumeSession, or createSession, the Worker current affinity and Runtime identity are checked and every non-RELEASED matching Lease blocks reuse; RECOVERING cannot be bypassed by a missing live registry
+    protects: [D11, A4, X12]
+    failure_behavior: Return a bounded recovery-required rejection with zero Session create/resume/reuse, zero new Lease, and zero Dispatch
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: guardBeforeWorkerSessionSideEffect
+      - path: src/adapter/session-store.ts
+        symbol: ensureWorkerSession
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "GI-CAP-002: cleanup false 后 RECOVERING guard 在 Session resume/create 前拒绝第二次运行"
+
+  G17:
+    kind: safeguard
+    description: Foreign runtime user activity or unmanaged ingress taints the same exact fence; pending cleanup ingress remains isolated and post-TX-4 mismatches use the terminal-integrity incident seam
+    safeguard_type: validation
+    guarantee: foreignUserMessages, exact Adapter/lease/Session expectations, and fence-prefix changes are checked before correlation, terminal persistence, cleanup disposer, and release; while a cleanup Promise is pending the same reservation prevents or queues unmanaged ingress, and a pre-terminal mismatch or taint leaves only the original Receipt observable while Dispatch, Execution, and Lease become RECOVERING. After terminal persistence, exact relation/fence mismatch keeps terminal Dispatch/Execution immutable, recovers a non-released Lease, and appends one bounded redacted incident; RELEASED is never rolled back.
+    protects: [A12, D7, A7, D14, C1]
+    failure_behavior: Preserve receipt/observations, omit terminal evidence and Claim/cleanup disposer, taint the fence, and atomically enter RECOVERING without redispatch or Session reuse for pre-terminal/runtime-ingress failures; a pending cleanup Promise cannot release the reservation or trust a concurrent unmanaged message. If an explicit cross-target settlement call arrives after terminal ledger persistence, revalidate the exact relation in one transaction, recover only the non-released Lease, append or replay the incident without changing terminal rows, and keep RELEASED history immutable.
+    code:
+      - path: src/dispatch/evidence.ts
+        symbol: reconstructDispatchEvidence
+      - path: src/adapter/dsh-backend.ts
+        symbol: inspectFence
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "live path: foreign user message 即使伴随 completed terminal 也只能 RECOVERING，不 cleanup/release"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14/G17 active Lease owned-ref 前 foreign activity 不可被 ref slicing 隐藏"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "G14 reservation: cleanup receipt 返回后至 release 前隔离 unmanaged followup，release 后才出队"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "R5 G14 pending cleanup Promise: reservation 期间并发 unmanaged ingress 被排队隔离"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、release 上均 fail-closed"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 G14 exact fence binding: cross-adapter/cross-lease/cross-session 均 fail-closed 且不释放"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R5 settlement target binding: cross-lease/cross-session explicit settlement keeps target Lease RECOVERING"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "R6 G14/G17 maintenance reservation failure taints fence before cleanup error propagation"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 post-TX-4 incident uses full relation, recovers only Lease, and replays idempotently"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  G18:
+    kind: safeguard
+    description: Supervisor ACCEPT is gated by the exact current Task/Claim incident relation, while REWORK and FAIL remain explicit alternatives
+    safeguard_type: atomicity
+    guarantee: Within one write transaction, the ACCEPT path re-reads Task and latest Claim, checks exact Dispatch/Task/attempt incident state, and either writes DONE plus TASK_ACCEPTED or returns CLAIM_INTEGRITY_BLOCKED with no DONE, TASK_ACCEPTED, or assignment-close write
+    protects: [D17, A15, T14, T17]
+    failure_behavior: Keep Task REVIEW and the active assignment unchanged when an exact open incident is found; do not let unrelated or foreign-target incident events block the current Claim
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/task-service.ts
+        symbol: openIntegrityIncidentForClaim
+      - path: src/core/db.ts
+        symbol: getOpenDispatchTerminalIntegrityIncident
+    tests:
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+      - path: tests/r8-tx4-integrity.test.ts
+        symbol: "R8 REWORK and FAIL remain available when an incident blocks ACCEPT"
+
+  G19:
+    kind: safeguard
+    description: Canonical product Runner context binds settlement to one exact Task/Execution/Lease/Dispatch relation
+    safeguard_type: validation
+    guarantee: The product factory derives all context identifiers from a committed exact Dispatch relation; every acquire/read/receipt/terminal/settle operation consumes the same opaque handle and a sequence issued from module-private immutable version metadata, rereads the exact rows, treats the public sequence only as diagnostic, and rejects copied, cross-target, stale, duplicate, out-of-order, RECOVERING, or RELEASED use
+    protects: [A16, D15, D19, A10]
+    failure_behavior: Poison the product context and return a bounded RunnerContext error before Runtime settlement or Claim insertion; RuntimeTrustFence remains runtime evidence only and cannot mint a canonical context
+    code:
+      - path: src/core/governed.ts
+        symbol: createRunnerContextPort
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort
+      - path: src/core/governed.ts
+        symbol: RunnerContextPort.settle
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 RunnerContext happy path consumes one handle through acquire/receipt/terminal/settle"
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 copied/foreign/stale handle and version fail closed before product action"
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 wrong order, duplicate token, and recovery/released contexts cannot be reused"
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 public sequence tampering cannot mint a negative next version"
+      - path: tests/r11-runner-context.test.ts
+        symbol: "R11 wrong Task/attempt/Lease/Session and non-governed composite relations fail closed"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: settlement precedes Worker Claim insertion"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: incident write failure blocks Claim insertion"
+
+  G20:
+    kind: safeguard
+    description: Normal apply owns no RunnerContext broker epoch; an explicit public run-scoped lifecycle alone owns one transport epoch over one exact Product port, including a strict serialized cross-realm connector
+    safeguard_type: validation
+    guarantee: Every dispatch acquires its own local canonical Port. Only a caller-created active lifecycle may consume one immutable Port/ticket registration with FIFO single in-flight requests; normal apply never consumes that slot. The root connector accepts only the exact environment or environment-plus-descriptor allowlist, rechecks the Product-owned descriptor binding, then uses HMAC authentication, bounded NDJSON, exact replay caching, revision checks, and allowlisted state-only DTOs to prevent transport input from becoming governance authority
+    protects: [A17, D20, A18, T3, A16]
+    failure_behavior: Without an explicit lifecycle, continue with the local Port and no transport epoch. With one, reject extra-field, tampered, stale, foreign, or missing bootstrap, bad authentication, stale/future/out-of-order revision, or mismatched replay before any port action; revoke that explicit epoch on protocol violation or disconnect, keep correlation/terminal/settlement Product-internal, and hand explicit-registration failure to three-ledger RECOVERING without Runtime dispatch
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: createRunnerContextBrokerLaunch
+      - path: src/runner-context-broker.ts
+        symbol: connectRunnerContextBroker
+      - path: src/runner-context-broker.ts
+        symbol: resolveConnectorTarget
+      - path: src/runner-context-broker.ts
+        symbol: readProductDescriptor
+      - path: src/index.ts
+        symbol: connectRunnerContextBroker
+      - path: src/index.ts
+        symbol: apply
+      - path: src/runner-context-broker.ts
+        symbol: registerRunnerContextBrokerContext
+      - path: src/runner-context-broker.ts
+        symbol: wireRequestResponse
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 public broker exposes only bootstrap/connect/close and bounded no-ID view"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 wire auth, NDJSON bounds, timeout, half-close, and control data fail closed"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 exact request replay is cached, mismatched replay/stale revision/foreign ticket do zero Product action"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 forbidden DTO canaries, copied ticket, and second authenticated connection are rejected"
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R20 serialized cross-realm consumer connects to the existing Product broker and rejects tamper/stale/foreign bootstrap"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "R18 TX-3 broker registration failure recovers all three ledgers before Runtime dispatch"
+
+  G9:
+    kind: safeguard
+    description: Existing persistent Execution exclusion guard
+    safeguard_type: concurrency
+    guarantee: Any latest nonterminal GOVERNED_PERSISTENT Execution excludes a new attempt before Runtime, Session, Lease, or ledger effects
+    protects: [D6, X7]
+    failure_behavior: Return EXISTING_EXECUTION_UNSETTLED or EXISTING_EXECUTION_RECOVERING and leave Task and all ledger counts unchanged
+    code:
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: unsettled persistent Execution blocks before Runtime, Session, Lease, or Dispatch effects"
+
+  G10:
+    kind: safeguard
+    description: Three-ledger recovery is atomic and idempotent
+    safeguard_type: atomicity
+    guarantee: Dispatch, Lease, Execution, and recovery events commit together for ambiguity or post-commit exception; RECOVERING never mutates Task, redispatches, or releases the Lease
+    protects: [C1, X8]
+    failure_behavior: Roll back all writes on any validation/update failure; repeated recovery is zero-write and zero-event
+    code:
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: terminal poll exhaustion atomically returns all three current RECOVERING rows"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 recovery seam rolls back Dispatch and Lease when Execution recovery fails"
+      - path: tests/m3s2-v4-s5-dispatch.test.ts
+        symbol: "S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING"
+
+  X1:
+    kind: outcome
+    description: Missing or unresolvable caller principal is rejected
+    result: AUTHZ_DENIED with no governed preparation
+
+  X2:
+    kind: outcome
+    description: Caller role or Territory scope is rejected
+    result: AUTHZ_DENIED with no governed preparation
+
+  X3:
+    kind: outcome
+    description: Authenticated Supervisor supplied malformed Grant JSON
+    result: INPUT_DENIED with no governed preparation
+
+  X4:
+    kind: outcome
+    description: Capability governance denies the authorized request
+    result: CAPABILITY_DENIED with existing zero-execution cleanup and no Runtime dispatch or Claim
+
+  X5:
+    kind: outcome
+    description: Trusted terminal evidence yields a Worker Claim awaiting Supervisor review
+    result: Task is REVIEW; Runtime terminal or Worker Claim alone is not DONE; SESSION_STOPPED is only the emitted event label and the persistent Runtime Session is not stopped
+
+  X6:
+    kind: outcome
+    description: Capability ceiling setup is rejected
+    result: CONFIG_DENIED or INPUT_DENIED with no ceiling or audit-event write; governed start is a separate entry
+
+  X7:
+    kind: outcome
+    description: Existing persistent Execution is unsettled
+    result: Denied before Runtime, Session, Lease, Decision, Execution, or Dispatch effects; Task and ledgers remain unchanged
+
+  X12:
+    kind: outcome
+    description: Worker Session reuse is blocked by an active or recovering Lease guard
+    result: Return recovery-required without live handle lookup, Session resume/create, new Lease, or Dispatch; reconcile the existing Lease before retry
+
+  X13:
+    kind: outcome
+    description: A post-TX-4 terminal integrity incident keeps the Claim reviewable but prevents release or Session reuse
+    result: Preserve terminal Dispatch/Execution and Claim/REVIEW; move SETTLING/RELEASING Lease to RECOVERING with one bounded redacted incident, or retain RELEASED history while escalating a late mismatch
+
+  X14:
+    kind: outcome
+    description: Supervisor explicitly chooses REWORK or FAIL for the Claim
+    result: Apply the selected governance decision; the open terminal-integrity incident does not silently convert REWORK or FAIL into ACCEPT denial
+
+  X15:
+    kind: outcome
+    description: The exact Claim is accepted after the incident-free same-transaction gate
+    result: Task becomes DONE, active assignment closes, and TASK_ACCEPTED records the Claim as organization fact
+
+  X16:
+    kind: outcome
+    description: ACCEPT is blocked by the exact open terminal-integrity incident
+    result: Return CLAIM_INTEGRITY_BLOCKED with zero TASK_ACCEPTED, zero DONE transition, and zero assignment closure
+
+  X11:
+    kind: outcome
+    description: Trusted terminal Claim remains recovery-required because cleanup is not confirmed
+    result: Preserve Claim and Task REVIEW with Lease RECOVERING; omit SESSION_STOPPED and block Session reuse and new Dispatch until reconciliation
+
+  X8:
+    kind: outcome
+    description: Runtime outcome remains recovery-required
+    result: Dispatch, Lease, and Execution are RECOVERING; Task is unchanged; no redispatch, release, new attempt, or fake terminal
+
+  X9:
+    kind: outcome
+    description: Capability ceiling fact is updated or cleared through direct Owner Slash
+    result: Persisted ceiling and audit event reflect the validated request; subsequent governed execution remains subject to the independent Capability Gate
+
+  X10:
+    kind: outcome
+    description: Legacy Tool invocation omitted explicit compatibility opt-in
+    result: LEGACY_COMPAT_REQUIRED with zero one-shot execution and no fallback from governed persistent

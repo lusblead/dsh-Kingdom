@@ -8,3 +8,7 @@ lib/
 .smoke/
 .p3-smoke/
 internal/
+.agent/
+.context-relay/
+.local/
+lib-e2e/

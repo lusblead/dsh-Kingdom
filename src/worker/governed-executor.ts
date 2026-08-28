@@ -9,11 +9,11 @@
  * legacy 路径继续 `LEGACY_COMPAT`（§34）。
  */
 import type { KingdomStore } from '../core/db.js'
-import type { RuntimeAdapter, SessionHandle } from '../adapter/contract.js'
+import type { EnforcementRequest, RuntimeAdapter, RuntimeTrustFence, RuntimeTrustFenceExpectation, SessionHandle } from '../adapter/contract.js'
 import { ensureWorkerSession, type EnsureWorkerSessionResult } from '../adapter/session-store.js'
 import { runCapabilityGate } from '../capability/service.js'
 import type { DshEnforcementContext } from '../capability/dsh-enforcement.js'
-import { runGovernedDispatch } from '../dispatch/service.js'
+import { MAX_CLEANUP_EVIDENCE_LENGTH, runGovernedDispatch, type CleanupReceipt } from '../dispatch/service.js'
 import { buildWorkerPrompt, type WorkerContext } from './executor.js'
 import type { GrantMap } from '../capability/resolver.js'
 import { resolveGovernedWorkerRuntime } from './executor-factory.js'
@@ -54,6 +54,10 @@ export type GovernedTaskResult =
       sessionRef: string
       created: boolean
       summary: string
+      /** Trusted terminal 后 exactly-once enforcement teardown 的 bounded receipt。 */
+      cleanupReceipt: CleanupReceipt
+      /** Same opaque fence consumed by dispatch and settlement. */
+      trustFence: RuntimeTrustFence
       /**
        * Owner V0.8 FINAL RELEASE BLOCKER：已由 terminal 证据验证的终态 outcome。
        * 工具层据此收敛 Claim outcome（COMPLETED/FAILED/ABORTED），**禁止 hardcode COMPLETED**。
@@ -61,6 +65,155 @@ export type GovernedTaskResult =
       terminalOutcome: 'COMPLETED' | 'FAILED' | 'ABORTED'
     }
   | { ok: false; reason: string; deniedDecisionId?: string; sessionRef?: string }
+
+const MAX_CLEANUP_REASON_LENGTH = 256
+
+function boundedCleanupReason(value: string): string {
+  const text = value.trim()
+  return text.length <= MAX_CLEANUP_REASON_LENGTH ? text : `${text.slice(0, MAX_CLEANUP_REASON_LENGTH - 1)}…`
+}
+
+function boundedCleanupEvidence(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const evidence = value.trim()
+  if (evidence.length === 0 || evidence.length > MAX_CLEANUP_EVIDENCE_LENGTH) return null
+  return value
+}
+
+function cleanupReceiptFromAdapterResult(result: unknown): CleanupReceipt {
+  if (!result || typeof result !== 'object') {
+    return {
+      status: 'MISSING_EVIDENCE',
+      evidenceJson: null,
+      reason: 'adapter cleanup returned no result',
+    }
+  }
+  const candidate = result as { ok?: unknown; evidenceJson?: unknown }
+  const evidenceJson = boundedCleanupEvidence(candidate.evidenceJson)
+  if (candidate.ok === true && evidenceJson !== null) {
+    return {
+      status: 'CONFIRMED',
+      evidenceJson,
+      reason: 'adapter cleanup confirmed with bounded evidence',
+    }
+  }
+  if (candidate.ok === false) {
+    return {
+      status: 'RETURNED_FALSE',
+      evidenceJson,
+      reason: 'adapter cleanup returned ok=false',
+    }
+  }
+  return {
+    status: 'MISSING_EVIDENCE',
+    evidenceJson,
+    reason: candidate.ok === true
+      ? 'adapter cleanup returned ok=true without bounded evidence'
+      : 'adapter cleanup result did not contain a trusted ok flag',
+  }
+}
+
+/**
+ * Consume the exact materialized request once, and never let teardown failure
+ * erase an already trusted terminal/Claim result.
+ */
+async function cleanupAfterTrustedTerminal(
+  adapter: RuntimeAdapter,
+  request: EnforcementRequest | null,
+  context: DshEnforcementContext,
+  fence: RuntimeTrustFence,
+  expectation: RuntimeTrustFenceExpectation,
+): Promise<CleanupReceipt> {
+  if (request === null) {
+    return {
+      status: 'MISSING_EVIDENCE',
+      evidenceJson: null,
+      reason: 'Capability Gate did not return the exact materialized EnforcementRequest',
+    }
+  }
+  try {
+    return cleanupReceiptFromAdapterResult(await adapter.cleanup(request, context, fence, expectation))
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      status: 'THREW',
+      evidenceJson: null,
+      reason: boundedCleanupReason(`adapter cleanup threw: ${detail}`),
+    }
+  }
+}
+
+/**
+ * Guard every persistent Worker Session side effect with the current affinity
+ * and active Lease ledger. This intentionally runs before
+ * ensureWorkerSession(), whose first observable action may be getLiveHandle,
+ * resumeSession, or createSession. A RECOVERING/SETTLING Lease is still an
+ * active Lease for this purpose; reconciliation is the only release gate.
+ */
+function guardBeforeWorkerSessionSideEffect(
+  store: KingdomStore,
+  adapter: RuntimeAdapter,
+  input: { kingdomId: string; workerBindingId: string },
+): { ok: true } | { ok: false; reason: string } {
+  let identity: { runtimeType: string; runtimeInstanceRef: string }
+  try {
+    identity = adapter.identify()
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      reason: `Worker Runtime identity 无法确认；未访问 Session/Lease side effect: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  if (
+    identity.runtimeType.trim() === ''
+    || identity.runtimeInstanceRef.trim() === ''
+    || identity.runtimeType !== adapter.runtimeType
+  ) {
+    return { ok: false, reason: 'Worker Runtime identity 缺失或与 Adapter 不一致；未访问 Session/Lease side effect' }
+  }
+
+  const currentAffinity = store.getCurrentAffinityForWorker(input.kingdomId, input.workerBindingId)
+  if (currentAffinity) {
+    if (
+      currentAffinity.runtime_type !== identity.runtimeType
+      || currentAffinity.runtime_instance_ref !== identity.runtimeInstanceRef
+    ) {
+      return {
+        ok: false,
+        reason: `Worker current affinity 的 Runtime identity 与 Adapter 不一致（session=${currentAffinity.session_ref}）；未访问 Session/Lease side effect`,
+      }
+    }
+    const activeLease = store.getActiveLeaseForSession({
+      runtimeType: currentAffinity.runtime_type,
+      runtimeInstanceRef: currentAffinity.runtime_instance_ref,
+      sessionRef: currentAffinity.session_ref,
+    })
+    if (activeLease) {
+      return {
+        ok: false,
+        reason: `Session ${currentAffinity.session_ref} 已有 active Lease（${activeLease.lease_id}，${activeLease.state}）；未 reconcile 前禁 Session reuse/create/resume 与新 Dispatch（G11）`,
+      }
+    }
+  }
+
+  // Fail closed if a corrupt/partially rebuilt projection left a lease for the
+  // Worker without a current affinity row. This read is still before any
+  // Runtime session operation and avoids creating a second session around a
+  // stale recovery record.
+  const orphanedWorkerLease = store.listLeases(input.kingdomId).find(lease =>
+    lease.worker_binding_id === input.workerBindingId
+    && lease.runtime_type === identity.runtimeType
+    && lease.runtime_instance_ref === identity.runtimeInstanceRef
+    && lease.state !== 'RELEASED',
+  )
+  if (orphanedWorkerLease) {
+    return {
+      ok: false,
+      reason: `Worker ${input.workerBindingId} 已有 active Lease（${orphanedWorkerLease.lease_id}，${orphanedWorkerLease.state}）；未 reconcile 前禁 Session reuse/create/resume 与新 Dispatch`,
+    }
+  }
+  return { ok: true }
+}
 
 /** 提取 Worker 最终消息文本（真实 DSH `assistant/message` shape：message.content[{type:'text',text}]）。 */
 function lastAssistantMessage(session: unknown): string {
@@ -102,6 +255,10 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   }
 
   // 1. Persistent Worker Session（create / resume 同一 session_ref；provider/model 显式来自 Worker 执行配置）
+  //    G11/GI-CAP-002：active/recovery Lease guard 必须在 getLiveHandle、resume、
+  //    create 之前，否则 live registry 丢失时会先产生 Runtime side effect 再被拒绝。
+  const sessionGuard = guardBeforeWorkerSessionSideEffect(store, adapter, { kingdomId, workerBindingId })
+  if (!sessionGuard.ok) return { ok: false, reason: sessionGuard.reason }
   let session: EnsureWorkerSessionResult
   try {
     session = await ensureWorkerSession(store, adapter, {
@@ -155,6 +312,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     payloadHash: `sha256:${text.length}`,
     pollIntervalMs: input.pollIntervalMs,
     maxPolls: input.maxPolls,
+    cleanup: (fence, expectation) => cleanupAfterTrustedTerminal(adapter, gate.enforcementRequest, context, fence, expectation),
   })
 
   if (!run.terminal) {
@@ -162,7 +320,13 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   }
 
   // 4. Claim 摘要：terminal 后 Worker 最终消息（Claim ≠ Fact；Task 仍走 REVIEW）。
-  //    仅提取真实 assistant 文本；无文本 → 诚实回退占位（不得伪造"任务完成"类摘要）。
+  //    Cleanup 已由 runGovernedDispatch 在同一 trust fence 下 exactly once
+  //    执行；这里仅转交 receipt，不再二次调用 disposer。
+  const cleanupReceipt = run.cleanupReceipt ?? {
+    status: 'MISSING_EVIDENCE' as const,
+    evidenceJson: null,
+    reason: 'governed dispatch returned no cleanup receipt',
+  }
   const summary = lastAssistantMessage(session.handle.session) || '(无最终消息文本；以 terminal 证据为准)'
   //    terminalOutcome = 已由 terminal 证据验证的终态（execution 终态由 recordTerminalEvidence 落账）。
   const terminalOutcome = run.terminal.execution.state as 'COMPLETED' | 'FAILED' | 'ABORTED'
@@ -174,6 +338,8 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     sessionRef: session.handle.refs.sessionRef,
     created: session.created,
     summary,
+    cleanupReceipt,
+    trustFence: run.trustFence,
     terminalOutcome,
   }
 }

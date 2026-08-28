@@ -1,0 +1,568 @@
+version: 1
+feature_id: "owner-binding-natural-language"
+title: "Natural-language Owner binding intent Draft"
+status: "proposed"
+
+characteristics:
+  cross_component: true
+  asynchronous: false
+  persisted_state: true
+  external_dependencies: false
+  retry_or_compensation: false
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: Bounded natural-language role request with invocation context
+    trigger: Agent/local caller submits text and read-only context
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntent
+      - path: src/index.ts
+        symbol: kingdom_draft_owner_binding_intent
+        role: Primary-owned integration handoff
+  E2:
+    kind: entry
+    description: Product kingdom_bind_role/session Tool returns a structured zero-write OWNER_CONTROL_REQUIRED handoff
+    trigger: kingdom_bind_role or kingdom_bind_session forwards only role_type, binding_id, and session_id after rejecting Agent write authority; helper-only Territory resolution is not a Product Tool
+    code:
+      - path: src/index.ts
+        symbol: kingdom_bind_role
+        role: Primary-owned integration handoff
+      - path: src/index.ts
+        symbol: kingdom_bind_session
+        role: Primary-owned integration handoff
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: draftOwnerBindingIntentFromRejectedWrite
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "registered NL/Draft tools are zero-write, use classification, and emit canonical steps"
+  E3:
+    kind: entry
+    description: Owner directly confirms a canonical role.bind or role.session Slash after the Draft handoff
+    trigger: Direct /kingdom role.bind or role.session with optional session_id
+    code:
+      - path: src/index.ts
+        symbol: validateDirectSessionPayload
+        role: Primary-owned direct Owner ingress gate
+      - path: src/index.ts
+        symbol: ownerWrite
+        role: Primary-owned direct Owner transaction boundary
+  D16:
+    kind: decision
+    description: After strict JSON envelope validation, direct role.session rejects Owner projection before xor/type/live-session proof
+    condition: parseJsonEnvelope first rejects illegal JSON, duplicate fields, and unrecognized fields; only for a valid envelope does explicit role_type=OWNER or a current-kingdom binding_id resolving to OWNER return OWNER_CONTROL_REQUIRED before role_type/binding_id xor, field-type, and live-session proof; no event or binding changes
+    code:
+      - path: src/index.ts
+        symbol: "case 'role.session'"
+        role: Primary-owned direct Owner ingress gate
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "direct role.session validates envelope grammar before Owner gate and rejects before live-session proof with zero writes"
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  D11:
+    kind: decision
+    description: Exact binding branch performs the Owner gate before shared request/target session proof
+    condition: For kingdom_bind_session or role.session with binding_id present, an explicit OWNER hint or an exact binding probe resolving OWNER returns OWNER_ROLE_DIRECT_ONLY; unresolved/non-Owner candidates continue without remaining binding validation
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntentFromRejectedWrite
+      - path: src/core/owner-binding-intent.ts
+        symbol: parseStructuredRoleType
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "structured OWNER gate precedes request and target session proof across generic and exact branches"
+  D9:
+    kind: decision
+    description: Exact and generic structured branches share request/target session identity proof after the Owner gate
+    condition: request.session_id must be absent/null or match target_session_ref, and target_session_ref must carry explicit trusted ACTIVE proof; foreign, unresolved, expired, aborted, unproven, or multiple identity results fail closed before remaining binding/role/Territory validation
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveRequestedTargetSession
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromExactBinding
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: target_session_classification
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "trusted Tool session resolver requires the complete DSH identity conjunction"
+  D8:
+    kind: decision
+    description: The Product Tool handoff selects exact binding-id or generic role_type/Territory processing; Territory resolution remains helper-only
+    condition: operation is kingdom_bind_session or role.session and request.binding_id is present for the exact branch; when absent, continue with the existing generic role_type/Territory decisions without exact binding resolution
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntentFromRejectedWrite
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "kingdom_bind_session binding_id-only request resolves exact binding into canonical role.session"
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "kingdom_bind_session Tool accepts binding_id-only and returns zero-write canonical role.session Draft"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "OWNER_CONTROL_REQUIRED structured rejection helper 生成 normalized Draft 且保持 zero-write"
+  D10:
+    kind: decision
+    description: After session proof, exact binding_id and optional role hint pass remaining local eligibility validation
+    condition: request.binding_id matches exactly one active binding, is local, and any role_type hint agrees; none, inactive, multiple, foreign, unsafe, or mismatched bindings fail closed only after the shared identity proof
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveExactBindingForSession
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "kingdom_bind_session binding_id-only request resolves exact binding into canonical role.session"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "binding_id-only lookup keeps no-solution, multiple, foreign, expired, and aborted paths zero-write"
+  D13:
+    kind: decision
+    description: Generic product Tool applies the explicit OWNER gate before other role validation
+    condition: In the no-binding_id branch, a role_type mapping to OWNER returns OWNER_ROLE_DIRECT_ONLY immediately; non-Owner or invalid role hints continue to shared request/target identity proof, with invalid role_type deferred
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntentFromRejectedWrite
+      - path: src/core/owner-binding-intent.ts
+        symbol: parseStructuredRoleType
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "OWNER_CONTROL_REQUIRED structured rejection helper 生成 normalized Draft 且保持 zero-write"
+  D14:
+    kind: decision
+    description: Generic product Tool uses the same request/target session identity proof as exact binding-id requests
+    condition: request.session_id is absent/null or equals context.target_session_ref and target_session_ref is explicitly proven; mismatch/foreign/unresolved/expired/unproven results return the shared session ambiguity before role/Territory validation
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntentFromRejectedWrite
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "registered NL/Draft tools are zero-write, use classification, and emit canonical steps"
+  D15:
+    kind: decision
+    description: Generic role and helper-only Territory validation runs only after shared identity proof
+    condition: After request/target proof, missing or invalid role_type returns REJECTION_UNSUPPORTED; a valid non-Owner role then uses the helper-only Territory snapshot and remaining reusable-binding checks
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: parseStructuredRoleType
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromParsed
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "structured OWNER gate precedes request and target session proof across generic and exact branches"
+  D1:
+    kind: decision
+    description: Natural language matches an allowlisted role phrase
+    condition: Current/this/that session phrase and supported Chinese role alias match without trailing command text
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: parseNaturalLanguage
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "注入垃圾不会进入 canonical Slash，也不会产生 Owner Authority"
+  D2:
+    kind: decision
+    description: Generic/natural buildDraftFromParsed proves one active local exact target after the Owner precheck
+    condition: target_session_ref is present and exact, and only a trusted resolver proof of current initiator plus agents.get/session.get object identity, agent.id===session.id, running, and a non-aborted signal classifies it ACTIVE; all other classifications remain unresolved
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveTargetSession
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromParsed
+      - path: src/index.ts
+        symbol: resolveTrustedToolSession
+        role: Primary-owned DSH current-initiator and registry classification seam
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: target_session_classification
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "deprecated target_session_state 不能把任意非空 session ref 证明为 ACTIVE"
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "trusted Tool session resolver requires the complete DSH identity conjunction"
+  D3:
+    kind: decision
+    description: Natural-language buildDraftFromParsed sees parsed OWNER before target session proof
+    condition: The bounded natural-language path maps its parsed role to OWNER; return OWNER_ROLE_DIRECT_ONLY without session resolution. Structured Product Tool OWNER handling is represented by D13.
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntent
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromParsed
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Owner 角色自然语言只返回 direct-only 追问，不生成 Owner 绑定 Slash"
+  D4:
+    kind: decision
+    description: Generic Supervisor Territory is one active local match after target session proof
+    condition: Supervisor has a non-placeholder Territory query with one active local match; missing, foreign, unavailable, or multiple Territory matches fail closed
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveTerritory
+      - path: src/index.ts
+        symbol: kingdom_draft_owner_binding_intent
+        role: Primary-owned Territory snapshot handoff; must include supervisor_binding_id
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 缺 Territory 或 Territory 多匹配时只追问 AMBIGUOUS"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 唯一 Territory 生成 role.bind Draft，并保留已解析 Territory 目标"
+  D5:
+    kind: decision
+    description: The generic role_type/Territory path checks whether a reusable exact role binding exists
+    condition: Exactly one local active CHANCELLOR singleton or resolved Territory Supervisor binding is present; absence permits a generic role.bind Draft, but a forced role.session request without a reusable binding fails closed
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveExistingSingleton
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveTerritorySupervisorBinding
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "已有 singleton CHANCELLOR 只生成 role.session Draft，不重复 role.bind"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "已有 Territory supervisor_binding_id 时对 exact Supervisor binding 生成 role.session"
+  A1:
+    kind: action
+    description: Build role.session zero-write Draft for existing singleton
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: readyDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "已有 singleton CHANCELLOR 只生成 role.session Draft，不重复 role.bind"
+  A2:
+    kind: action
+    description: Build role.bind zero-write Draft for a new role
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: readyDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+  D6:
+    kind: decision
+    description: Supervisor needs the dependent Territory attachment step
+    condition: The resolved role is SUPERVISOR and no existing Territory supervisor binding can be reused
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: canonicalSteps
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
+  A3:
+    kind: action
+    description: Append the dependent territory.supervisor zero-write Draft step
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: territorySupervisorStep
+      - path: src/core/owner-binding-intent.ts
+        symbol: canonicalTerritorySupervisorSlash
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+  D7:
+    kind: decision
+    description: Direct role/session target passes live registry validation
+    condition: session_id is absent/null, or agents.get and sessions.get return the exact live objects with matching ids and idle/running status; missing or invalid proof fails closed
+    code:
+      - path: src/index.ts
+        symbol: validateDirectSessionPayload
+      - path: src/index.ts
+        symbol: validateLiveDirectSession
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "direct Owner session writes fail closed when the DSH registry seam is missing"
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "Supervisor Draft preserves exact territory binding and direct Slash validates live target session"
+  A4:
+    kind: action
+    description: Build a canonical role.session zero-write Draft from the exact binding_id after session proof; role_type is only an optional consistency hint
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromExactBinding
+      - path: src/core/owner-binding-intent.ts
+        symbol: readyExactRoleSessionDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "kingdom_bind_session binding_id-only request resolves exact binding into canonical role.session"
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "kingdom_bind_session Tool accepts binding_id-only and returns zero-write canonical role.session Draft"
+  A5:
+    kind: action
+    description: Execute the confirmed direct Owner write only after the Owner projection gate and live-session gate
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/index.ts
+        symbol: "case 'role.bind'"
+      - path: src/index.ts
+        symbol: "case 'role.session'"
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "Supervisor Draft preserves exact territory binding and direct Slash validates live target session"
+  T1:
+    kind: transition
+    description: Direct Owner role.bind commits an active RoleBinding row and event
+    entity: RoleBinding
+    from: ABSENT
+    to: ACTIVE
+    trigger: role_bind_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/core/binding.ts
+        symbol: bindRole
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "kingdom_bind_session Tool accepts binding_id-only and returns zero-write canonical role.session Draft"
+  T2:
+    kind: transition
+    description: Direct Owner role.session updates the persisted session reference on an active RoleBinding
+    entity: RoleBinding
+    from: ACTIVE
+    to: ACTIVE
+    trigger: role_session_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/core/binding.ts
+        symbol: rebindSession
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "Supervisor Draft preserves exact territory binding and direct Slash validates live target session"
+  T3:
+    kind: transition
+    description: Direct Owner territory.supervisor commits the persisted Territory supervisor reference and event
+    entity: Territory
+    from: UNSUPERVISED
+    to: SUPERVISED
+    trigger: territory_supervisor_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/core/territory.ts
+        symbol: setTerritorySupervisor
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "Supervisor Draft preserves exact territory binding and direct Slash validates live target session"
+  T4:
+    kind: transition
+    description: A direct Owner transaction exception is surfaced as a recovery-required marker instead of success, guessing, or retry
+    entity: OwnerBindingWrite
+    from: PERSISTED
+    to: RECOVERY_REQUIRED
+    trigger: uncertain_owner_commit
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+      - path: src/core/db.ts
+        symbol: withImmediateTransaction
+    tests:
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner transaction exception returns recovery marker without success or persisted state"
+  G1:
+    kind: safeguard
+    description: Pure zero-write module boundary
+    safeguard_type: authorization
+    guarantee: Draft construction cannot write DB/events/roles/Territories or mint capabilities
+    protects: [A1, A2, A3, A4, D10]
+    failure_behavior: The result remains in memory with write_effect ZERO_WRITE
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntent
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
+  G2:
+    kind: safeguard
+    description: Exact invocation target boundary
+    safeguard_type: validation
+    guarantee: Only explicit ACTIVE classification backed by current initiator plus agents.get/session.get object identity, agent.id===session.id, running, and a non-aborted signal can become the target; missing, foreign, expired, aborted, unproven, unclassified, or multiple sessions never become a binding target
+    protects: [D2, D9, A1, A2, A3, A4]
+    failure_behavior: Return AMBIGUOUS with a clarification question and no Slash
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveTargetSession
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: target_session_classification
+  G3:
+    kind: safeguard
+    description: Deterministic canonicalization and injection rejection
+    safeguard_type: validation
+    guarantee: Canonical Slash arguments contain only allowlisted aliases and validated context values
+    protects: [D1, D10, D11, D13, D14, A1, A2, A3, A4]
+    failure_behavior: Unsupported suffixes produce AMBIGUOUS and canonical_direct_slash null
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: canonicalDirectSlash
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "注入垃圾不会进入 canonical Slash，也不会产生 Owner Authority"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Draft stable JSON 对相同输入稳定且可安全解析"
+  G4:
+    kind: safeguard
+    description: Owner authority separation
+    safeguard_type: authorization
+    guarantee: Natural language and target session context never mint or imply Owner authority
+    protects: [D3, A1, A2, A3, A4]
+    failure_behavior: OWNER is direct-only; ready drafts require DIRECT_SLASH_CONFIRM_REQUIRED
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: DIRECT_SLASH_CONFIRM_REQUIRED
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Owner 角色自然语言只返回 direct-only 追问，不生成 Owner 绑定 Slash"
+  G5:
+    kind: safeguard
+    description: Direct-step failure stop boundary
+    safeguard_type: validation
+    guarantee: A failed canonical step never triggers Agent retry or compensation; execution remains a direct Owner responsibility
+    protects: [A1, A2, A3, X5]
+    failure_behavior: Stop the plan and require Owner-controlled manual recovery; the pure helper performs no write or retry
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: OwnerBindingStepPolicy
+      - path: src/core/owner-binding-intent.ts
+        symbol: territorySupervisorStep
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "OWNER_CONTROL_REQUIRED structured rejection helper 生成 normalized Draft 且保持 zero-write"
+  G6:
+    kind: safeguard
+    description: Direct Slash live-session fail-closed boundary
+    safeguard_type: validation
+    guarantee: A non-empty direct session_id cannot reach ownerWrite unless the public agents/sessions registry seam proves the exact live Agent/Session object identity, matching ids, and idle/running status; missing seams never use fixture or host-shape bypasses
+    protects: [D7, A5]
+    failure_behavior: Return INPUT_DENIED with bounded unresolved/FOREIGN/MULTIPLE/EXPIRED classification and perform no domain write
+    code:
+      - path: src/index.ts
+        symbol: validateLiveDirectSession
+      - path: src/index.ts
+        symbol: validateDirectSessionPayload
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "direct Owner session writes fail closed when the DSH registry seam is missing"
+      - path: tests/owner-control-plane.test.ts
+        symbol: "Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write"
+  X9:
+    kind: outcome
+    description: Structured role_type input remains unsupported after identity proof
+    result: REJECTION_UNSUPPORTED ambiguity, no operation, no canonical Slash, and zero write; exact/generic branches do not emit this before the shared request/target proof
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+  X10:
+    kind: outcome
+    description: Structured request session_id is foreign to the invocation target
+    result: SESSION_FOREIGN ambiguity, no operation, no canonical Slash, and zero write
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "registered NL/Draft tools are zero-write, use classification, and emit canonical steps"
+  X1:
+    kind: outcome
+    description: Ambiguous or unsafe natural-language intent
+    result: AMBIGUOUS question, no operation, no canonical Slash, and zero write
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "注入垃圾不会进入 canonical Slash，也不会产生 Owner Authority"
+  X2:
+    kind: outcome
+    description: Session context is missing, foreign, stale, multiple, or unproven
+    result: AMBIGUOUS session question, no operation, no canonical Slash, and zero write
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: target_session_classification
+  X3:
+    kind: outcome
+    description: Parsed OWNER role is direct-only
+    result: OWNER_ROLE_DIRECT_ONLY clarification; no Owner binding operation or Slash is generated
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: draftOwnerBindingIntent
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromParsed
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Owner 角色自然语言只返回 direct-only 追问，不生成 Owner 绑定 Slash"
+  X4:
+    kind: outcome
+    description: Supervisor Territory is unsafe or ambiguous
+    result: AMBIGUOUS Territory question, no operation, no canonical Slash, and zero write
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: resolveTerritory
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 缺 Territory 或 Territory 多匹配时只追问 AMBIGUOUS"
+  X5:
+    kind: outcome
+    description: Reviewable canonical direct Owner Draft
+    result: role.bind or exact role.session, plus the dependent territory.supervisor step when required, with DIRECT_SLASH_CONFIRM_REQUIRED
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: readyDraft
+      - path: src/core/owner-binding-intent.ts
+        symbol: serializeOwnerBindingIntentDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "已有 Territory supervisor_binding_id 时对 exact Supervisor binding 生成 role.session"
+  X6:
+    kind: outcome
+    description: Direct Owner session target rejected before persistence
+    result: INPUT_DENIED with a bounded session classification and zero domain/event writes
+    code:
+      - path: src/index.ts
+        symbol: validateDirectSessionPayload
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "direct Owner session writes fail closed when the DSH registry seam is missing"
+  X7:
+    kind: outcome
+    description: Direct Owner operation returns the transaction result
+    result: Confirmed direct role.bind or role.session result is returned for Owner reconciliation
+    code:
+      - path: src/index.ts
+        symbol: ownerWrite
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "Supervisor Draft preserves exact territory binding and direct Slash validates live target session"
+  X8:
+    kind: outcome
+    description: The requested role.session binding cannot be proven safely after identity proof
+    result: AMBIGUOUS exact-binding question for no-solution, multiple, foreign, inactive, or unsafe binding, or for a forced role.session without a reusable binding; no operation, no canonical Slash, and zero write
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: ambiguousDraft
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "binding_id-only lookup keeps no-solution, multiple, foreign, expired, and aborted paths zero-write"
+  X11:
+    kind: outcome
+    description: Direct role.session targets the Owner projection
+    result: After strict JSON envelope validation, OWNER_CONTROL_REQUIRED precedes xor/type/live-session validation; no event, no binding mutation, and no persisted OWNER.session_id
+    code:
+      - path: src/index.ts
+        symbol: "case 'role.session'"
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: "direct role.session validates envelope grammar before Owner gate and rejects before live-session proof with zero writes"

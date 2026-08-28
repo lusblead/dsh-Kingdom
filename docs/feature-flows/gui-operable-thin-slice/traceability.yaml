@@ -1,0 +1,823 @@
+version: 1
+feature_id: "gui.operable-thin-slice"
+title: "Operable v1.0 GUI Mainline"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: false
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: Browser mounts the local Console shell after direct GUI activation
+    trigger: GET /console or Host-mounted Console HTML
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+
+  D1:
+    kind: decision
+    description: Control transport session is active and unexpired
+    condition: normalized /api/control state is ACTIVE and the session has not expired or been revoked; this alone does not authorize a resource action
+    code:
+      - path: src/gui/console-app.ts
+        symbol: normalizeConsoleCapabilities
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testExpiredCapabilitiesDisableMutationControls
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testActiveCapabilitiesExposeCoveredActions
+
+  A1:
+    kind: action
+    description: Read the explicit control transport view before state-bearing projections
+    code:
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_DEFAULT_ENDPOINTS
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+
+  A2:
+    kind: action
+    description: Render the borderless Kingdom Map as the homepage while keeping all management controls on Management Center and all detailed evidence on Kingdom Ledger
+    code:
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_HTML
+      - path: src/gui/snapshot.ts
+        symbol: toTaskView
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellNamesIndeterminateAndErrorStates
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOrganogramConnectorsFollowActualTerritoryCountAndElementGeometry
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+
+  D2:
+    kind: decision
+    description: Browser has a role or execution mutation, an Owner-only discovery action, revoke action, or only needs another read refresh
+    condition: user submits one visible branch; otherwise the bounded revision poll continues
+    code:
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_HTML
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellContainsPollingAndStaleStateControls
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellUsesCommandEndpointAbstraction
+
+  D3:
+    kind: decision
+    description: Both control admission and resource-scoped Host projection allow the requested UI action
+    condition: control action and structured resource allowedActions entry are both explicitly executable; legacy string actions never authorize
+    code:
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleResourceActionState
+      - path: src/gui/console-app.ts
+        symbol: normalizeConsoleAllowedActions
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testMissingCapabilityUsesStableFailureCode
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testActiveCapabilitiesExposeCoveredActions
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCommandNamesDoNotAuthorizeActionsWithoutStructuredHostAvailability
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testResourceActionsRequireStructuredExecutableProjection
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testGovernedPersistentLatestExecutionBlocksStart
+
+  A3:
+    kind: action
+    description: Poll the snapshot by revision and expose loading or stale status without mutating domain state
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellContainsPollingAndStaleStateControls
+
+  A4:
+    kind: action
+    description: Submit a bounded task title plus optional territory_id, or assign, sandbox start, review or HANDOFF, and execution-control payloads with CSRF and a unique request id
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    external_call:
+      system: local GUI Host bridge
+      timeout: 75s for mutations; 10s for read requests
+      failure_behavior: Preserve the last trusted projection, show an error or indeterminate state, and never retry the mutation automatically
+      failure_nodes: [D4, X2]
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCommandEnvelopeDoesNotInventPrincipalOrSession
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+
+  D4:
+    kind: decision
+    description: Host returns a determinate command result
+    condition: command response is ok or has an explicit stable errorCode; transport/side-effect uncertainty remains indeterminate
+    code:
+      - path: src/gui/console-app.ts
+        symbol: requestJson
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellNamesIndeterminateAndErrorStates
+
+  A5:
+    kind: action
+    description: Refresh snapshot and guarded Task detail after a determinate command result and preserve truthful Host states
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  A6:
+    kind: action
+    description: Keep ACCEPT, REWORK, FAIL, and HANDOFF with to_binding_id disabled until Host reports an executable review action
+    code:
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+
+  D5:
+    kind: decision
+    description: Refreshed task has a Claim awaiting review under the current Host projection
+    condition: task projection reports REVIEW or a Claim and structured allowedActions exposes the selected review action
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderSnapshot
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testResourceActionsRequireStructuredExecutableProjection
+
+  A7:
+    kind: action
+    description: Revoke the active local control session through the Host command endpoint
+    code:
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellContainsPollingAndStaleStateControls
+
+  A8:
+    kind: action
+    description: Parse the fragment into one of three top-level pages and synchronize legacy Ledger sub-fragments, Task navigator, and every Task selector
+    code:
+      - path: src/gui/console-app.ts
+        symbol: parseConsoleFragment
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testFragmentNavigationIsStableAndUnrecognizedHashesFailSoft
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions
+
+  D6:
+    kind: decision
+    description: Fragment is a recognized Console section or encoded Task selection
+    condition: fragment is empty, one of overview, management or ledger, a legacy Ledger subsection, or a non-empty decodable task identifier
+    code:
+      - path: src/gui/console-app.ts
+        symbol: parseConsoleFragment
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testFragmentNavigationIsStableAndUnrecognizedHashesFailSoft
+
+  A9:
+    kind: action
+    description: Load the selected Task detail under a monotonically increasing request epoch
+    code:
+      - path: src/gui/console-app.ts
+        symbol: shouldCommitConsoleTaskDetail
+      - path: src/gui/console-app.ts
+        symbol: loadDetail
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOlderTaskDetailResponseCannotReplaceNewerSelection
+
+  D7:
+    kind: decision
+    description: Task detail response still belongs to the current selection and current request epoch
+    condition: response Task id equals requested and selected Task id, and request epoch equals the latest epoch
+    code:
+      - path: src/gui/console-app.ts
+        symbol: shouldCommitConsoleTaskDetail
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOlderTaskDetailResponseCannotReplaceNewerSelection
+
+  X1:
+    kind: outcome
+    description: Mutation is visibly disabled because activation or capability is missing
+    result: Button remains disabled and shows DIRECT_SLASH_REQUIRED, SESSION_AUTH_REQUIRED, or an indeterminate transport reason
+
+  X2:
+    kind: outcome
+    description: Read or command failure is visible without upgrading uncertain state
+    result: Last trusted snapshot remains visible; error/stale/indeterminate status is shown and no automatic mutation retry occurs
+
+  X3:
+    kind: outcome
+    description: Current governance and runtime evidence is displayed after refresh
+    result: Overview, Task Detail, Timeline and Attention preserve Fact, Observation, Claim and Derived Explanation layers
+
+  X4:
+    kind: outcome
+    description: Local control session is revoked
+    result: Browser clears its in-memory transport state and disables mutation controls
+
+  X5:
+    kind: outcome
+    description: Unrecognized fragment fails soft without rewriting history
+    result: URL remains unchanged, Overview stays usable, a stable indeterminate navigation code is visible, and no mutation occurs
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testFragmentNavigationIsStableAndUnrecognizedHashesFailSoft
+
+  X6:
+    kind: outcome
+    description: Out-of-order Task detail response is discarded
+    result: The newer Task selection and its detail cannot be replaced by an older response
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOlderTaskDetailResponseCannotReplaceNewerSelection
+
+  X7:
+    kind: outcome
+    description: Owner-only management remains discoverable but disabled
+    result: executable=false and DIRECT_SLASH_REQUIRED are shown with a copyable direct Slash template; setup.basic is not advertised or submitted
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellKeepsOwnerBoundaryAndUsesExplicitChineseActionVerbs
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  D8:
+    kind: decision
+    description: State-bearing GET satisfies the exact local read boundary and valid control admission
+    condition: Origin is absent or equals the actual local Origin and a valid control cookie exists, or no cookie is supplied and the configured bearer matches; invalid or expired cookie cannot downgrade
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  A10:
+    kind: action
+    description: Convert broker-issued opaque readContext into current Projection security and resource ActionAvailability while keeping unverified governed Runtime controls unavailable
+    code:
+      - path: src/gui/server.ts
+        symbol: GuiServerHandlers.snapshot
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionGovernedRuntimeControlsFailClosed
+
+  X8:
+    kind: outcome
+    description: State-bearing read admission is rejected before the state handler
+    result: Preserve the last trusted browser view; expose no new projection or executable action
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+
+  D9:
+    kind: decision
+    description: Host accepts one strict command-shaped JSON body
+    condition: Body is a single JSON object with no duplicate key, nested Authority-shaped alias, unrecognized command field, or non-string value
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: parseStrictJsonObject
+      - path: src/gui/server.ts
+        symbol: validateCommandPayload
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+
+  X9:
+    kind: outcome
+    description: Invalid command body is rejected before Host command dispatch
+    result: INVALID_BODY; finish the in-flight admission slot without runGuiCommand, Core, Runtime, or revision effect
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+
+  D10:
+    kind: decision
+    description: User selects a known visual theme, opens a disclosed detail area, or continues without a presentation interaction
+    condition: Theme id is one of parchment, night, forest or wine; a missing or invalid local preference resolves to forest while an existing valid preference remains selected; detail and management areas open only after an explicit user navigation or disclosure action
+    code:
+      - path: src/gui/console-app.ts
+        symbol: normalizeConsoleTheme
+      - path: src/gui/console-app.ts
+        symbol: normalizeThemeChoice
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+
+  A11:
+    kind: action
+    description: Apply a verified theme palette, using forest for first-run or invalid preference, and persist only the local browser display preference
+    code:
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_THEMES
+      - path: src/gui/console-app.ts
+        symbol: applyThemeChoice
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+
+  A12:
+    kind: action
+    description: Reveal bounded member, Task, execution, evidence or management details without changing the underlying projection
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderTaskDetail
+      - path: src/gui/console-app.ts
+        symbol: renderOrgNode
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testHumanStatusTonesAndTerritoryIdentityTonesStayOrthogonal
+
+  A13:
+    kind: action
+    description: Lay out all projected Territories, Supervisors and Workers from actual cardinality and redraw SVG organization connectors from measured element geometry
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderKingdomMap
+      - path: src/gui/console-app.ts
+        symbol: drawOrganogramConnectors
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOrganogramConnectorsFollowActualTerritoryCountAndElementGeometry
+
+  D11:
+    kind: decision
+    description: User invokes the single Task composer with a Slash Territory query, plain Task text, or no composer interaction
+    condition: the last slash in the one visible Task input starts a Territory query; without a slash the input remains only the human-readable Task title
+    code:
+      - path: src/gui/console-app.ts
+        symbol: territoryCommandQuery
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+
+  A14:
+    kind: action
+    description: Show matching projected Territory choices, remove the slash query after selection, and retain only title plus optional territory_id for task.create
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderTerritoryCommandMenu
+      - path: src/gui/console-app.ts
+        symbol: composerTaskTitle
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+
+  X10:
+    kind: outcome
+    description: Visual preference changes or bounded detail becomes visible while Kingdom governance and authority remain unchanged
+    result: Same Host projection and executable actions; only presentation or disclosure state changes in the browser
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+
+  G9:
+    kind: safeguard
+    description: Presentation preferences and visual status encoding remain orthogonal to governance truth
+    safeguard_type: validation
+    guarantee: Missing or unrecognized themes fail to forest while any existing valid local preference remains selected; stable Territory identity tones and Task status tones are separate; every color signal has a Chinese label and icon and never creates Authority or a Governance Fact
+    protects: [D10, A11, A12, A13]
+    failure_behavior: Fall back to the forest default or an indeterminate visual tone while preserving the same projection, actions and technical evidence
+    code:
+      - path: src/gui/console-app.ts
+        symbol: normalizeConsoleTheme
+      - path: src/gui/console-app.ts
+        symbol: territoryToneAssignments
+      - path: src/gui/console-app.ts
+        symbol: statusTone
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testHumanStatusTonesAndTerritoryIdentityTonesStayOrthogonal
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure
+
+  G10:
+    kind: safeguard
+    description: Single-input Slash Territory selection remains ordinary browser form data and does not expand the task.create contract or mint Authority
+    safeguard_type: authorization
+    guarantee: The composer exposes one Task input, sends title plus optional territory_id only, omits background and acceptance fields, and never treats a Territory choice as Chancellor, Supervisor or Owner Authority
+    protects: [D11, A14, A4]
+    failure_behavior: Keep task.create disabled when Host ActionAvailability is absent; invalid or empty title stays local and no mutation request is sent
+    code:
+      - path: src/gui/console-app.ts
+        symbol: composerTaskTitle
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+
+  G1:
+    kind: safeguard
+    description: Host remains the authorization boundary
+    safeguard_type: authorization
+    guarantee: Browser capabilities and payloads never grant authority; Host-derived ActionAvailability reports current read truth and keeps governed Runtime controls non-executable until a verified Runtime seam exists, while POST separately revalidates exact Origin, cookie, principal, scope, CSRF, request id, expiry and state
+    protects: [D3, A4, A7]
+    failure_behavior: Disable the action and show a stable failure code; do not issue a mutation request when capability is not executable
+    code:
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.authorize
+      - path: src/index.ts
+        symbol: runGuiCommand
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testExpiredCapabilitiesDisableMutationControls
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testMissingCapabilityUsesStableFailureCode
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testResourceActionsRequireStructuredExecutableProjection
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionGovernedRuntimeControlsFailClosed
+
+  G2:
+    kind: safeguard
+    description: Payload and evidence boundary
+    safeguard_type: privacy
+    guarantee: Browser command envelopes may carry bounded sandbox_mode, to_binding_id, and execution_id but never invent session, principal, credential, Owner capability, or transport authority fields
+    protects: [A2, A4, X3]
+    failure_behavior: Omit unsafe authority fields and preserve indeterminate data rather than deriving identity or governance facts in the browser
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCommandEnvelopeDoesNotInventPrincipalOrSession
+
+  G3:
+    kind: safeguard
+    description: Stale read ordering and uncertain mutation handling
+    safeguard_type: concurrency
+    guarantee: Revision polling can mark stale data and detail epoch rejects out-of-order responses; unresolved mutations are never retried or displayed as success
+    protects: [A3, A9, D7, D4, X2]
+    failure_behavior: Keep the last trusted snapshot, discard stale detail, show ERROR/STALE/indeterminate, and require Host reconciliation or a new user action
+    code:
+      - path: src/gui/console-app.ts
+        symbol: requestJson
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+      - path: src/gui/console-app.ts
+        symbol: shouldCommitConsoleTaskDetail
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellContainsPollingAndStaleStateControls
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellNamesIndeterminateAndErrorStates
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testOlderTaskDetailResponseCannotReplaceNewerSelection
+
+  G4:
+    kind: safeguard
+    description: Evidence classification and additive fail-soft DOM rendering
+    safeguard_type: privacy
+    guarantee: Organization, Task resultSummary, Execution, Timeline, and Attention render bounded/redacted text, preserve evidence classes, and show an indeterminate state or NOT_RUN when additive fields are absent
+    protects: [A2, A5, X3]
+    failure_behavior: Render bounded text and indeterminate values for absent fields; never treat a Claim or Runtime completion as DONE in the browser
+    code:
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_HTML
+      - path: src/gui/snapshot.ts
+        symbol: toTaskView
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testEvidenceLabelsRemainSeparated
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+
+  G5:
+    kind: safeguard
+    description: Accessible three-page navigation with compatible Ledger sub-fragments and unified Task selection
+    safeguard_type: validation
+    guarantee: Native fragment links, focus-visible, aria-current, Back/Forward handling, mutually hidden page containers, and one selectedTaskId keep keyboard and Task selectors consistent without adding a server route
+    protects: [A8, A2]
+    failure_behavior: Unrecognized fragments keep Overview usable and do not rewrite history or trigger a mutation
+    code:
+      - path: src/gui/console-app.ts
+        symbol: parseConsoleFragment
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_HTML
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testFragmentNavigationIsStableAndUnrecognizedHashesFailSoft
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions
+
+  G6:
+    kind: safeguard
+    description: Owner-only management cannot execute in the browser
+    safeguard_type: authorization
+    guarantee: Owner-only cards are fixed at executable=false and DIRECT_SLASH_REQUIRED; control sessions never advertise setup.basic and historical HTTP spelling is deny-only with zero domain effect
+    protects: [X7]
+    failure_behavior: Show the bounded direct Slash template, issue no setup command, and reject a constructed historical HTTP request before any domain write
+    code:
+      - path: src/gui/console-app.ts
+        symbol: resolveConsoleActionState
+      - path: src/gui/console-app.ts
+        symbol: CONSOLE_APP_HTML
+      - path: src/gui/control-contract.ts
+        symbol: GUI_OWNER_ONLY_HTTP_COMMANDS
+      - path: src/index.ts
+        symbol: runGuiCommand
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testMissingCapabilityUsesStableFailureCode
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testConsoleShellKeepsOwnerBoundaryAndUsesExplicitChineseActionVerbs
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  G7:
+    kind: safeguard
+    description: Opaque read context produces current action truth without granting browser authority
+    safeguard_type: authorization
+    guarantee: Broker-issued activation identity is never serialized or accepted from browser fields; Host re-resolves current session, Supervisor binding, Territory scope, command coverage, and lifecycle before advertising ActionAvailability
+    protects: [D8, A10, D3]
+    failure_behavior: Reject the state read or advertise executable=false; configured bearer has no principal Projection context and read truth never substitutes for POST authorization
+    code:
+      - path: src/gui/local-control.ts
+        symbol: LocalControlManager.inspect
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "state-bearing GET requires exact local Origin plus valid control cookie or configured bearer"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testResourceActionsRequireStructuredExecutableProjection
+
+  G8:
+    kind: safeguard
+    description: Strict server-side command body grammar and Authority-shaped field fence
+    safeguard_type: validation
+    guarantee: Duplicate keys, nested Authority aliases, unrecognized fields, and non-string values cannot reach runGuiCommand, Core, or Runtime
+    protects: [A4, D9, X9]
+    failure_behavior: Return INVALID_BODY, finish the admitted mutation slot, and preserve domain revision and all external effects
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: parseStrictJsonObject
+      - path: src/gui/server.ts
+        symbol: validateCommandPayload
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: "GUI command payload grammar rejects authority aliases, duplicates, nesting, and per-command unrecognized fields"
+
+  T3:
+    kind: transition
+    description: A task is created through the Host command endpoint
+    entity: Task
+    from: NOT_CREATED
+    to: CREATED
+    trigger: plan_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: planTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T4:
+    kind: transition
+    description: A worker is assigned to the created task
+    entity: Task
+    from: CREATED
+    to: ASSIGNED
+    trigger: assign_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: assignTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T5:
+    kind: transition
+    description: Canonical governed persistent start is accepted
+    entity: Task
+    from: ASSIGNED
+    to: RUNNING
+    trigger: governed_start_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T6:
+    kind: transition
+    description: Structured worker output is shown as a Claim awaiting review
+    entity: Task
+    from: RUNNING
+    to: REVIEW
+    trigger: claim_recorded
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderSnapshot
+      - path: src/index.ts
+        symbol: runGovernedStart
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T7:
+    kind: transition
+    description: Supervisor accepts a Claim
+    entity: Task
+    from: REVIEW
+    to: DONE
+    trigger: review_accept
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T8:
+    kind: transition
+    description: Supervisor requests rework
+    entity: Task
+    from: REVIEW
+    to: RUNNING
+    trigger: review_rework
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T9:
+    kind: transition
+    description: Supervisor records terminal failure
+    entity: Task
+    from: REVIEW
+    to: FAILED
+    trigger: review_fail
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T10:
+    kind: transition
+    description: Supervisor hands the reviewed Task to a different active Worker binding atomically
+    entity: Task
+    from: REVIEW
+    to: RUNNING
+    trigger: review_handoff
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T11:
+    kind: transition
+    description: A not-yet-running STARTING Execution can become PAUSED
+    entity: Execution
+    from: STARTING
+    to: PAUSED
+    trigger: execution_pause_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+
+  T12:
+    kind: transition
+    description: A RUNNING one-shot Execution records pausePending without claiming it is PAUSED
+    entity: Execution
+    from: RUNNING
+    to: RUNNING
+    trigger: execution_pause_requested
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderConsoleApp
+      - path: src/core/task-service.ts
+        symbol: pauseExecution
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T13:
+    kind: transition
+    description: A PAUSED Execution resumes RUNNING, or a RUNNING legacy Execution clears pausePending while remaining RUNNING
+    entity: Execution
+    from: "PAUSED | RUNNING+pausePending"
+    to: RUNNING
+    trigger: execution_resume_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: resumeExecution
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: "v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced"
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+
+  T14:
+    kind: transition
+    description: A live RUNNING Execution is explicitly aborted while Task governance state remains unchanged
+    entity: Execution
+    from: RUNNING
+    to: ABORTED
+    trigger: execution_abort_accepted
+    code:
+      - path: src/gui/console-app.ts
+        symbol: buildConsoleCommand
+      - path: src/core/task-service.ts
+        symbol: abortExecution
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"

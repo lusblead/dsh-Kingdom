@@ -1,0 +1,218 @@
+version: 1
+feature_id: "release.v1-pipeline"
+title: "v1.0 release pipeline P0-P3 local gate and post-audit handoff"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: false
+  persisted_state: false
+  external_dependencies: true
+  retry_or_compensation: false
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: "Operator invokes the P0-P3 local release tool"
+    trigger: "pwsh -File scripts/release.ps1 -Version <version> with optional -DryRun"
+    code:
+      - path: scripts/release.ps1
+        symbol: param
+
+  D1:
+    kind: decision
+    description: "P0 local worktree check passes"
+    condition: "git status --porcelain has no disallowed worktree entry"
+    code:
+      - path: scripts/release.ps1
+        symbol: Check
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  D2:
+    kind: decision
+    description: "Frozen package version equals the requested Version"
+    condition: "$pkg.version -eq $Version"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$pkg.version"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  D3:
+    kind: decision
+    description: "P2 typecheck and node tests complete successfully"
+    condition: "the P2 checks observe successful command results"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$testOut"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  D4:
+    kind: decision
+    description: "P3 created the expected fresh tgz"
+    condition: "pack exit is zero, the target was absent before pack, and it exists after pack"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$packExit"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  D5:
+    kind: decision
+    description: "Invocation requests DryRun side-effect isolation"
+    condition: "$DryRun is true"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$DryRun"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "DryRun stops after P3 before the external post-audit handoff"
+
+  A1:
+    kind: action
+    description: "Run the P0 local Git worktree preflight"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$status"
+
+  A2:
+    kind: action
+    description: "Read the frozen package version without changing package metadata"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$pkg"
+
+  A3:
+    kind: action
+    description: "Run P2 TypeScript typecheck and node tests"
+    code:
+      - path: scripts/release.ps1
+        symbol: "npx tsc"
+
+  A4:
+    kind: action
+    description: "Create a temporary destination and run P3 npm pack"
+    code:
+      - path: scripts/release.ps1
+        symbol: "npm pack"
+    external_call:
+      system: "npm CLI local pack"
+      timeout: "process default"
+      failure_behavior: "Check throws before the P4-P8 handoff if pack fails or the fresh expected tgz is absent"
+      failure_nodes: [X4]
+
+  A5:
+    kind: action
+    description: "Emit the external P4-P8 identity requirements and throw"
+    code:
+      - path: scripts/release.ps1
+        symbol: throw
+
+  G1:
+    kind: safeguard
+    description: "Fail-closed local gate"
+    safeguard_type: validation
+    guarantee: "Any failed P0-P3 local gate throws before a later stage"
+    protects: [A1, D1]
+    failure_behavior: "Check throws release aborted at the failed gate"
+    code:
+      - path: scripts/release.ps1
+        symbol: Check
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  G2:
+    kind: safeguard
+    description: "Frozen-version read-only guard"
+    safeguard_type: integrity
+    guarantee: "A version mismatch is rejected without package metadata mutation"
+    protects: [A2, D2]
+    failure_behavior: "Check throws before P2 and no Set-Content package write exists"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$pkg.version"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  G3:
+    kind: safeguard
+    description: "Fresh pack artifact guard"
+    safeguard_type: integrity
+    guarantee: "P3 accepts only a newly created expected tgz in an invocation-specific temporary directory"
+    protects: [A4, D4]
+    failure_behavior: "Check throws when pack fails, a same-name target predates the run, or the target is missing"
+    code:
+      - path: scripts/release.ps1
+        symbol: "$packDestination"
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P0-P3 local validation and fresh pack are fail-closed"
+
+  G4:
+    kind: safeguard
+    description: "P4-P8 side-effect cutoff"
+    safeguard_type: validation
+    guarantee: "DryRun exits after P3 and non-DryRun cannot execute P4-P8 through this script"
+    protects: [D5, A5]
+    failure_behavior: "DryRun exits zero before the handoff; non-DryRun throws at the handoff"
+    code:
+      - path: scripts/release.ps1
+        symbol: exit
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "DryRun stops after P3 before the external post-audit handoff"
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "P4-P8 are unreachable and legacy side-effect commands are absent"
+
+  G5:
+    kind: safeguard
+    description: "External immutable release identity contract"
+    safeguard_type: integrity
+    guarantee: "Future P4 needs a frozen explicit path manifest and exact commit/tag identity; future P6 needs a verified exact audited tgz and expected SHA-256"
+    protects: [A5]
+    failure_behavior: "The in-script path throws and does not perform a Git or npm side effect"
+    code:
+      - path: scripts/release.ps1
+        symbol: throw
+    tests:
+      - path: tests/release-pipeline-contract.test.ts
+        symbol: "future P4 and P6 handoff requires immutable identities"
+
+  X1:
+    kind: outcome
+    description: "P0 rejects the invocation"
+    result: "The script throws before P1-P8"
+
+  X2:
+    kind: outcome
+    description: "Frozen version mismatch is rejected"
+    result: "The script throws without package metadata mutation"
+
+  X3:
+    kind: outcome
+    description: "P2 quality gate fails"
+    result: "The script throws before P3-P8"
+
+  X4:
+    kind: outcome
+    description: "P3 artifact gate fails"
+    result: "The script throws before P4-P8 and cannot accept a stale artifact"
+
+  X5:
+    kind: outcome
+    description: "DryRun completes local validation"
+    result: "The script exits zero after P3 with no P4-P8 side effect"
+
+  X6:
+    kind: outcome
+    description: "Non-DryRun is deliberately fail-closed"
+    result: "The script throws after P3 and leaves P4-P8 to a separate post-audit governed command"

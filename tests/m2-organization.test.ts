@@ -11,13 +11,14 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { KingdomStore } from '../lib/core/db.js'
 import { bindRole, unbindRole, rebindSession, setExecutionProfile, type AdminAuth } from '../lib/core/binding.js'
+import { issueOwnerControlCapability, ownerControlAuth } from '../lib/core/owner-control.js'
 import { createTerritory, deleteTerritory, setTerritorySupervisor } from '../lib/core/territory.js'
 import { planTask, assignTask, startTask, reviewTask } from '../lib/core/task-service.js'
 import type { WorkerExecutor } from '../lib/worker/executor.js'
 
 const KID = 'kingdom-m2-1'
 const S = { OWNER: 's-owner', CHANCELLOR: 's-ch', SUP_A: 's-sup-a', SUP_B: 's-sup-b', WORKER: 's-w', STRANGER: 's-x' }
-const ownerAuth = (): AdminAuth => ({ mode: 'session-bound', principalSessionId: S.OWNER })
+const ownerAuth = (): AdminAuth => ownerControlAuth(issueOwnerControlCapability())
 const strangerAuth = (): AdminAuth => ({ mode: 'session-bound', principalSessionId: S.STRANGER })
 const ctx = (sessionId: string | null) => ({
   kingdomId: KID,
@@ -83,11 +84,11 @@ const fakeExec = (): WorkerExecutor => ({
 test('Topology：session-bound 下仅 OWNER 可建/删领地、设主理', () => {
   const { store, terrA } = makeOrg()
   const denied1 = createTerritory(store, { kingdomId: KID, name: 'X 领地' }, strangerAuth())
-  assert.match(denied1, /^错误：组织管理/)
+  assert.match(denied1, /^OWNER_CONTROL_REQUIRED:/)
   const denied2 = deleteTerritory(store, { kingdomId: KID, territoryId: terrA }, { mode: 'session-bound', principalSessionId: S.SUP_A })
-  assert.match(denied2, /^错误：组织管理/)
+  assert.match(denied2, /^OWNER_CONTROL_REQUIRED:/)
   const denied3 = setTerritorySupervisor(store, { kingdomId: KID, territoryId: terrA, supervisorBindingId: null }, { mode: 'session-bound', principalSessionId: S.SUP_A })
-  assert.match(denied3, /^错误：组织管理/)
+  assert.match(denied3, /^OWNER_CONTROL_REQUIRED:/)
   const ok = createTerritory(store, { kingdomId: KID, name: 'Owner 领地' }, ownerAuth())
   assert.match(ok, /^已创建领地/)
 })
@@ -116,15 +117,58 @@ test('Scope：未指派 Territory fail-closed；Supervisor A 不能治理 B；�
   const taskA = planIn(store, terrA, 'A 任务')
   assert.match(assignTask(store, ctx(S.SUP_A), { taskId: taskA, workerBindingId: workerA }).message, /已把任务/)
 
-  // Sup-A 退任 → 立即 DENY（binding RETIRED → requireRole 无 ACTIVE）
+  // Sup-A 退任 → Territory 指针不再指向有效 ACTIVE Supervisor，立即 DENY
   unbindRole(store, { kingdomId: KID, bindingId: supA, reason: '换届' }, ownerAuth())
   const deniedRetired = reviewTask(store, ctx(S.SUP_A), { taskId: taskA, decision: 'ACCEPT' }).message
-  assert.match(deniedRetired, /不是 SUPERVISOR/)
+  assert.match(deniedRetired, /未指派有效的 ACTIVE Supervisor/)
 
   // 新任 Sup-B 接管领地 A → PASS
   setTerritorySupervisor(store, { kingdomId: KID, territoryId: terrA, supervisorBindingId: supB }, ownerAuth())
   const taskA2 = planIn(store, terrA, 'A 任务 2')
   assert.match(assignTask(store, ctx(S.SUP_B), { taskId: taskA2, workerBindingId: workerA }).message, /已把任务/)
+})
+
+test('Scope：两个 ACTIVE Supervisor 时，Territory 指定的非首条 binding 可完成 assign/start/HANDOFF', async () => {
+  const { store, supA, supB, workerA, workerB, terrB } = makeOrg()
+  const activeSupervisors = store.getBindingsByRole(KID, 'SUPERVISOR')
+  assert.equal(activeSupervisors[0]!.binding_id, supA, 'fixture 必须让 Sup-A 成为首条 ACTIVE binding')
+  assert.equal(store.getTerritoryById(terrB)!.supervisor_binding_id, supB)
+
+  const taskId = planIn(store, terrB, '非首条 Supervisor 正向任务')
+  const assigned = assignTask(store, ctx(S.SUP_B), { taskId, workerBindingId: workerA })
+  assert.equal(assigned.ok, true)
+  assert.equal(store.getActiveAssignmentForTask(taskId)!.assigned_by, supB)
+
+  const started = await startTask(store, fakeExec(), ctx(S.SUP_B), { taskId })
+  assert.equal(started.ok, true)
+  assert.equal(store.getTask(taskId)!.status, 'REVIEW')
+
+  const handed = reviewTask(store, ctx(S.SUP_B), {
+    taskId,
+    decision: 'HANDOFF',
+    reason: '验证 canonical Territory Supervisor',
+    to_binding_id: workerB,
+  })
+  assert.equal(handed.ok, true)
+  assert.equal(store.getActiveAssignmentForTask(taskId)!.assigned_by, supB)
+  assert.equal(store.getActiveAssignmentForTask(taskId)!.worker_binding_id, workerB)
+})
+
+test('Scope：两个 ACTIVE Supervisor 时，首条但非 Territory 主理的 session 必须 zero-effect 拒绝', () => {
+  const { store, supA, supB, workerA, terrB } = makeOrg()
+  assert.equal(store.getBindingsByRole(KID, 'SUPERVISOR')[0]!.binding_id, supA)
+  assert.equal(store.getTerritoryById(terrB)!.supervisor_binding_id, supB)
+
+  const taskId = planIn(store, terrB, '非首条 Supervisor 反向任务')
+  const taskBefore = { ...store.getTask(taskId)! }
+  const revisionBefore = store.revision(KID)
+  const denied = assignTask(store, ctx(S.SUP_A), { taskId, workerBindingId: workerA })
+
+  assert.equal(denied.ok, false)
+  assert.equal(denied.errorCode, 'TASK_OUT_OF_SCOPE')
+  assert.deepEqual({ ...store.getTask(taskId)! }, taskBefore)
+  assert.equal(store.getActiveAssignmentForTask(taskId), null)
+  assert.equal(store.revision(KID), revisionBefore)
 })
 
 // ── Multi-Worker 选择规则 ───────────────────────────────────────────

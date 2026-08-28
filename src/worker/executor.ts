@@ -2,7 +2,8 @@
  * dsh-kingdom — WorkerExecutor 接口（Phase 2，Owner 裁决 2）。
  *
  * 裁决 2 的形状：**Task Core 只依赖本接口，绝不直接 import subagents。**
- * 换执行方式（one-shot subagent → 别的 runtime）不碰状态机。
+ * 换执行方式（LEGACY_COMPAT one-shot subagent → 别的 runtime）不碰状态机；
+ * canonical `GOVERNED_PERSISTENT` 由独立 governed executor 负责长期 Session。
  * Worker ≠ Subagent Session：Worker 是组织角色（role_binding），
  * subagent execution 只是它这一轮的执行载体。
  *
@@ -28,7 +29,7 @@ export interface StructuredResult {
   risks?: string[]
 }
 
-/** 传给 Worker 的这一轮上下文（裁决 5：REWORK 时带上一轮摘要 + 返工理由）。 */
+/** 传给 Worker 的这一轮上下文（legacy one-shot 与 governed persistent 共用；REWORK 带上一轮摘要 + 返工理由）。 */
 export interface WorkerContext {
   /** 原始 Task。 */
   task: TaskRow
@@ -160,7 +161,8 @@ export function parseStructuredResult(value: unknown): StructuredResult | null {
  *
  * 裁决 5：REWORK 轮次必须注入「原 Task + Acceptance Criteria +
  * 上一轮 Result 摘要 + Supervisor REWORK reason」。
- * one-shot subagent 不继承父会话上下文，所以 prompt 必须自包含。
+ * LEGACY_COMPAT one-shot 不继承父会话上下文，所以 prompt 必须自包含；
+ * governed persistent 也接收同一治理上下文，但 Session 本身由 governed runtime 复用。
  */
 export function buildWorkerPrompt(context: WorkerContext): string {
   const { task, acceptanceCriteria, attemptNo, prevResultSummary, reworkReason } = context

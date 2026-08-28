@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, type TaskRow, type ExecutionRow, type EventRow } from '../lib/core/db.js'
 import { createTerritory, deleteTerritory } from '../lib/core/territory.js'
+import { issueOwnerControlCapability, ownerControlAuth } from '../lib/core/owner-control.js'
 
 const KID = 'kingdom-test-1'
 const NOW = () => new Date().toISOString()
@@ -99,8 +100,8 @@ function territoryNames(store: KingdomStore): string[] {
   return store.listTerritories(KID).map(t => t.name)
 }
 
-/** declarative 演示模式（Topology Admin 在 declarative 下保持现状）。 */
-const demoAuth = () => ({ mode: 'declarative' as const, principalSessionId: null })
+/** 测试 direct Owner Control；declarative/Session auth 不产生写权限。 */
+const demoAuth = () => ownerControlAuth(issueOwnerControlCapability())
 
 test('领地不存在：按 id 与按 name 均返回错误', () => {
   const store = makeStore()

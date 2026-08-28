@@ -45,6 +45,65 @@ export interface DispatchReceipt {
   readonly acceptedAt: string
 }
 
+/** Runtime event projection consumed by the dispatch trust-fence seam. */
+export interface RuntimeEvent {
+  readonly type: string
+  readonly data?: Record<string, unknown>
+  readonly [key: string]: unknown
+}
+
+/**
+ * An opaque, adapter-issued reservation for one governed dispatch.
+ *
+ * The brand is deliberately module-private at the type level. Runtime
+ * implementations must also validate object identity; callers must never
+ * construct a fence from its visible shape or copy its fields between
+ * sessions/leases.
+ */
+declare const runtimeTrustFenceBrand: unique symbol
+export interface RuntimeTrustFence {
+  readonly [runtimeTrustFenceBrand]: 'RuntimeTrustFence'
+}
+
+/**
+ * The Core-side identity proof required when an opaque fence is consumed.
+ *
+ * `leaseId` and `sessionRef` are correlation facts, not authority.  The
+ * adapter must compare them with the values captured when it issued the
+ * fence; callers must not be able to retarget a fence by passing a different
+ * lease/session pair at cleanup or settlement time.
+ */
+export interface RuntimeTrustFenceExpectation {
+  readonly leaseId: string
+  readonly sessionRef: string
+}
+
+export type RuntimeTrustFencePhase =
+  | 'terminal-write'
+  | 'cleanup-reserved'
+  | 'cleanup'
+  | 'settlement'
+  | 'release'
+
+export type RuntimeTrustFenceOutcome = 'RELEASED' | 'RECOVERING'
+
+export interface RuntimeTrustFenceInput {
+  readonly leaseId: string
+  readonly sessionRef: string
+  /** Runtime dispatch ref is bound after the adapter accepts the owned message. */
+  readonly runtimeDispatchRef: string | null
+  /** Snapshot taken before the owned Runtime dispatch side effect. */
+  readonly baselineEvents: readonly RuntimeEvent[]
+}
+
+export interface RuntimeTrustFenceCheck {
+  readonly ok: boolean
+  readonly status: 'VALID' | 'TAINTED' | 'UNKNOWN' | 'RELEASED'
+  readonly reservation: 'SERIALIZED' | 'DETECT_ONLY' | 'UNKNOWN'
+  readonly generation: number | null
+  readonly reason: string
+}
+
 export interface ReconcileResult {
   readonly executionObservation: ExecutionObservation
   readonly sessionObservation: 'AVAILABLE' | 'GONE' | 'UNKNOWN'
@@ -116,7 +175,37 @@ export interface RuntimeAdapter {
   capabilities(context: unknown): Promise<RuntimeEnforceableSet>
   preflight(request: EnforcementRequest, context: unknown): Promise<PreflightResult>
   materialize(request: EnforcementRequest, context: unknown): Promise<MaterializeResult>
-  cleanup(request: EnforcementRequest, context: unknown): Promise<CleanupResult>
+  /**
+   * cleanup consumes the same opaque fence as terminal settlement when the
+   * call belongs to a governed persistent dispatch. Capability-denial cleanup
+   * may omit the fence because no governed terminal exists yet.
+   */
+  cleanup(
+    request: EnforcementRequest,
+    context: unknown,
+    fence?: RuntimeTrustFence,
+    expectation?: RuntimeTrustFenceExpectation,
+  ): Promise<CleanupResult>
+
+  // ── Governed terminal trust fence ──
+  openTrustFence(input: RuntimeTrustFenceInput): Promise<RuntimeTrustFence>
+  bindTrustFence(
+    fence: RuntimeTrustFence,
+    runtimeDispatchRef: string,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck
+  checkTrustFence(
+    fence: RuntimeTrustFence,
+    phase: RuntimeTrustFencePhase,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck
+  /** Fence release is a synchronous state transition; any held Runtime
+   * reservation is released by the adapter before this method returns. */
+  releaseTrustFence(
+    fence: RuntimeTrustFence,
+    outcome: RuntimeTrustFenceOutcome,
+    expectation: RuntimeTrustFenceExpectation,
+  ): RuntimeTrustFenceCheck
 
   // ── Dispatch / Evidence / Reconcile ──
   dispatch(input: DispatchInput): Promise<DispatchReceipt>

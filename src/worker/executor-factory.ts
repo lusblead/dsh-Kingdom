@@ -7,7 +7,8 @@
  * - model 来源：profile.model（`binding`）或继承父 Agent（`parent-inherited`）——
  *   两种来源分开记录，绝不混成一个 runtime_source；
  * - **硬不变量：本模块禁止读取 binding.model_name**（席位展示元数据，不是执行配置）；
- * - 每 attempt = 全新 one-shot execution；无长期 Worker Session；无 Multi-Worker。
+ * - 本 factory 只服务显式 `LEGACY_COMPAT` start；每 attempt = 全新 one-shot execution，
+ *   无长期 Worker Session。canonical governed start 使用 governed executor，不经过本 factory。
  */
 import { KingdomStore, TaskRow } from '../core/db.js'
 import { parseExecutionProfile } from '../core/binding.js'

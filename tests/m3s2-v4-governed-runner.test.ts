@@ -11,6 +11,7 @@ import { KingdomStore } from '../lib/core/db.js'
 import { runGovernedTask } from '../lib/worker/governed-executor.js'
 import { resolveGovernedWorkerRuntime } from '../lib/worker/executor-factory.js'
 import { DshRuntimeAdapter } from '../lib/adapter/dsh-backend.js'
+import type { CleanupReceipt } from '../lib/dispatch/service.js'
 
 const NOW = () => new Date().toISOString()
 
@@ -38,6 +39,20 @@ interface AutoTerminalOptions {
   turnEndReason?: string
   /** 是否产生 assistant/message（缺省 true；completed 判定要求 assistant）。 */
   assistant?: boolean
+  /** 在本 dispatch 后注入一条 foreign user message，验证 live trust fence。 */
+  foreignUserMessage?: boolean
+  /** 在 terminal 观察后、cleanup reservation 入口前注入 foreign activity。 */
+  lateForeignUserMessage?: boolean
+  /** Lease 已 active、owned dispatch ref 尚未绑定时注入 foreign activity。 */
+  foreignBeforeOwnedDispatch?: boolean
+  /** Model the DSH runMaintenance ingress reservation by queueing followups. */
+  isolateIngress?: boolean
+  /** Keep the adapter cleanup Promise pending after the Runtime reservation is established. */
+  pendingCleanup?: boolean
+  /** 覆盖 terminal 后的唯一 enforcement cleanup 结果。 */
+  cleanup?: 'confirmed' | 'false' | 'throw' | 'missing-evidence' | 'pending'
+  /** Fail the Runtime ingress reservation before the disposer can run. */
+  maintenanceFailure?: 'reject' | 'throw' | 'aborted'
 }
 
 function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
@@ -46,13 +61,36 @@ function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
   resumeCalls: () => number
   createOptions: () => Record<string, unknown>[]
   dropLive: (sessionRef: string) => void
+  preflightRequests: () => unknown[]
+  materializeRequests: () => unknown[]
+  cleanupRequests: () => unknown[]
+  dispatchCalls: () => number
+  preflightContexts: () => unknown[]
+  materializeContexts: () => unknown[]
+  cleanupContexts: () => unknown[]
+  cleanupDisposerCalls: () => number
+  ingressHeld: () => boolean
+  cleanupEntered: () => boolean
+  resolvePendingCleanup: () => void
 } {
   const reasonKind = options?.turnEndReason ?? 'completed'
   const assistant = options?.assistant ?? true
+  const injectForeignUserMessage = options?.foreignUserMessage ?? false
+  const cleanupMode = options?.cleanup ?? 'confirmed'
+  const isolateIngress = options?.isolateIngress ?? false
+  const pendingCleanup = options?.pendingCleanup ?? cleanupMode === 'pending'
+  const maintenanceFailure = options?.maintenanceFailure
+  let cleanupDisposerCalls = 0
+  let cleanupHasEntered = false
+  let releasePendingCleanup: () => void = () => {}
+  const pendingCleanupRelease = new Promise<void>(resolve => { releasePendingCleanup = resolve })
+  let maintenanceActive = false
+  const queuedFollowups: { id: string }[] = []
   const append = (s: { events: { type: string; data?: Record<string, unknown> }[] }, type: string, data?: Record<string, unknown>) =>
     s.events.push({ type, ...(data ? { data } : {}) })
-  const agents = new Map<string, { id: string; session: { header: { cwd: string }; events: { type: string; data?: Record<string, unknown> }[] }; ctx: { tools: unknown }; followup(msg: { id: string }): void }>()
+  const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { header: { cwd: string }; events: { type: string; data?: Record<string, unknown> }[] }; ctx: { tools: unknown }; followup(msg: { id: string }): void; runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> }>()
   let resumeCount = 0
+  let dispatchCount = 0
   const createdOptions: Record<string, unknown>[] = []
   const adapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
@@ -62,17 +100,45 @@ function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
         createdOptions.push(options)
         const agent = {
           id: options.sessionId,
+          status: 'idle' as const,
           session: { header: { cwd: options.meta?.cwd ?? 'C:/terr-a' }, events: [] as { type: string; data?: Record<string, unknown> }[] },
-          ctx: { tools: { restrict: () => () => {}, guard: () => () => {}, schemas: () => [{ name: 'pwsh' }] } },
+           ctx: { tools: { restrict: () => () => { cleanupDisposerCalls++ }, guard: () => () => { cleanupDisposerCalls++ }, schemas: () => [{ name: 'pwsh' }] } },
           followup(msg: { id: string }): void {
+            if (isolateIngress && maintenanceActive) {
+              queuedFollowups.push(msg)
+              return
+            }
             // live 复用时同一 agent 的第二次 followup = REWORK 第二轮（turn-2 + 返工文案）
             const n = ((this as unknown as { __fc?: number }).__fc = ((this as unknown as { __fc?: number }).__fc ?? 0) + 1)
             this.session.events.push({ type: 'user/message', data: { id: msg.id } })
+            if (injectForeignUserMessage) {
+              this.session.events.push({ type: 'user/message', data: { id: `foreign-${msg.id}` } })
+            }
             this.session.events.push({ type: 'turn/start', data: { turn: n } })
             this.session.events.push({ type: 'turn/end', data: { turn: n, reason: { kind: reasonKind } } })
             if (assistant) {
               this.session.events.push({ type: 'assistant/message', data: { text: n === 1 ? '任务完成：满足验收标准 AC。' : '返工完成：已修正。' } })
             }
+          },
+          runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
+            if (maintenanceFailure === 'reject') {
+              return Promise.reject(new Error('maintenance reservation rejected'))
+            }
+            if (maintenanceFailure === 'throw') {
+              throw new Error('maintenance reservation threw')
+            }
+            if (maintenanceFailure === 'aborted') {
+              const controller = new AbortController()
+              controller.abort()
+              return job(controller.signal)
+            }
+            if (!isolateIngress) return job(new AbortController().signal)
+            maintenanceActive = true
+            return job(new AbortController().signal).finally(() => {
+              maintenanceActive = false
+              const queued = queuedFollowups.splice(0)
+              for (const queuedMessage of queued) this.followup(queuedMessage)
+            })
           },
         }
         agents.set(agent.id, agent)
@@ -83,13 +149,38 @@ function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
         resumeCount++
         const agent = {
           id: options.resumeSessionId,
+          status: 'idle' as const,
           session: { header: { cwd: 'C:/terr-a' }, events: [] as { type: string; data?: Record<string, unknown> }[] },
           ctx: { tools: { restrict: () => () => {}, guard: () => () => {}, schemas: () => [{ name: 'pwsh' }] } },
           followup(msg: { id: string }): void {
+            if (isolateIngress && maintenanceActive) {
+              queuedFollowups.push(msg)
+              return
+            }
             this.session.events.push({ type: 'user/message', data: { id: msg.id } })
             this.session.events.push({ type: 'turn/start', data: { turn: 2 } })
             this.session.events.push({ type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
             this.session.events.push({ type: 'assistant/message', data: { text: '返工完成：已修正。' } })
+          },
+          runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
+            if (maintenanceFailure === 'reject') {
+              return Promise.reject(new Error('maintenance reservation rejected'))
+            }
+            if (maintenanceFailure === 'throw') {
+              throw new Error('maintenance reservation threw')
+            }
+            if (maintenanceFailure === 'aborted') {
+              const controller = new AbortController()
+              controller.abort()
+              return job(controller.signal)
+            }
+            if (!isolateIngress) return job(new AbortController().signal)
+            maintenanceActive = true
+            return job(new AbortController().signal).finally(() => {
+              maintenanceActive = false
+              const queued = queuedFollowups.splice(0)
+              for (const queuedMessage of queued) this.followup(queuedMessage)
+            })
           },
         }
         agents.set(agent.id, agent)
@@ -103,17 +194,78 @@ function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
     sandboxPolicy: { setSandboxMode: (s: never, m: string) => append(s, 'sandbox/mode', { mode: m }) },
     approval: { setApprovalPolicy: (s: never, p: string) => append(s, 'approval/policy', { policy: p }) },
   })
+  const preflightRequests: unknown[] = []
+  const materializeRequests: unknown[] = []
+  const cleanupRequests: unknown[] = []
+  const preflightContexts: unknown[] = []
+  const materializeContexts: unknown[] = []
+  const cleanupContexts: unknown[] = []
+  const originalPreflight = adapter.preflight.bind(adapter)
+  const originalMaterialize = adapter.materialize.bind(adapter)
+  const originalCleanup = adapter.cleanup.bind(adapter)
+  const originalDispatch = adapter.dispatch.bind(adapter)
+  adapter.dispatch = async input => {
+    dispatchCount++
+    if (options?.foreignBeforeOwnedDispatch) {
+      const agent = agents.get(input.sessionRef)
+      agent?.session.events.push({ type: 'user/message', data: { id: `foreign-before-owned-${dispatchCount}` } })
+    }
+    return originalDispatch(input)
+  }
+  adapter.preflight = async (request, context) => {
+    preflightRequests.push(request)
+    preflightContexts.push(context)
+    return originalPreflight(request, context)
+  }
+  adapter.materialize = async (request, context) => {
+    materializeRequests.push(request)
+    materializeContexts.push(context)
+    return originalMaterialize(request, context)
+  }
+  adapter.cleanup = async (request, context, fence, expectation) => {
+    cleanupRequests.push(request)
+    cleanupContexts.push(context)
+    if (options?.lateForeignUserMessage) {
+      const session = (context as { agent: { session: { events: { type: string; data?: Record<string, unknown> }[] } } }).agent.session
+      session.events.push({ type: 'user/message', data: { id: `late-foreign-${session.events.length}` } })
+    }
+    if (cleanupMode === 'false') return { ok: false, evidenceJson: JSON.stringify({ type: 'cleanup/false' }) }
+    if (cleanupMode === 'throw') throw new Error('cleanup disposer failed')
+    if (cleanupMode === 'missing-evidence') return { ok: true, evidenceJson: null }
+    const result = await originalCleanup(request, context, fence, expectation)
+    if (pendingCleanup) {
+      cleanupHasEntered = true
+      await pendingCleanupRelease
+    }
+    return result
+  }
   return {
     adapter,
     getAgent: () => [...agents.values()][agents.size - 1],
     resumeCalls: () => resumeCount,
     createOptions: () => createdOptions,
     dropLive: (sessionRef: string) => { agents.delete(sessionRef) },
+    preflightRequests: () => preflightRequests,
+    materializeRequests: () => materializeRequests,
+    cleanupRequests: () => cleanupRequests,
+    dispatchCalls: () => dispatchCount,
+    preflightContexts: () => preflightContexts,
+    materializeContexts: () => materializeContexts,
+    cleanupContexts: () => cleanupContexts,
+    cleanupDisposerCalls: () => cleanupDisposerCalls,
+    ingressHeld: () => maintenanceActive,
+    cleanupEntered: () => cleanupHasEntered,
+    resolvePendingCleanup: () => releasePendingCleanup(),
   }
 }
 
 const REQ = JSON.stringify({ 'tool:pwsh': true })
 const GRANT = { 'tool:pwsh': true }
+const confirmedCleanup = (): CleanupReceipt => ({
+  status: 'CONFIRMED',
+  evidenceJson: JSON.stringify({ type: 'DshEnforcementTeardownEvidence/v1', payload: { test: true } }),
+  reason: 'test cleanup confirmed',
+})
 
 test('governed runner: happy path → session/gate/dispatch/terminal + claim 摘要', async () => {
   const env = makeEnv()
@@ -138,6 +290,215 @@ test('governed runner: happy path → session/gate/dispatch/terminal + claim 摘
   assert.equal(result.summary, '任务完成：满足验收标准 AC。')
 })
 
+test('governed runner: trusted terminal 后 exactly-once cleanup 使用同一 request/context', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal()
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(result.cleanupReceipt.status, 'CONFIRMED')
+  assert.equal(trace.cleanupRequests().length, 1, 'trusted terminal 只能 cleanup 一次')
+  assert.equal(trace.preflightRequests()[0], trace.materializeRequests()[0], 'preflight/materialize 必须消费同一 request')
+  assert.equal(trace.materializeRequests()[0], trace.cleanupRequests()[0], 'cleanup 必须消费 Gate 返回的同一 request')
+  assert.equal(trace.preflightContexts()[0], trace.materializeContexts()[0], 'preflight/materialize 必须消费同一 context')
+  assert.equal(trace.materializeContexts()[0], trace.cleanupContexts()[0], 'cleanup 必须消费同一 context')
+})
+
+test('governed runner: cleanup false/throw/missing evidence 保留 trusted terminal，不伪造 cleanup 成功', async () => {
+  for (const [cleanup, expected] of [
+    ['false', 'RETURNED_FALSE'],
+    ['throw', 'THREW'],
+    ['missing-evidence', 'MISSING_EVIDENCE'],
+  ] as const) {
+    const env = makeEnv()
+    const { store, kingdomId, worker, sup, terrA, taskId } = env
+    store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+    const trace = makeAdapterWithAutoTerminal({ cleanup })
+    const result = await runGovernedTask({
+      store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+      taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    })
+    assert.equal(result.ok, true, `${cleanup} 不得抹掉 trusted terminal`)
+    if (!result.ok) continue
+    assert.equal(result.terminalOutcome, 'COMPLETED')
+    assert.equal(result.cleanupReceipt.status, expected)
+    assert.equal(trace.cleanupRequests().length, 1)
+    assert.equal(store.getLease(result.leaseId)?.state, 'SETTLING', 'runner 只产生 receipt，settlement 再决定 recovery/release')
+  }
+})
+
+test('governed runner: terminal 不可信时不提前 cleanup', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ turnEndReason: 'interrupted', assistant: false })
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 2,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(trace.cleanupRequests().length, 0, '未知/不可信 terminal 不得 teardown')
+})
+
+test('live path: foreign user message 即使伴随 completed terminal 也只能 RECOVERING，不 cleanup/release', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ foreignUserMessage: true })
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 3,
+  })
+  assert.equal(result.ok, false, 'foreign evidence 不得返回 terminal Claim')
+  assert.equal(trace.dispatchCalls(), 1, '仅允许原始一次 dispatch')
+  assert.equal(trace.cleanupRequests().length, 0, 'foreign evidence 不得 cleanup')
+  assert.equal(store.listDispatches(kingdomId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listExecutions(taskId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listLeases(kingdomId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listDispatches(kingdomId)[0]?.terminal_evidence_json, null, '不得写 trusted terminal evidence')
+  assert.ok(store.listDispatches(kingdomId)[0]?.receipt_json, '保留可证 receipt observation')
+})
+
+test('G14/G17 late foreign TOCTOU: terminal 观察后 cleanup 前污染仍三层 RECOVERING 且 disposer=0', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ lateForeignUserMessage: true })
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 3,
+  })
+  assert.equal(result.ok, false, 'late foreign activity 不得形成 terminal Claim')
+  assert.equal(trace.cleanupRequests().length, 1, '仅记录一次 cleanup 入口尝试')
+  assert.equal(trace.cleanupDisposerCalls(), 0, 'fence 污染后不得调用 Runtime disposer')
+  assert.equal(store.listDispatches(kingdomId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listExecutions(taskId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listLeases(kingdomId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listDispatches(kingdomId)[0]?.terminal_evidence_json, null)
+})
+
+test('R6 G14/G17 maintenance reservation failure taints fence before cleanup error propagation', async () => {
+  for (const maintenanceFailure of ['reject', 'throw', 'aborted'] as const) {
+    const env = makeEnv()
+    const { store, kingdomId, worker, sup, terrA, taskId } = env
+    store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+    const trace = makeAdapterWithAutoTerminal({ maintenanceFailure })
+    const result = await runGovernedTask({
+      store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a', taskId,
+      attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+      pollIntervalMs: 1, maxPolls: 3,
+    })
+
+    assert.equal(result.ok, false, `${maintenanceFailure}: failed reservation cannot yield a terminal Claim`)
+    assert.equal(trace.cleanupRequests().length, 1, `${maintenanceFailure}: exactly one cleanup ingress attempt is recorded`)
+    assert.equal(trace.cleanupDisposerCalls(), 0, `${maintenanceFailure}: disposer must not run`)
+    assert.equal(store.listDispatches(kingdomId)[0]?.state, 'RECOVERING', `${maintenanceFailure}: Dispatch recovery`)
+    assert.equal(store.listExecutions(taskId)[0]?.state, 'RECOVERING', `${maintenanceFailure}: Execution recovery`)
+    assert.equal(store.listLeases(kingdomId)[0]?.state, 'RECOVERING', `${maintenanceFailure}: Lease recovery`)
+    assert.equal(store.listDispatches(kingdomId)[0]?.terminal_evidence_json, null, `${maintenanceFailure}: no terminal evidence`)
+    assert.equal(store.listLeases(kingdomId)[0]?.released_at, null, `${maintenanceFailure}: no release`)
+  }
+})
+
+test('G14/G17 active Lease owned-ref 前 foreign activity 不可被 ref slicing 隐藏', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ foreignBeforeOwnedDispatch: true })
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 3,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(trace.cleanupRequests().length, 0, 'owned ref 之前已污染，不得进入 cleanup')
+  assert.equal(store.listDispatches(kingdomId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listExecutions(taskId)[0]?.state, 'RECOVERING')
+  assert.equal(store.listLeases(kingdomId)[0]?.state, 'RECOVERING')
+})
+
+test('G14 reservation: cleanup receipt 返回后至 release 前隔离 unmanaged followup，release 后才出队', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ isolateIngress: true })
+  const result = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 3,
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const agent = trace.getAgent() as unknown as { followup(message: { id: string }): void; session: { events: { data?: Record<string, unknown> }[] } }
+  assert.equal(trace.ingressHeld(), true, 'cleanup receipt 后 fence reservation 必须仍持有')
+  agent.followup({ id: 'unmanaged-during-settlement' })
+  assert.equal(
+    agent.session.events.some(event => event.data?.id === 'unmanaged-during-settlement'),
+    false,
+    'reservation 期间 unmanaged ingress 必须被 Runtime 隔离而非直接进入事件链',
+  )
+  const { settleAndRelease } = await import('../lib/dispatch/service.js')
+  const released = settleAndRelease(store, result.leaseId, result.cleanupReceipt, 'reservation-release')
+  assert.equal(released.state, 'RELEASED')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(trace.ingressHeld(), false)
+  assert.equal(
+    agent.session.events.some(event => event.data?.id === 'unmanaged-during-settlement'),
+    true,
+    'release 后才允许排队的 unmanaged ingress 收敛',
+  )
+})
+
+test('R5 G14 pending cleanup Promise: reservation 期间并发 unmanaged ingress 被排队隔离', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ isolateIngress: true, cleanup: 'pending' })
+  const runPromise = runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    pollIntervalMs: 1, maxPolls: 3,
+  })
+
+  for (let i = 0; i < 100 && !trace.cleanupEntered(); i++) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(trace.cleanupEntered(), true, 'cleanup Promise 必须在 reservation 建立后进入 pending 窗口')
+  assert.equal(trace.ingressHeld(), true, 'pending cleanup 期间 Runtime reservation 必须仍持有')
+  const agent = trace.getAgent() as unknown as {
+    followup(message: { id: string }): void
+    session: { events: { data?: Record<string, unknown> }[] }
+  }
+  agent.followup({ id: 'unmanaged-during-pending-cleanup' })
+  assert.equal(
+    agent.session.events.some(event => event.data?.id === 'unmanaged-during-pending-cleanup'),
+    false,
+    'pending cleanup 窗口的 unmanaged ingress 必须被排队/隔离，不能污染当前 execution projection',
+  )
+
+  trace.resolvePendingCleanup()
+  const result = await runPromise
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const { settleAndRelease } = await import('../lib/dispatch/service.js')
+  assert.equal(settleAndRelease(store, result.leaseId, result.cleanupReceipt, 'pending-cleanup-release').state, 'RELEASED')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(trace.ingressHeld(), false)
+  assert.equal(
+    agent.session.events.some(event => event.data?.id === 'unmanaged-during-pending-cleanup'),
+    true,
+    'release 后才允许排队的 unmanaged ingress 收敛',
+  )
+})
+
 test('governed runner: 第二次 REWORK → 同一 session_ref（live 复用，不 resume）', async () => {
   const env = makeEnv()
   const { store, kingdomId, worker, sup, terrA, taskId } = env
@@ -153,7 +514,7 @@ test('governed runner: 第二次 REWORK → 同一 session_ref（live 复用，�
   // 释放 lease（settlement 完成）→ 下一 attempt 可取得新 lease（one-active-per-session）
   const lease = store.listLeases(kingdomId).find(l => l.session_ref === sessionRef && l.state === 'SETTLING')!
   const { settleAndRelease } = await import('../lib/dispatch/service.js')
-  settleAndRelease(store, lease.lease_id, true, 'settled')
+  settleAndRelease(store, lease.lease_id, confirmedCleanup(), 'settled')
   const second = await runGovernedTask({
     store, adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
     taskId, attemptNo: 2, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
@@ -281,7 +642,7 @@ test('CLOSURE B: session 不 live、但可恢复 → resume persistent session_r
   const sessionRef = first.ok ? first.sessionRef : ''
   const lease = store.listLeases(kingdomId).find(l => l.session_ref === sessionRef && l.state === 'SETTLING')!
   const { settleAndRelease } = await import('../lib/dispatch/service.js')
-  settleAndRelease(store, lease.lease_id, true, 'settled')
+  settleAndRelease(store, lease.lease_id, confirmedCleanup(), 'settled')
   // 模拟实例重启后 session 不在 live registry（但 affinity/persistent 仍可恢复）
   dropLive(sessionRef)
   const second = await runGovernedTask({
@@ -301,7 +662,7 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
   store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
   // resume 抛错（persistent 不可恢复）的 adapter
   const append = (s: { events: { type: string; data?: Record<string, unknown> }[] }, type: string, data?: Record<string, unknown>) => s.events.push({ type, ...(data ? { data } : {}) })
-  const agentsMap = new Map<string, { id: string; session: { header: { cwd: string }; events: { type: string; data?: Record<string, unknown> }[] }; ctx: { tools: unknown }; followup(msg: { id: string }): void }>()
+  const agentsMap = new Map<string, { id: string; status: 'idle'; session: { header: { cwd: string }; events: { type: string; data?: Record<string, unknown> }[] }; ctx: { tools: unknown }; followup(msg: { id: string }): void; runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> }>()
   const adapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: {
@@ -309,6 +670,7 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
       create: async (options: { sessionId: string; meta?: { cwd?: string }; setup?: (ctx: unknown) => unknown }) => {
         const agent = {
           id: options.sessionId,
+          status: 'idle' as const,
           session: { header: { cwd: options.meta?.cwd ?? 'C:/terr-a' }, events: [] as { type: string; data?: Record<string, unknown> }[] },
           ctx: { tools: { restrict: () => () => {}, guard: () => () => {}, schemas: () => [{ name: 'pwsh' }] } },
           followup(msg: { id: string }): void {
@@ -316,6 +678,9 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
             this.session.events.push({ type: 'turn/start', data: { turn: 1 } })
             this.session.events.push({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
             this.session.events.push({ type: 'assistant/message', data: { text: '任务完成。' } })
+          },
+          runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
+            return job(new AbortController().signal)
           },
         }
         agentsMap.set(agent.id, agent)
@@ -340,7 +705,7 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
   // 释放 lease；并让 session 从 live registry 消失（resume 将失败）
   const lease = store.listLeases(kingdomId).find(l => l.session_ref === sessionRef && l.state === 'SETTLING')!
   const { settleAndRelease } = await import('../lib/dispatch/service.js')
-  settleAndRelease(store, lease.lease_id, true, 'settled')
+  settleAndRelease(store, lease.lease_id, confirmedCleanup(), 'settled')
   agentsMap.delete(sessionRef)
   const second = await runGovernedTask({
     store, adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
@@ -355,6 +720,40 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
   assert.equal(store.listExecutions(taskId).length, 1, '仅 attempt1 有 execution（attempt2 zero execution）')
 })
 
+test('GI-CAP-002: cleanup false 后 RECOVERING guard 在 Session resume/create 前拒绝第二次运行', async () => {
+  const env = makeEnv()
+  const { store, kingdomId, worker, sup, terrA, taskId } = env
+  store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
+  const trace = makeAdapterWithAutoTerminal({ cleanup: 'false' })
+  const first = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    globalProvider: 'spawn',
+  })
+  assert.equal(first.ok, true)
+  if (!first.ok) return
+  assert.equal(first.cleanupReceipt.status, 'RETURNED_FALSE')
+  const settlingLease = store.getLease(first.leaseId)!
+  const { settleAndRelease } = await import('../lib/dispatch/service.js')
+  const recoveringLease = settleAndRelease(store, settlingLease.lease_id, first.cleanupReceipt, 'cleanup-failed')
+  assert.equal(recoveringLease.state, 'RECOVERING')
+
+  // Simulate a process restart: current affinity remains, live registry does not.
+  trace.dropLive(first.sessionRef)
+  const second = await runGovernedTask({
+    store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
+    taskId, attemptNo: 2, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
+    globalProvider: 'spawn',
+  })
+  assert.equal(second.ok, false)
+  assert.match(second.reason, /active Lease/u)
+  assert.equal(trace.resumeCalls(), 0, 'RECOVERING guard 前移后不得 resume')
+  assert.equal(trace.createOptions().length, 1, 'RECOVERING guard 前移后不得 create 第二个 Session')
+  assert.equal(trace.dispatchCalls(), 1, 'RECOVERING guard 前移后不得二次 dispatch')
+  assert.equal(store.listExecutions(taskId).length, 1, '第二次应在 Execution/Dispatch 前拒绝')
+  assert.equal(store.listDispatches(kingdomId).length, 1, '第二次应在 Dispatch 前拒绝')
+})
+
 // ── Owner V0.8 FINAL RELEASE BLOCKER：Claim outcome 按 terminalOutcome 收敛 ─────────
 
 /** 按指定 turn 行为跑一次 runGovernedTask（Release Blocker A–E）。 */
@@ -365,16 +764,22 @@ async function runGovWithTurn(reasonKind: string, assistant: boolean): Promise<{
   summary?: string
   reason?: string
   workerResultOutcome?: string | null
+  dispatchState?: string
+  leaseState?: string
 }> {
   const env = makeEnv()
   const { store, kingdomId, worker, sup, terrA, taskId } = env
   store.setKingdomCapabilityCeiling(kingdomId, JSON.stringify({ 'tool:pwsh': true }))
   const { adapter } = makeAdapterWithAutoTerminal({ turnEndReason: reasonKind, assistant })
+  const taskBefore = { ...store.getTask(taskId)! }
   const result = await runGovernedTask({
     store, adapter, kingdomId, workerBindingId: worker, territoryId: terrA, cwd: 'C:/terr-a',
     taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'workspace-write',
     globalProvider: 'spawn',
   })
+  assert.deepEqual({ ...store.getTask(taskId)! }, taskBefore, 'Runtime result must not decide Task governance')
+  const dispatchState = store.listDispatches(kingdomId).at(-1)?.state
+  const leaseState = store.listLeases(kingdomId).at(-1)?.state
   if (result.ok) {
     return {
       ok: true,
@@ -382,9 +787,18 @@ async function runGovWithTurn(reasonKind: string, assistant: boolean): Promise<{
       executionState: store.getExecution(result.executionId)?.state,
       summary: result.summary,
       workerResultOutcome: store.latestWorkerResult(taskId)?.outcome ?? null,
+      dispatchState,
+      leaseState,
     }
   }
-  return { ok: false, reason: result.reason, workerResultOutcome: store.latestWorkerResult(taskId)?.outcome ?? null }
+  return {
+    ok: false,
+    reason: result.reason,
+    workerResultOutcome: store.latestWorkerResult(taskId)?.outcome ?? null,
+    dispatchState,
+    leaseState,
+    executionState: store.listExecutions(taskId).at(-1)?.state,
+  }
 }
 
 test('RELEASE BLOCKER A: completed + assistant → terminalOutcome COMPLETED（Claim 收敛 COMPLETED 依据）', async () => {
@@ -417,6 +831,10 @@ test('RELEASE BLOCKER D: interrupted / ambiguous → 不产生成功 Claim（REC
     const r = await runGovWithTurn(kind, false)
     assert.equal(r.ok, false, `${kind} 无 assistant → 非终态 → runGovernedTask ok:false（不创建伪终态 Claim）`)
     assert.equal(r.workerResultOutcome, null, `${kind} → 不得生成任何 Claim`)
+    assert.equal(r.executionState, 'RECOVERING')
+    assert.equal(r.leaseState, 'RECOVERING')
+    assert.equal(r.dispatchState, 'RECOVERING')
+    assert.match(r.reason ?? '', /dispatch=RECOVERING/u)
   }
 })
 

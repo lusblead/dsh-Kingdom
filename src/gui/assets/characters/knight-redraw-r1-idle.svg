@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 136 112" width="136" height="112"
+     preserveAspectRatio="xMidYMid meet" shape-rendering="crispEdges"
+     role="img" aria-label="Agent Kingdom 骑士 idle"
+     data-role="knight" data-state="idle">
+  <title>Agent Kingdom 骑士 · idle · beta v0.3 redraw r1</title>
+  <desc>完整松弛待命姿势；双臂和双腿完整，无工作工具。</desc>
+  <metadata>{&quot;schemaVersion&quot;:1,&quot;role&quot;:&quot;knight&quot;,&quot;runtimeRole&quot;:&quot;WORKER&quot;,&quot;state&quot;:&quot;idle&quot;,&quot;visualVersion&quot;:&quot;beta-v0.3-redraw-r1&quot;,&quot;sourceCanvas&quot;:[136,112],&quot;rootAnchor&quot;:[68,104],&quot;frames&quot;:2,&quot;compositionMode&quot;:&quot;pose-specific-layered-vector-pixel-art&quot;,&quot;geometryPolicy&quot;:&quot;new-pose-geometry-no-legacy-limb-reuse&quot;,&quot;drawOrder&quot;:[&quot;shadow&quot;,&quot;cape_back&quot;,&quot;arm_back&quot;,&quot;body&quot;,&quot;head_helmet&quot;,&quot;tool_back&quot;,&quot;tool_front&quot;,&quot;arm_front_hand&quot;,&quot;fx_front&quot;]}</metadata>
+  <style><![CDATA[.frame{visibility:hidden}.frame-0{visibility:visible}@keyframes knight-idle-0{0%,49.99%{visibility:visible}50.00%,100%{visibility:hidden}}.frame-0{animation:knight-idle-0 1200ms steps(1,end) infinite}@keyframes knight-idle-1{0%,49.99%{visibility:hidden}50.00%,100%{visibility:visible}}.frame-1{animation:knight-idle-1 1200ms steps(1,end) infinite}@media (prefers-reduced-motion:reduce){.frame{animation:none!important;visibility:hidden!important}.frame-0{visibility:visible!important}}]]></style>
+  <g id="knight-idle-0" class="frame frame-0" data-pose="idle_00">
+<g id="knight-idle-0-shadow" data-layer="shadow">
+<path fill="#271f1b" fill-opacity="0.227" d="M54 100h30v2h-30zM48 102h42v2h-42z"/>
+</g>
+<g id="knight-idle-0-cape_back" data-layer="cape_back">
+<path fill="#1c3144" d="M54 56h30v2h-30zM54 58h2v2h-2zM82 58h2v2h-2zM52 60h4v2h-4zM82 60h4v2h-4zM52 62h4v2h-4zM84 62h2v2h-2zM52 64h2v2h-2zM84 64h2v2h-2zM52 66h2v2h-2zM84 66h2v2h-2zM50 68h4v2h-4zM84 68h4v2h-4zM50 70h4v2h-4zM84 70h4v2h-4zM50 72h4v2h-4zM84 72h4v2h-4zM50 74h4v2h-4zM84 74h4v2h-4zM48 76h4v2h-4zM86 76h4v2h-4zM48 78h4v2h-4zM86 78h4v2h-4zM48 80h4v2h-4zM86 80h4v2h-4zM50 82h4v2h-4zM84 82h4v2h-4zM50 84h6v2h-6zM82 84h6v2h-6zM52 86h6v2h-6zM80 86h6v2h-6zM52 88h34v2h-34z"/>
+<path fill="#271f1b" d="M52 54h34v2h-34zM52 56h2v2h-2zM84 56h2v2h-2zM52 58h2v2h-2zM84 58h2v2h-2zM50 60h2v2h-2zM86 60h2v2h-2zM50 62h2v2h-2zM86 62h2v2h-2zM50 64h2v2h-2zM86 64h2v2h-2zM50 66h2v2h-2zM86 66h2v2h-2zM48 68h2v2h-2zM88 68h2v2h-2zM48 70h2v2h-2zM88 70h2v2h-2zM48 72h2v2h-2zM88 72h2v2h-2zM48 74h2v2h-2zM88 74h2v2h-2zM46 76h2v2h-2zM90 76h2v2h-2zM46 78h2v2h-2zM90 78h2v2h-2zM46 80h2v2h-2zM90 80h2v2h-2zM48 82h2v2h-2zM88 82h2v2h-2zM48 84h2v2h-2zM88 84h2v2h-2zM50 86h2v2h-2zM86 86h2v2h-2zM50 88h2v2h-2zM86 88h2v2h-2zM52 90h34v2h-34z"/>
+<path fill="#274e68" d="M56 58h26v2h-26zM56 60h26v2h-26zM56 62h22v2h-22zM54 64h24v2h-24zM54 66h24v2h-24zM54 68h24v2h-24zM54 70h24v2h-24zM54 72h24v2h-24zM54 74h24v2h-24zM52 76h26v2h-26zM84 76h2v2h-2zM52 78h26v2h-26zM84 78h2v2h-2zM52 80h34v2h-34zM54 82h30v2h-30zM56 84h26v2h-26zM58 86h22v2h-22z"/>
+<path fill="#3d6c89" d="M78 62h6v2h-6zM78 64h6v2h-6zM78 66h6v2h-6zM78 68h6v2h-6zM78 70h6v2h-6zM78 72h6v2h-6zM78 74h6v2h-6zM78 76h6v2h-6zM78 78h6v2h-6z"/>
+</g>
+<g id="knight-idle-0-arm_back" data-layer="arm_back">
+</g>
+<g id="knight-idle-0-body" data-layer="body">
+<path fill="#1c3144" d="M60 54h18v2h-18zM50 66h4v2h-4zM84 66h4v2h-4zM50 68h4v2h-4zM84 68h4v2h-4zM52 70h2v2h-2zM84 70h2v2h-2zM52 72h2v2h-2zM84 72h2v2h-2zM52 74h2v2h-2zM84 74h2v2h-2zM52 76h2v2h-2zM84 76h2v2h-2zM54 82h2v2h-2zM82 82h2v2h-2zM68 84h2v2h-2z"/>
+<path fill="#271f1b" d="M58 52h22v2h-22zM54 54h6v2h-6zM78 54h6v2h-6zM50 56h4v2h-4zM58 56h2v2h-2zM78 56h2v2h-2zM82 56h6v2h-6zM48 58h2v2h-2zM60 58h2v2h-2zM78 58h2v2h-2zM88 58h2v2h-2zM48 60h2v2h-2zM60 60h18v2h-18zM88 60h2v2h-2zM46 62h4v2h-4zM58 62h4v2h-4zM76 62h6v2h-6zM88 62h4v2h-4zM48 64h12v2h-12zM78 64h2v2h-2zM82 64h8v2h-8zM48 66h2v2h-2zM56 66h2v2h-2zM80 66h2v2h-2zM88 66h2v2h-2zM48 68h2v2h-2zM56 68h2v2h-2zM80 68h2v2h-2zM88 68h2v2h-2zM50 70h2v2h-2zM56 70h2v2h-2zM80 70h2v2h-2zM86 70h2v2h-2zM50 72h2v2h-2zM58 72h2v2h-2zM78 72h2v2h-2zM86 72h2v2h-2zM50 74h2v2h-2zM54 74h30v2h-30zM86 74h2v2h-2zM50 76h2v2h-2zM54 76h2v2h-2zM66 76h2v2h-2zM70 76h2v2h-2zM82 76h2v2h-2zM86 76h2v2h-2zM52 78h4v2h-4zM66 78h2v2h-2zM70 78h2v2h-2zM82 78h4v2h-4zM52 80h34v2h-34zM52 82h2v2h-2zM56 82h12v2h-12zM70 82h12v2h-12zM84 82h2v2h-2zM54 84h4v2h-4zM66 84h2v2h-2zM70 84h2v2h-2zM80 84h6v2h-6zM54 86h2v2h-2zM64 86h8v2h-8zM82 86h4v2h-4zM54 88h6v2h-6zM64 88h6v2h-6zM72 88h2v2h-2zM78 88h6v2h-6zM86 88h2v2h-2zM54 90h4v2h-4zM60 90h10v2h-10zM72 90h6v2h-6zM82 90h2v2h-2zM86 90h2v2h-2zM54 92h4v2h-4zM66 92h4v2h-4zM72 92h2v2h-2zM82 92h2v2h-2zM86 92h2v2h-2zM54 94h16v2h-16zM72 94h16v2h-16zM52 96h2v2h-2zM66 96h2v2h-2zM72 96h2v2h-2zM86 96h2v2h-2zM52 98h2v2h-2zM68 98h4v2h-4zM86 98h2v2h-2zM50 100h2v2h-2zM68 100h4v2h-4zM88 100h2v2h-2zM50 102h2v2h-2zM66 102h2v2h-2zM70 102h2v2h-2zM86 102h2v2h-2z"/>
+<path fill="#274e68" d="M60 56h18v2h-18zM62 58h16v2h-16zM80 64h2v2h-2zM54 66h2v2h-2zM82 66h2v2h-2zM54 68h2v2h-2zM82 68h2v2h-2zM54 70h2v2h-2zM82 70h2v2h-2zM54 72h4v2h-4zM80 72h4v2h-4zM68 82h2v2h-2zM58 84h8v2h-8zM72 84h8v2h-8zM56 86h8v2h-8zM72 86h10v2h-10zM60 88h4v2h-4zM74 88h4v2h-4z"/>
+<path fill="#3a241b" d="M56 76h10v2h-10zM72 76h10v2h-10zM56 78h10v2h-10zM72 78h10v2h-10zM66 98h2v2h-2zM72 98h2v2h-2zM52 100h16v2h-16zM72 100h16v2h-16zM52 102h14v2h-14zM72 102h14v2h-14z"/>
+<path fill="#3d6c89" d="M62 62h6v2h-6zM70 62h6v2h-6zM62 64h6v2h-6zM70 64h6v2h-6zM62 66h6v2h-6zM70 66h6v2h-6zM60 68h8v2h-8zM70 68h8v2h-8zM60 70h8v2h-8zM70 70h8v2h-8zM62 72h6v2h-6zM70 72h6v2h-6z"/>
+<path fill="#5b5e60" d="M54 56h4v2h-4zM80 56h2v2h-2zM50 58h2v2h-2zM58 58h2v2h-2zM86 58h2v2h-2zM50 60h10v2h-10zM78 60h10v2h-10zM50 62h8v2h-8zM82 62h6v2h-6zM60 64h2v2h-2zM76 64h2v2h-2zM58 66h4v2h-4zM76 66h4v2h-4zM58 68h2v2h-2zM78 68h2v2h-2zM58 70h2v2h-2zM78 70h2v2h-2zM60 72h2v2h-2zM76 72h2v2h-2zM84 88h2v2h-2zM84 90h2v2h-2zM84 92h2v2h-2z"/>
+<path fill="#824f2b" d="M54 96h12v2h-12zM74 96h12v2h-12zM54 98h12v2h-12zM74 98h12v2h-12z"/>
+<path fill="#8e9191" d="M58 90h2v2h-2zM78 90h4v2h-4zM58 92h8v2h-8zM74 92h8v2h-8z"/>
+<path fill="#c4c3b8" d="M52 58h6v2h-6zM80 58h6v2h-6z"/>
+<path fill="#efc35e" d="M68 62h2v2h-2zM68 64h2v2h-2zM68 66h2v2h-2zM68 68h2v2h-2zM68 70h2v2h-2zM68 72h2v2h-2zM68 76h2v2h-2zM68 78h2v2h-2z"/>
+</g>
+<g id="knight-idle-0-head_helmet" data-layer="head_helmet">
+<path fill="#1c3144" d="M84 12h2v2h-2zM74 14h2v2h-2zM78 14h4v2h-4zM54 34h2v2h-2zM82 34h2v2h-2z"/>
+<path fill="#271f1b" d="M80 8h8v2h-8zM76 10h4v2h-4zM88 10h4v2h-4zM64 12h10v2h-10zM86 12h4v2h-4zM60 14h4v2h-4zM70 14h4v2h-4zM82 14h4v2h-4zM58 16h2v2h-2zM74 16h8v2h-8zM56 18h2v2h-2zM82 18h2v2h-2zM54 20h2v2h-2zM84 20h2v2h-2zM52 22h2v2h-2zM84 22h2v2h-2zM52 24h2v2h-2zM86 24h2v2h-2zM52 26h2v2h-2zM86 26h2v2h-2zM52 28h2v2h-2zM86 28h2v2h-2zM50 30h2v2h-2zM86 30h2v2h-2zM50 32h38v2h-38zM50 34h4v2h-4zM84 34h4v2h-4zM50 36h6v2h-6zM82 36h6v2h-6zM50 38h2v2h-2zM56 38h26v2h-26zM86 38h2v2h-2zM50 40h2v2h-2zM86 40h2v2h-2zM50 42h2v2h-2zM86 42h2v2h-2zM50 44h2v2h-2zM62 44h2v2h-2zM76 44h2v2h-2zM86 44h2v2h-2zM50 46h2v2h-2zM54 46h2v2h-2zM60 46h4v2h-4zM74 46h4v2h-4zM82 46h2v2h-2zM86 46h2v2h-2zM50 48h2v2h-2zM54 48h2v2h-2zM82 48h2v2h-2zM86 48h2v2h-2zM50 50h6v2h-6zM82 50h6v2h-6zM56 52h2v2h-2zM80 52h2v2h-2zM58 54h2v2h-2zM78 54h2v2h-2zM60 56h18v2h-18zM62 58h14v2h-14z"/>
+<path fill="#274e68" d="M56 34h26v2h-26zM56 36h26v2h-26z"/>
+<path fill="#3a241b" d="M64 52h2v2h-2zM72 52h2v2h-2z"/>
+<path fill="#3a3c3f" d="M68 14h2v2h-2zM68 16h4v2h-4zM68 18h4v2h-4zM68 20h4v2h-4zM68 22h4v2h-4zM68 24h4v2h-4zM68 26h4v2h-4zM68 28h4v2h-4zM68 30h4v2h-4zM52 46h2v2h-2zM84 46h2v2h-2zM52 48h2v2h-2zM84 48h2v2h-2z"/>
+<path fill="#3d6c89" d="M80 10h8v2h-8zM74 12h10v2h-10zM76 14h2v2h-2z"/>
+<path fill="#5b5e60" d="M64 14h4v2h-4zM60 16h4v2h-4zM72 16h2v2h-2zM58 18h4v2h-4zM78 18h4v2h-4zM56 20h2v2h-2zM80 20h4v2h-4zM54 22h2v2h-2zM82 22h2v2h-2zM54 24h2v2h-2zM84 24h2v2h-2zM84 26h2v2h-2zM84 28h2v2h-2zM52 30h2v2h-2z"/>
+<path fill="#8e9191" d="M72 18h6v2h-6zM72 20h8v2h-8zM72 22h10v2h-10zM72 24h12v2h-12zM72 26h12v2h-12zM72 28h12v2h-12zM72 30h14v2h-14zM52 38h4v2h-4zM82 38h4v2h-4zM52 40h4v2h-4zM82 40h4v2h-4zM52 42h4v2h-4zM82 42h4v2h-4zM52 44h4v2h-4zM82 44h4v2h-4z"/>
+<path fill="#c4c3b8" d="M64 16h4v2h-4zM62 18h6v2h-6zM58 20h10v2h-10zM56 22h12v2h-12zM56 24h12v2h-12zM54 26h14v2h-14zM54 28h14v2h-14zM54 30h14v2h-14zM60 44h2v2h-2zM74 44h2v2h-2z"/>
+<path fill="#de8f5f" d="M68 46h4v2h-4zM68 48h4v2h-4zM56 50h2v2h-2zM80 50h2v2h-2zM58 52h2v2h-2zM78 52h2v2h-2zM60 54h2v2h-2zM76 54h2v2h-2z"/>
+<path fill="#f7b77d" d="M56 40h26v2h-26zM56 42h26v2h-26zM56 44h4v2h-4zM64 44h10v2h-10zM78 44h4v2h-4zM56 46h4v2h-4zM64 46h4v2h-4zM72 46h2v2h-2zM78 46h4v2h-4zM56 48h12v2h-12zM72 48h10v2h-10zM58 50h22v2h-22zM60 52h4v2h-4zM66 52h6v2h-6zM74 52h4v2h-4zM62 54h14v2h-14z"/>
+</g>
+<g id="knight-idle-0-tool_back" data-layer="tool_back">
+</g>
+<g id="knight-idle-0-tool_front" data-layer="tool_front">
+</g>
+<g id="knight-idle-0-arm_front_hand" data-layer="arm_front_hand">
+<path fill="#271f1b" d="M46 58h2v2h-2zM90 58h2v2h-2zM44 60h2v2h-2zM92 60h2v2h-2zM44 62h2v2h-2zM54 62h2v2h-2zM82 62h2v2h-2zM92 62h2v2h-2zM42 64h2v2h-2zM52 64h2v2h-2zM84 64h2v2h-2zM94 64h2v2h-2zM42 66h2v2h-2zM52 66h2v2h-2zM84 66h2v2h-2zM94 66h2v2h-2zM40 68h2v2h-2zM50 68h2v2h-2zM86 68h2v2h-2zM96 68h2v2h-2zM40 70h4v2h-4zM50 70h2v2h-2zM86 70h2v2h-2zM94 70h2v2h-2zM52 74h2v2h-2zM84 74h2v2h-2zM54 76h12v2h-12zM72 76h12v2h-12zM58 78h2v2h-2zM62 78h6v2h-6zM70 78h6v2h-6zM78 78h2v2h-2zM58 80h2v2h-2zM62 80h2v2h-2zM66 80h2v2h-2zM70 80h2v2h-2zM74 80h2v2h-2zM78 80h2v2h-2zM52 82h16v2h-16zM70 82h16v2h-16zM60 84h2v2h-2zM76 84h2v2h-2z"/>
+<path fill="#274e68" d="M48 58h2v2h-2zM88 58h2v2h-2zM46 60h6v2h-6zM86 60h6v2h-6zM46 62h8v2h-8zM84 62h8v2h-8zM44 64h8v2h-8zM86 64h8v2h-8zM44 66h8v2h-8zM86 66h8v2h-8zM42 68h8v2h-8zM88 68h8v2h-8zM44 70h6v2h-6zM88 70h6v2h-6zM42 72h10v2h-10zM86 72h10v2h-10zM44 74h8v2h-8zM86 74h8v2h-8zM46 76h6v2h-6zM86 76h6v2h-6zM48 78h4v2h-4zM86 78h4v2h-4zM50 80h2v2h-2zM86 80h2v2h-2z"/>
+<path fill="#5b3722" d="M64 80h2v2h-2zM72 80h2v2h-2z"/>
+<path fill="#5b5e60" d="M52 76h2v2h-2zM84 76h2v2h-2zM52 78h6v2h-6zM80 78h6v2h-6zM52 80h6v2h-6zM80 80h6v2h-6z"/>
+<path fill="#8e9191" d="M60 78h2v2h-2zM76 78h2v2h-2zM60 80h2v2h-2zM76 80h2v2h-2z"/>
+</g>
+<g id="knight-idle-0-fx_front" data-layer="fx_front">
+</g>
+</g><g id="knight-idle-1" class="frame frame-1" data-pose="idle_01">
+<g id="knight-idle-1-shadow" data-layer="shadow">
+<path fill="#271f1b" fill-opacity="0.227" d="M54 100h30v2h-30zM48 102h42v2h-42z"/>
+</g>
+<g id="knight-idle-1-cape_back" data-layer="cape_back">
+<path fill="#1c3144" d="M54 56h30v2h-30zM54 58h2v2h-2zM82 58h2v2h-2zM52 60h4v2h-4zM82 60h4v2h-4zM52 62h4v2h-4zM84 62h2v2h-2zM52 64h2v2h-2zM84 64h2v2h-2zM52 66h2v2h-2zM84 66h2v2h-2zM50 68h4v2h-4zM84 68h4v2h-4zM50 70h4v2h-4zM84 70h4v2h-4zM50 72h4v2h-4zM84 72h4v2h-4zM50 74h4v2h-4zM84 74h4v2h-4zM48 76h4v2h-4zM86 76h4v2h-4zM48 78h4v2h-4zM86 78h4v2h-4zM48 80h4v2h-4zM86 80h4v2h-4zM50 82h4v2h-4zM84 82h4v2h-4zM50 84h6v2h-6zM82 84h6v2h-6zM52 86h6v2h-6zM80 86h6v2h-6zM52 88h34v2h-34z"/>
+<path fill="#271f1b" d="M52 54h34v2h-34zM52 56h2v2h-2zM84 56h2v2h-2zM52 58h2v2h-2zM84 58h2v2h-2zM50 60h2v2h-2zM86 60h2v2h-2zM50 62h2v2h-2zM86 62h2v2h-2zM50 64h2v2h-2zM86 64h2v2h-2zM50 66h2v2h-2zM86 66h2v2h-2zM48 68h2v2h-2zM88 68h2v2h-2zM48 70h2v2h-2zM88 70h2v2h-2zM48 72h2v2h-2zM88 72h2v2h-2zM48 74h2v2h-2zM88 74h2v2h-2zM46 76h2v2h-2zM90 76h2v2h-2zM46 78h2v2h-2zM90 78h2v2h-2zM46 80h2v2h-2zM90 80h2v2h-2zM48 82h2v2h-2zM88 82h2v2h-2zM48 84h2v2h-2zM88 84h2v2h-2zM50 86h2v2h-2zM86 86h2v2h-2zM50 88h2v2h-2zM86 88h2v2h-2zM52 90h34v2h-34z"/>
+<path fill="#274e68" d="M56 58h26v2h-26zM56 60h26v2h-26zM56 62h22v2h-22zM54 64h24v2h-24zM54 66h24v2h-24zM54 68h24v2h-24zM54 70h24v2h-24zM54 72h24v2h-24zM54 74h24v2h-24zM52 76h26v2h-26zM84 76h2v2h-2zM52 78h26v2h-26zM84 78h2v2h-2zM52 80h34v2h-34zM54 82h30v2h-30zM56 84h26v2h-26zM58 86h22v2h-22z"/>
+<path fill="#3d6c89" d="M78 62h6v2h-6zM78 64h6v2h-6zM78 66h6v2h-6zM78 68h6v2h-6zM78 70h6v2h-6zM78 72h6v2h-6zM78 74h6v2h-6zM78 76h6v2h-6zM78 78h6v2h-6z"/>
+</g>
+<g id="knight-idle-1-arm_back" data-layer="arm_back">
+</g>
+<g id="knight-idle-1-body" data-layer="body">
+<path fill="#1c3144" d="M60 54h18v2h-18zM50 66h4v2h-4zM84 66h4v2h-4zM50 68h4v2h-4zM84 68h4v2h-4zM52 70h2v2h-2zM84 70h2v2h-2zM52 72h2v2h-2zM84 72h2v2h-2zM52 74h2v2h-2zM84 74h2v2h-2zM52 76h2v2h-2zM84 76h2v2h-2zM54 82h2v2h-2zM82 82h2v2h-2zM68 84h2v2h-2z"/>
+<path fill="#271f1b" d="M58 52h22v2h-22zM54 54h6v2h-6zM78 54h6v2h-6zM50 56h4v2h-4zM58 56h2v2h-2zM78 56h2v2h-2zM82 56h6v2h-6zM48 58h2v2h-2zM60 58h2v2h-2zM78 58h2v2h-2zM88 58h2v2h-2zM48 60h2v2h-2zM60 60h18v2h-18zM88 60h2v2h-2zM46 62h4v2h-4zM58 62h4v2h-4zM76 62h6v2h-6zM88 62h4v2h-4zM48 64h12v2h-12zM78 64h2v2h-2zM82 64h8v2h-8zM48 66h2v2h-2zM56 66h2v2h-2zM80 66h2v2h-2zM88 66h2v2h-2zM48 68h2v2h-2zM56 68h2v2h-2zM80 68h2v2h-2zM88 68h2v2h-2zM50 70h2v2h-2zM56 70h2v2h-2zM80 70h2v2h-2zM86 70h2v2h-2zM50 72h2v2h-2zM58 72h2v2h-2zM78 72h2v2h-2zM86 72h2v2h-2zM50 74h2v2h-2zM54 74h30v2h-30zM86 74h2v2h-2zM50 76h2v2h-2zM54 76h2v2h-2zM66 76h2v2h-2zM70 76h2v2h-2zM82 76h2v2h-2zM86 76h2v2h-2zM52 78h4v2h-4zM66 78h2v2h-2zM70 78h2v2h-2zM82 78h4v2h-4zM52 80h34v2h-34zM52 82h2v2h-2zM56 82h12v2h-12zM70 82h12v2h-12zM84 82h2v2h-2zM54 84h4v2h-4zM66 84h2v2h-2zM70 84h2v2h-2zM80 84h6v2h-6zM54 86h2v2h-2zM64 86h8v2h-8zM82 86h4v2h-4zM54 88h6v2h-6zM64 88h6v2h-6zM72 88h2v2h-2zM78 88h6v2h-6zM86 88h2v2h-2zM54 90h4v2h-4zM60 90h10v2h-10zM72 90h6v2h-6zM82 90h2v2h-2zM86 90h2v2h-2zM54 92h4v2h-4zM66 92h4v2h-4zM72 92h2v2h-2zM82 92h2v2h-2zM86 92h2v2h-2zM54 94h16v2h-16zM72 94h16v2h-16zM52 96h2v2h-2zM66 96h2v2h-2zM72 96h2v2h-2zM86 96h2v2h-2zM52 98h2v2h-2zM68 98h4v2h-4zM86 98h2v2h-2zM50 100h2v2h-2zM68 100h4v2h-4zM88 100h2v2h-2zM50 102h2v2h-2zM66 102h2v2h-2zM70 102h2v2h-2zM86 102h2v2h-2z"/>
+<path fill="#274e68" d="M60 56h18v2h-18zM62 58h16v2h-16zM80 64h2v2h-2zM54 66h2v2h-2zM82 66h2v2h-2zM54 68h2v2h-2zM82 68h2v2h-2zM54 70h2v2h-2zM82 70h2v2h-2zM54 72h4v2h-4zM80 72h4v2h-4zM68 82h2v2h-2zM58 84h8v2h-8zM72 84h8v2h-8zM56 86h8v2h-8zM72 86h10v2h-10zM60 88h4v2h-4zM74 88h4v2h-4z"/>
+<path fill="#3a241b" d="M56 76h10v2h-10zM72 76h10v2h-10zM56 78h10v2h-10zM72 78h10v2h-10zM66 98h2v2h-2zM72 98h2v2h-2zM52 100h16v2h-16zM72 100h16v2h-16zM52 102h14v2h-14zM72 102h14v2h-14z"/>
+<path fill="#3d6c89" d="M62 62h6v2h-6zM70 62h6v2h-6zM62 64h6v2h-6zM70 64h6v2h-6zM62 66h6v2h-6zM70 66h6v2h-6zM60 68h8v2h-8zM70 68h8v2h-8zM60 70h8v2h-8zM70 70h8v2h-8zM62 72h6v2h-6zM70 72h6v2h-6z"/>
+<path fill="#5b5e60" d="M54 56h4v2h-4zM80 56h2v2h-2zM50 58h2v2h-2zM58 58h2v2h-2zM86 58h2v2h-2zM50 60h10v2h-10zM78 60h10v2h-10zM50 62h8v2h-8zM82 62h6v2h-6zM60 64h2v2h-2zM76 64h2v2h-2zM58 66h4v2h-4zM76 66h4v2h-4zM58 68h2v2h-2zM78 68h2v2h-2zM58 70h2v2h-2zM78 70h2v2h-2zM60 72h2v2h-2zM76 72h2v2h-2zM84 88h2v2h-2zM84 90h2v2h-2zM84 92h2v2h-2z"/>
+<path fill="#824f2b" d="M54 96h12v2h-12zM74 96h12v2h-12zM54 98h12v2h-12zM74 98h12v2h-12z"/>
+<path fill="#8e9191" d="M58 90h2v2h-2zM78 90h4v2h-4zM58 92h8v2h-8zM74 92h8v2h-8z"/>
+<path fill="#c4c3b8" d="M52 58h6v2h-6zM80 58h6v2h-6z"/>
+<path fill="#efc35e" d="M68 62h2v2h-2zM68 64h2v2h-2zM68 66h2v2h-2zM68 68h2v2h-2zM68 70h2v2h-2zM68 72h2v2h-2zM68 76h2v2h-2zM68 78h2v2h-2z"/>
+</g>
+<g id="knight-idle-1-head_helmet" data-layer="head_helmet">
+<path fill="#1c3144" d="M86 14h2v2h-2zM76 16h2v2h-2zM80 16h4v2h-4zM54 36h2v2h-2zM82 36h2v2h-2z"/>
+<path fill="#271f1b" d="M82 10h8v2h-8zM78 12h4v2h-4zM90 12h4v2h-4zM64 14h12v2h-12zM88 14h4v2h-4zM60 16h4v2h-4zM72 16h4v2h-4zM84 16h4v2h-4zM58 18h2v2h-2zM76 18h8v2h-8zM56 20h2v2h-2zM82 20h2v2h-2zM54 22h2v2h-2zM84 22h2v2h-2zM52 24h2v2h-2zM84 24h2v2h-2zM52 26h2v2h-2zM86 26h2v2h-2zM52 28h2v2h-2zM86 28h2v2h-2zM52 30h2v2h-2zM86 30h2v2h-2zM50 32h2v2h-2zM86 32h2v2h-2zM50 34h38v2h-38zM50 36h4v2h-4zM84 36h4v2h-4zM50 38h6v2h-6zM82 38h6v2h-6zM50 40h2v2h-2zM56 40h26v2h-26zM86 40h2v2h-2zM50 42h2v2h-2zM86 42h2v2h-2zM50 44h2v2h-2zM86 44h2v2h-2zM50 46h2v2h-2zM60 46h6v2h-6zM72 46h6v2h-6zM86 46h2v2h-2zM50 48h2v2h-2zM54 48h2v2h-2zM82 48h2v2h-2zM86 48h2v2h-2zM50 50h2v2h-2zM54 50h2v2h-2zM82 50h2v2h-2zM86 50h2v2h-2zM50 52h6v2h-6zM82 52h6v2h-6zM56 54h2v2h-2zM80 54h2v2h-2zM58 56h2v2h-2zM78 56h2v2h-2zM60 58h18v2h-18zM62 60h14v2h-14z"/>
+<path fill="#274e68" d="M56 36h26v2h-26zM56 38h26v2h-26z"/>
+<path fill="#3a241b" d="M64 54h2v2h-2zM72 54h2v2h-2z"/>
+<path fill="#3a3c3f" d="M68 16h4v2h-4zM68 18h4v2h-4zM68 20h4v2h-4zM68 22h4v2h-4zM68 24h4v2h-4zM68 26h4v2h-4zM68 28h4v2h-4zM68 30h4v2h-4zM68 32h4v2h-4zM52 48h2v2h-2zM84 48h2v2h-2zM52 50h2v2h-2zM84 50h2v2h-2z"/>
+<path fill="#3d6c89" d="M82 12h8v2h-8zM76 14h10v2h-10zM78 16h2v2h-2z"/>
+<path fill="#5b5e60" d="M64 16h4v2h-4zM60 18h4v2h-4zM72 18h4v2h-4zM58 20h4v2h-4zM78 20h4v2h-4zM56 22h2v2h-2zM80 22h4v2h-4zM54 24h2v2h-2zM82 24h2v2h-2zM54 26h2v2h-2zM84 26h2v2h-2zM84 28h2v2h-2zM84 30h2v2h-2zM52 32h2v2h-2z"/>
+<path fill="#8e9191" d="M72 20h6v2h-6zM72 22h8v2h-8zM72 24h10v2h-10zM72 26h12v2h-12zM72 28h12v2h-12zM72 30h12v2h-12zM72 32h14v2h-14zM52 40h4v2h-4zM82 40h4v2h-4zM52 42h4v2h-4zM82 42h4v2h-4zM52 44h4v2h-4zM82 44h4v2h-4zM52 46h4v2h-4zM82 46h4v2h-4z"/>
+<path fill="#c4c3b8" d="M64 18h4v2h-4zM62 20h6v2h-6zM58 22h10v2h-10zM56 24h12v2h-12zM56 26h12v2h-12zM54 28h14v2h-14zM54 30h14v2h-14zM54 32h14v2h-14z"/>
+<path fill="#de8f5f" d="M68 48h4v2h-4zM68 50h4v2h-4zM56 52h2v2h-2zM80 52h2v2h-2zM58 54h2v2h-2zM78 54h2v2h-2zM60 56h2v2h-2zM76 56h2v2h-2z"/>
+<path fill="#f7b77d" d="M56 42h26v2h-26zM56 44h26v2h-26zM56 46h4v2h-4zM66 46h6v2h-6zM78 46h4v2h-4zM56 48h12v2h-12zM72 48h10v2h-10zM56 50h12v2h-12zM72 50h10v2h-10zM58 52h22v2h-22zM60 54h4v2h-4zM66 54h6v2h-6zM74 54h4v2h-4zM62 56h14v2h-14z"/>
+</g>
+<g id="knight-idle-1-tool_back" data-layer="tool_back">
+</g>
+<g id="knight-idle-1-tool_front" data-layer="tool_front">
+</g>
+<g id="knight-idle-1-arm_front_hand" data-layer="arm_front_hand">
+<path fill="#271f1b" d="M46 58h2v2h-2zM90 58h2v2h-2zM44 60h2v2h-2zM92 60h2v2h-2zM44 62h2v2h-2zM54 62h2v2h-2zM82 62h2v2h-2zM92 62h2v2h-2zM42 64h2v2h-2zM52 64h2v2h-2zM84 64h2v2h-2zM94 64h2v2h-2zM42 66h2v2h-2zM52 66h2v2h-2zM84 66h2v2h-2zM94 66h2v2h-2zM40 68h2v2h-2zM50 68h2v2h-2zM86 68h2v2h-2zM96 68h2v2h-2zM40 70h4v2h-4zM50 70h2v2h-2zM86 70h2v2h-2zM94 70h2v2h-2zM52 74h2v2h-2zM84 74h2v2h-2zM54 76h12v2h-12zM72 76h12v2h-12zM58 78h2v2h-2zM62 78h6v2h-6zM70 78h6v2h-6zM78 78h2v2h-2zM58 80h2v2h-2zM62 80h2v2h-2zM66 80h2v2h-2zM70 80h2v2h-2zM74 80h2v2h-2zM78 80h2v2h-2zM52 82h16v2h-16zM70 82h16v2h-16zM60 84h2v2h-2zM76 84h2v2h-2z"/>
+<path fill="#274e68" d="M48 58h2v2h-2zM88 58h2v2h-2zM46 60h6v2h-6zM86 60h6v2h-6zM46 62h8v2h-8zM84 62h8v2h-8zM44 64h8v2h-8zM86 64h8v2h-8zM44 66h8v2h-8zM86 66h8v2h-8zM42 68h8v2h-8zM88 68h8v2h-8zM44 70h6v2h-6zM88 70h6v2h-6zM42 72h10v2h-10zM86 72h10v2h-10zM44 74h8v2h-8zM86 74h8v2h-8zM46 76h6v2h-6zM86 76h6v2h-6zM48 78h4v2h-4zM86 78h4v2h-4zM50 80h2v2h-2zM86 80h2v2h-2z"/>
+<path fill="#5b3722" d="M64 80h2v2h-2zM72 80h2v2h-2z"/>
+<path fill="#5b5e60" d="M52 76h2v2h-2zM84 76h2v2h-2zM52 78h6v2h-6zM80 78h6v2h-6zM52 80h6v2h-6zM80 80h6v2h-6z"/>
+<path fill="#8e9191" d="M60 78h2v2h-2zM76 78h2v2h-2zM60 80h2v2h-2zM76 80h2v2h-2z"/>
+</g>
+<g id="knight-idle-1-fx_front" data-layer="fx_front">
+</g>
+</g>
+</svg>

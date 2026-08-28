@@ -1,0 +1,300 @@
+version: 1
+feature_id: "gui.projection.readonly-console"
+title: "Read-only Projection Console"
+status: "implemented"
+
+characteristics:
+  cross_component: true
+  asynchronous: false
+  persisted_state: false
+  external_dependencies: false
+  retry_or_compensation: false
+  security_sensitive: true
+
+nodes:
+  E1:
+    kind: entry
+    description: Console or another local consumer requests one of the state-bearing read Projection APIs
+    trigger: GET /api/snapshot, GET /api/tasks/:id, or GET /api/events
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D1:
+    kind: decision
+    description: Request is a recognized state-bearing GET and passes the local read guard
+    condition: method/path matches snapshot, task detail, or events and the exact local transport has a valid control cookie or configured matching bearer
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: state-bearing GET requires exact local Origin plus valid control cookie or configured bearer
+
+  A1:
+    kind: action
+    description: Dispatch the recognized GET to the snapshot, taskDetail, or eventsSince handler
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  A2:
+    kind: action
+    description: Host handlers read current bounded rows and construct Snapshot, Task Detail, or Event views
+    code:
+      - path: src/index.ts
+        symbol: ensureGuiServer
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/gui/snapshot.ts
+        symbol: toEventView
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testEventPayloadProjectionIsRecursivelyBoundedAndRedactedAcrossHttpReads
+
+  D2:
+    kind: decision
+    description: Projection has enough current evidence to describe the kingdom
+    condition: kingdom exists and v4 observations are readable; otherwise build an explicit empty or indeterminate view
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildReadonlySnapshotProjection
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionEmptyAndUnknownBranches
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionPreservesSchemaV4AndNegativeStates
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+
+  A3:
+    kind: action
+    description: Return an empty, not-found, or indeterminate bounded read result without side effects
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/index.ts
+        symbol: ensureGuiServer
+
+  A4:
+    kind: action
+    description: "Build additive Overview, bounded Organization/Execution history, uniformly redacted public Event/Binding/Territory/Execution/Claim views, output-sanitized Task.resultSummary, Task envelopes with redacted Assignment Ledger and TASK_HANDED_OFF Supervisor decision history, timeline, attention and action availability from read-only rows and events; select bounded mismatch groups by linked Claim/Execution evidence time and retain each mismatch Explanation only through an atomic Claim/FAILED Execution group"
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildReadonlySnapshotProjection
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/gui/snapshot.ts
+        symbol: toTaskView
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskProjection
+      - path: src/gui/snapshot.ts
+        symbol: buildOrganizationProjectionData
+      - path: src/gui/snapshot.ts
+        symbol: buildExecutionProjectionData
+      - path: src/gui/snapshot.ts
+        symbol: toTaskAssignmentHistoryView
+      - path: src/gui/snapshot.ts
+        symbol: toSupervisorDecisionView
+      - path: src/gui/snapshot.ts
+        symbol: toEventView
+      - path: src/gui/snapshot.ts
+        symbol: toBindingView
+      - path: src/gui/snapshot.ts
+        symbol: toTerritoryView
+      - path: src/gui/snapshot.ts
+        symbol: toClaimView
+      - path: src/gui/snapshot.ts
+        symbol: toExecutionView
+
+  A5:
+    kind: action
+    description: Serialize the bounded Snapshot, Task Detail, or Event result through the selected GET seam
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+
+  D3:
+    kind: decision
+    description: Displayed lifecycle candidate has verified Role context and a supported execution contract
+    condition: Host-derived session, scope and command coverage match, and the execution contract has an implemented control seam
+    code:
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testOwnerAndAgentActionsFailClosed
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testReadOnlyConsoleKeepsPostRoutesFailClosed
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testGovernedPersistentLatestExecutionBlocksStart
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionGovernedRuntimeControlsFailClosed
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+
+  X1:
+    kind: outcome
+    description: Request does not reach a Projection handler
+    result: Existing route/404 or bounded control/auth error with no Projection or write side effect
+
+  X2:
+    kind: outcome
+    description: Additive read-only projection JSON is available to the caller
+    result: Existing Overview, Task Detail, Timeline and Attention remain compatible; bounded Organization and Execution summaries are added; no write is performed
+
+  X3:
+    kind: outcome
+    description: Action remains disabled and is explained
+    result: Stable disabled reason; Owner-only actions show DIRECT_SLASH_REQUIRED and governed persistent controls show GOVERNED_RUNTIME_CONTROL_UNAVAILABLE
+
+  X4:
+    kind: outcome
+    description: Supported Role action is advertised as executable
+    result: Projection advertises the supported lifecycle candidate; Host still revalidates authority, state and capability before mutation
+
+  G1:
+    kind: safeguard
+    description: Read-only projection boundary
+    safeguard_type: authorization
+    guarantee: Projection builders perform reads and pure derivation only; they do not write DB/schema/ledger or dispatch Runtime work
+    protects: [A4, X2]
+    failure_behavior: Preserve not-run/indeterminate state and stop if the implementation needs a write outside Work Order scope
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildReadonlySnapshotProjection
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionHasNoWriteSideEffect
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+
+  G2:
+    kind: safeguard
+    description: "Bounded/redacted public Event, Binding, Territory, Execution and Claim views; evidence classification, bounded public source allowlists, redacted TASK_HANDED_OFF decisions and bounded Organization/Execution/Timeline output; representative and fill paths cannot append an orphan mismatch Explanation"
+    safeguard_type: privacy
+    guarantee: "Complete Snapshot, events, Task Detail and HTTP JSON preserve public field/type shape while redacting Event payload, Binding private config/session metadata, Territory path/summary, Execution detail, Claim summary/artifacts/risks, and Task.resultSummary at the toTaskView output boundary; this does not claim a DB write sanitizer. Session/principal/config/token/cookie/credential/private markers and raw paths do not escape, necessary organization identity/status and non-sensitive Claim content remain readable, and depth/nodes/entries/strings stay bounded; SourceRefs and TASK_HANDED_OFF fields remain bounded/redacted; Timeline mismatch groups remain paired while four evidence kinds stay distinct"
+    protects: [A4, A5]
+    failure_behavior: "If a complete mismatch group does not fit, omit the complete group; never append its Explanation alone. Omit unsafe references and retain indeterminate state rather than exposing raw payload/session/path data"
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildTimeline
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/gui/snapshot.ts
+        symbol: toTaskView
+      - path: src/gui/snapshot.ts
+        symbol: boundedSourceRefs
+      - path: src/gui/snapshot.ts
+        symbol: toSupervisorDecisionView
+      - path: src/gui/snapshot.ts
+        symbol: toEventView
+      - path: src/gui/snapshot.ts
+        symbol: toBindingView
+      - path: src/gui/snapshot.ts
+        symbol: sanitizePublicJsonString
+      - path: src/gui/snapshot.ts
+        symbol: sanitizePublicJsonValue
+      - path: src/gui/snapshot.ts
+        symbol: sanitizePublicJsonObject
+      - path: src/gui/snapshot.ts
+        symbol: toTerritoryView
+      - path: src/gui/snapshot.ts
+        symbol: toClaimView
+      - path: src/gui/snapshot.ts
+        symbol: toExecutionView
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionSourceRefsAreBoundedAndClassified
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionRetainsLatestEvidenceWhenTimelineExceedsCap
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionSourceRefsRejectPrivateIdentitiesAndRemainBounded
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testTaskDetailProjectsBoundedHandoffSupervisorDecision
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testEventPayloadProjectionIsRecursivelyBoundedAndRedactedAcrossHttpReads
+
+  G3:
+    kind: safeguard
+    description: Fail-closed action availability and Runtime control capability honesty
+    safeguard_type: authorization
+    guarantee: Canonical Owner-only actions are never executable through GUI/HTTP; Agent actions require exact Host-only Territory Supervisor context; governed persistent pause/resume/abort remain non-executable until a verified Runtime control seam exists, regardless of HTTP command presence
+    protects: [D3, X3]
+    failure_behavior: Return executable=false with DIRECT_SLASH_REQUIRED or a stable missing-context reason
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+      - path: src/index.ts
+        symbol: projectionSecurityFor
+      - path: src/gui/contract.ts
+        symbol: guiWriteGuard
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testOwnerAndAgentActionsFailClosed
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionGovernedRuntimeControlsFailClosed
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionActionAvailabilityUsesOpaqueSupervisorSessionAndCanonicalCommands
+
+  G4:
+    kind: safeguard
+    description: Truthful negative-state projection with governed active/recovering start fail-closed actions and paired, time-prioritized mismatch evidence
+    safeguard_type: validation
+    guarantee: "Indeterminate, RECOVERING, NOT_RUN and LEGACY_COMPAT states remain explicit; every latest STARTING/RUNNING/PAUSED/RECOVERING GOVERNED_PERSISTENT Execution exposes start only as lifecycleAllowed=false and executable=false; missing terminal evidence and Claim/Execution mismatch are not upgraded to success; over-cap mismatch explanations remain paired with their Claim and FAILED Execution evidence"
+    protects: [D2, A4, A5, X2]
+    failure_behavior: "Keep the negative state in summaries/timeline/attention; expose no executable duplicate start while a governed Execution is nonterminal or RECOVERING; omit an over-cap mismatch as a complete group rather than retaining an orphan, and do not retry or dispatch"
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildAttention
+      - path: src/gui/snapshot.ts
+        symbol: isGovernedStartBlocked
+      - path: src/gui/snapshot.ts
+        symbol: allowedActionsFor
+      - path: src/gui/snapshot.ts
+        symbol: buildActionAvailability
+    tests:
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionPreservesSchemaV4AndNegativeStates
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testProjectionRetainsLatestEvidenceWhenTimelineExceedsCap
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testV1ProjectionAddsBoundedOrganizationExecutionHistoryAndActionTruth
+      - path: tests/m3s2-v4-gui.test.ts
+        symbol: testGovernedPersistentLatestExecutionBlocksStart
+
+  G5:
+    kind: safeguard
+    description: State-bearing read transport and session guard
+    safeguard_type: authorization
+    guarantee: Snapshot, Task Detail and Event GET handlers run only for exact local transport with a valid control cookie or configured matching bearer; an explicit invalid or expired cookie never downgrades to bearer or anonymous access
+    protects: [D1, A1, X1]
+    failure_behavior: Return a bounded CONTROL_ORIGIN_DENIED, CONTROL_SESSION_REQUIRED, or existing auth/route error before invoking the Projection handler
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+    tests:
+      - path: tests/gui-control-server.test.ts
+        symbol: state-bearing GET requires exact local Origin plus valid control cookie or configured bearer

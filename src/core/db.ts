@@ -282,7 +282,10 @@ export interface ExecutionRow {
   task_id: string
   attempt_no: number
   worker_binding_id: string | null
-  /** 该次执行的 one-shot subagent session id（每轮 REWORK 都是新的）。 */
+  /**
+   * 该次执行的 runtime session id；LEGACY_COMPAT 每轮 REWORK 都是新的 one-shot，
+   * GOVERNED_PERSISTENT 则记录被复用的长期 Worker Session。
+   */
   session_id: string | null
   /** STARTING / RUNNING / PAUSED / COMPLETED / FAILED / ABORTED，见 ./execution.ts。 */
   state: string
@@ -292,7 +295,7 @@ export interface ExecutionRow {
   /**
    * 最近一次**状态转移**的时刻，不是心跳。
    *
-   * 诚实说明：one-shot subagent 这个 seam 不提供任何进度回调
+   * 诚实说明：LEGACY_COMPAT one-shot subagent seam 不提供任何进度回调
    * （`SubagentRun` 只有 `{id, localAgent, result, dispose}`），
    * 所以执行进行中没有任何可以周期性上报的信号，本字段在整个执行体内不会前进。
    *
@@ -305,7 +308,7 @@ export interface ExecutionRow {
   /**
    * 暂停请求时间。
    *
-   * one-shot subagent 无法在一次 turn 中途真正挂起，因此"暂停"的诚实语义是：
+   * LEGACY_COMPAT one-shot subagent 无法在一次 turn 中途真正挂起，因此"暂停"的诚实语义是：
    * 请求已登记，**在下一个 attempt 边界生效**。执行中的 Execution 会保持
    * `RUNNING` 并带 `pause_requested_at`（GUI 应显示"准备休息"而不是"已睡着"）。
    */
@@ -442,6 +445,8 @@ export interface TaskRow {
   acceptance_criteria: string | null
   /** 最近一次 Worker Claim 的摘要。**是 Claim，不是完成事实**。 */
   result_summary: string | null
+  /** v0.8：Task 的非权威 Capability Requirement；旧 v3 库可能没有该列。 */
+  capability_requirement_json?: string | null
   created_at: string
   updated_at: string
 }
@@ -460,7 +465,7 @@ export interface WorkerResultRow {
   /** 第几次尝试，从 1 起；REWORK 每轮 +1。UNIQUE(task_id, attempt_no)。 */
   attempt_no: number
   worker_binding_id: string | null
-  /** 该 attempt 的 one-shot subagent session id（每轮 REWORK 都是新 session）。 */
+  /** 该 attempt 的 runtime session id；仅 LEGACY_COMPAT 每轮 REWORK 都是新 one-shot session。 */
   session_id: string | null
   /** Worker 自称的结果：COMPLETED / FAILED / BLOCKED。是 Claim。 */
   outcome: string
@@ -686,7 +691,7 @@ export class KingdomStore {
 
   // ── v0.8（M3-S2 Schema v4 Design v6，Owner 三次 Review APPROVED）─────────
   //
-  // 忠实实现 v6（D:\dsh\kingdom\docs\M3-S2-SCHEMA-V4-DESIGN-v6.md + 49/49 验证脚本）：
+  // 忠实实现 v6（M3-S2 Schema v4 Design v6 + 当时的 49/49 验证脚本）：
   // - 四套独立 Core Ledger：session_territory_affinities / execution_leases /
   //   capability_decisions / dispatch_records；
   // - executions 重建（v6 §14）：建 executions_v4 暂存表（v2 证据列 + 新增
@@ -1492,6 +1497,74 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
   }
 
   /**
+   * Exact Dispatch lookup for one Task attempt.
+   *
+   * Integrity decisions must not scan a bounded event projection: the
+   * dispatch/task/attempt relation is authoritative in dispatch_records.
+   */
+  listDispatchesForTaskAttempt(taskId: string, attemptNo: number): DispatchRecordRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM dispatch_records
+           WHERE task_id = ? AND attempt_no = ?
+           ORDER BY created_at ASC`,
+      )
+      .all(taskId, attemptNo) as unknown as DispatchRecordRow[]
+  }
+
+  /**
+   * Exact, replay-safe lookup for an open terminal integrity incident.
+   * The SQL predicate narrows by the exact Dispatch target; the bounded JSON
+   * payload is then checked against the exact Task/attempt correlation.
+   */
+  getOpenDispatchTerminalIntegrityIncident(
+    kingdomId: string,
+    dispatchId: string,
+    taskId: string,
+    attemptNo: number,
+  ): EventRow | null {
+    // The Dispatch row is authoritative for the Task/attempt relation.  Do
+    // not accept an event merely because its target_id happens to match a
+    // caller-supplied string.
+    const dispatch = this.getDispatch(dispatchId)
+    if (
+      !dispatch
+      || dispatch.kingdom_id !== kingdomId
+      || dispatch.task_id !== taskId
+      || dispatch.attempt_no !== attemptNo
+    ) return null
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM events
+           WHERE kingdom_id = ?
+             AND event_type = 'DISPATCH_TERMINAL_INTEGRITY_INCIDENT'
+             AND target_type = 'dispatch'
+             AND target_id = ?
+           ORDER BY seq ASC`,
+      )
+      .all(kingdomId, dispatchId) as unknown as EventRow[]
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(row.payload_json) as {
+          incident_code?: unknown
+          state?: unknown
+          attempt_no?: unknown
+        }
+        if (
+          payload.incident_code === 'DISPATCH_TERMINAL_INTEGRITY_INCIDENT'
+          && payload.state === 'OPEN'
+          && payload.attempt_no === attemptNo
+        ) {
+          return row
+        }
+      } catch {
+        // A malformed incident payload is not trusted as a matching incident.
+      }
+    }
+    return null
+  }
+
+  /**
    * 王国当前 revision = 最大事件序号。
    *
    * 任何治理动作都会追加事件，所以这个数既是事件游标，也是"数据版本"：
@@ -1602,12 +1675,21 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
   }
 
   insertTask(row: TaskRow): TaskRow {
+    const hasRequirementColumn = (this.db
+      .prepare('PRAGMA table_info(tasks)')
+      .all() as unknown as { name: string }[])
+      .some(column => column.name === 'capability_requirement_json')
+    if (!hasRequirementColumn && row.capability_requirement_json != null) {
+      throw new Error('TASK_CAPABILITY_REQUIREMENT_UNAVAILABLE: Schema v4 未迁移，拒绝丢弃 Task requirement')
+    }
+    const columns = hasRequirementColumn ? ', capability_requirement_json' : ''
+    const values = hasRequirementColumn ? ', ?' : ''
     this.db
       .prepare(
         `INSERT INTO tasks
            (task_id, territory_id, parent_task_id, title, description, assigned_binding_id,
-            status, acceptance_criteria, result_summary, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             status, acceptance_criteria, result_summary, created_at, updated_at${columns})
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${values})`,
       )
       .run(
         row.task_id,
@@ -1621,6 +1703,7 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
         row.result_summary,
         row.created_at,
         row.updated_at,
+        ...(hasRequirementColumn ? [row.capability_requirement_json ?? null] : []),
       )
     return row
   }
@@ -2113,12 +2196,21 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
   // tasks.capability_requirement_json / kingdoms.capability_ceiling_json（v6 增量）────
 
   getTaskCapabilityRequirement(taskId: string): string | null {
+    if (!this.getTaskCapabilityRequirementColumn()) return null
     const row = this.db.prepare('SELECT capability_requirement_json FROM tasks WHERE task_id = ?').get(taskId) as unknown as { capability_requirement_json: string | null } | undefined
     return row?.capability_requirement_json ?? null
   }
 
   setTaskCapabilityRequirement(taskId: string, json: string | null): void {
+    if (!this.getTaskCapabilityRequirementColumn()) {
+      throw new Error('TASK_CAPABILITY_REQUIREMENT_UNAVAILABLE: Schema v4 未迁移')
+    }
     this.db.prepare('UPDATE tasks SET capability_requirement_json = ? WHERE task_id = ?').run(json, taskId)
+  }
+
+  private getTaskCapabilityRequirementColumn(): boolean {
+    return (this.db.prepare('PRAGMA table_info(tasks)').all() as unknown as { name: string }[])
+      .some(column => column.name === 'capability_requirement_json')
   }
 
   getKingdomCapabilityCeiling(kingdomId: string): string | null {

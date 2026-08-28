@@ -18,6 +18,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, RoleBindingRow } from './db.js'
+import { isOwnerControlCapability, requireOwnerControl, type OwnerControlCapability } from './owner-control.js'
 
 export const ROLE_TYPES = ['OWNER', 'CHANCELLOR', 'SUPERVISOR', 'WORKER'] as const
 export type RoleType = (typeof ROLE_TYPES)[number]
@@ -83,8 +84,9 @@ export function parseExecutionProfile(json: string | null): ExecutionProfileV1 |
 /**
  * v0.6.0（M1-C）：设置/清空角色执行配置（组织资源配置，治理对象）。
  *
- * 必须走 Trusted Governance Administration Plane（requireAdmin）：
- * session-bound 下仅真实 OWNER 会话可执行；declarative 演示模式保持现状。
+ * 必须走 Core Owner Control gate（requireAdmin → requireOwnerControl）：
+ * 只有 direct `/kingdom` Slash 持有的 opaque capability 可执行；Agent
+ * Session、`OWNER.session_id` 与 declarative auth 均不是 Owner Authority。
  * 独立工具面 `kingdom_set_execution_profile`，不塞进 bind_session
  * （治理身份 Session 与执行能力 Profile 不混用）。
  */
@@ -106,7 +108,7 @@ export function setExecutionProfile(store: KingdomStore, input: SetExecutionProf
     kingdom_id: input.kingdomId,
     event_type: 'EXECUTION_PROFILE_UPDATED',
     actor_role: admin.owner ? 'OWNER' : binding.role_type,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
     payload_json: JSON.stringify({
@@ -115,6 +117,7 @@ export function setExecutionProfile(store: KingdomStore, input: SetExecutionProf
       provider: input.profile?.provider ?? null,
       model: input.profile?.model ?? null,
       cleared: input.profile === null,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: new Date().toISOString(),
   })
@@ -161,44 +164,54 @@ export interface RebindSessionInput extends SessionIdentity {
 /**
  * v0.5.2：Trusted Governance Administration Plane 的授权输入。
  *
- * 管理面（任命/罢免/改绑/换届）的调用者身份只允许来自 DSH Runtime
- * （工具面经 `sessionPrincipal(exec)` 注入），**绝不允许调用参数自报**。
- * - `declarative`（本地演示）：不校验调用者（snapshot 如实标注 local-demo）；
- * - `session-bound`（真实权限边界）：只有 OWNER binding 关联的真实会话可执行。
+ * Owner-only 管理面（任命/罢免/改绑/换届/执行配置）的唯一授权输入是
+ * direct `/kingdom` handler 内部取得的 `OwnerControlCapability`。
+ * `mode` 与 `principalSessionId` 保留为兼容类型字段，不能产生写权限；
+ * `declarative`、`session-bound` 以及旧的 `OWNER.session_id` 均只表示历史
+ * 运行上下文，不能作为 Owner Authority。
  */
 export interface AdminAuth {
   mode: 'declarative' | 'session-bound'
   /** 调用方会话（来自 DSH Runtime 证明，工具面注入）。 */
   principalSessionId?: string | null
+  /** Trusted-local direct Slash capability; never accepted from a Tool/HTTP payload. */
+  ownerControl?: OwnerControlCapability
 }
 
 /**
- * v0.5.2 管理面守卫：组织管理（bind/unbind/rebind）在 session-bound 模式下
- * 仅 OWNER 真实会话可执行；OWNER 未绑定会话时 fail-closed（不猜、不放行）。
+ * Core Owner gate（兼容旧符号名）：所有产品 Owner-only 写统一只接受
+ * direct Slash mint 的 opaque capability。旧 auth 输入即使包含匹配的
+ * OWNER.session_id 或 declarative mode 也 fail-closed、zero-write。
  */
 export function requireAdmin(
   store: KingdomStore,
   kingdomId: string,
   auth?: AdminAuth,
-): { ok: true; owner: RoleBindingRow | null } | { ok: false; message: string } {
-  if (!auth || auth.mode !== 'session-bound') {
-    return { ok: true, owner: null } // declarative：本地可信演示权限，保持现状
-  }
-  const owner = store.getBindingByRole(kingdomId, 'OWNER')
-  if (!owner) {
-    return { ok: false, message: '错误：当前王国没有 OWNER 绑定，组织管理无法验证管理者身份。' }
-  }
-  if (!owner.session_id) {
+): {
+  ok: true
+  owner: RoleBindingRow | null
+  ownerPrincipalId: string | null
+  ownerControl: boolean
+} | { ok: false; message: string } {
+  // Owner Control is the only write-capable authentication face. It deliberately
+  // does not inspect OWNER.session_id or any runtime caller attribution.
+  if (auth?.ownerControl && isOwnerControlCapability(auth.ownerControl)) {
+    const checked = requireOwnerControl(store, kingdomId, auth.ownerControl)
+    if (!checked.ok) return checked
     return {
-      ok: false,
-      message: '错误：OWNER 绑定未关联会话，session-bound 模式下无法验证管理者身份。'
-        + '请先用真实 OWNER 会话执行 kingdom_bind_session(role_type="OWNER", session_id=<该会话>) 后重试。',
+      ok: true,
+      owner: checked.owner,
+      ownerPrincipalId: checked.ownerId,
+      ownerControl: true,
     }
   }
-  if (auth.principalSessionId !== owner.session_id) {
-    return { ok: false, message: '错误：组织管理（任命/罢免/改绑）只有 OWNER 会话可以执行，当前调用者被拒绝。' }
+  // Compatibility AdminAuth values are intentionally not interpreted here.
+  // In particular, a declarative caller or a caller whose session happens to
+  // equal the legacy OWNER.session_id is never promoted to Owner authority.
+  return {
+    ok: false,
+    message: 'OWNER_CONTROL_REQUIRED: 该 Owner-only 写操作只能通过 direct /kingdom Slash 的 Owner Control Plane 执行。',
   }
-  return { ok: true, owner }
 }
 
 export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: AdminAuth): string {
@@ -251,7 +264,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
     // v0.5.2 审计修正：actor = 实际操作者（session-bound 下为可信 OWNER）；
     // declarative 演示模式无可信 principal，保留被操作角色作兼容标注。
     actor_role: admin.owner ? 'OWNER' : roleType,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: null,
     payload_json: JSON.stringify({
@@ -261,6 +274,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
       model_name: modelName,
       agent_name: agentName,
       session_meta: sessionMeta ? JSON.parse(sessionMeta) : null,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: now,
   })
@@ -304,7 +318,7 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
     event_type: 'ROLE_UNBOUND',
     // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被退任的绑定。
     actor_role: admin.owner ? 'OWNER' : binding.role_type,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
     payload_json: JSON.stringify({
@@ -313,6 +327,7 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
       session_id: binding.session_id,
       reason,
       status: 'RETIRED',
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: new Date().toISOString(),
   })
@@ -336,6 +351,13 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
     return input.roleType?.trim()
       ? `错误：当前王国没有 ${input.roleType.trim().toUpperCase()} 角色绑定可重绑。`
       : '错误：找不到要重绑的绑定（请提供 role_type 或 binding_id）。'
+  }
+  // Defense in depth: OWNER has no runtime session in the Kingdom model.
+  // Keep this gate after exact local binding resolution but before every
+  // profile patch/event so OWNER.session_id can never be persisted through a
+  // direct or lower-level rebind caller.
+  if (binding.role_type === 'OWNER') {
+    return 'OWNER_CONTROL_REQUIRED: OWNER.session_id 永远不作为 Owner Authority，OWNER 绑定不得通过 role.session 改绑。'
   }
   const patch: {
     sessionId?: string | null
@@ -363,7 +385,7 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
     event_type: 'BINDING_PROFILE_UPDATED',
     // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被改绑的绑定。
     actor_role: admin.owner ? 'OWNER' : binding.role_type,
-    actor_id: admin.owner?.binding_id ?? null,
+    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
     payload_json: JSON.stringify({
@@ -373,6 +395,7 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
       model_name: after?.model_name ?? null,
       agent_name: after?.agent_name ?? null,
       session_meta: after?.session_meta ? JSON.parse(after.session_meta) : null,
+      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
     }),
     created_at: new Date().toISOString(),
   })

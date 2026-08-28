@@ -1,10 +1,10 @@
 /**
- * dsh-kingdom — DshSubagentExecutor：用 dsh one-shot subagent 执行 Worker（裁决 2）。
+ * dsh-kingdom — DshSubagentExecutor：用 dsh one-shot subagent 执行 LEGACY_COMPAT Worker（裁决 2）。
  *
  * 裁决 2 冻结的形状：
- * - Worker 用 `ctx.subagents.start(provider, { label, prompt, outputSchema })` **one-shot 独立执行**；
+ * - LEGACY_COMPAT Worker 用 `ctx.subagents.start(provider, { label, prompt, outputSchema })` **one-shot 独立执行**；
  * - **不**采用常驻 `ctx.agents.create`；
- * - 每次执行都是新的 execution/session（REWORK 也一样，裁决 5）；
+ * - 每次 legacy 执行都是新的 execution/session（REWORK 也一样，裁决 5）；
  * - Structured Worker Result 由 subagent 的 `outputSchema` 约束，
  *   宿主（本类）接收后交给 Task Core 落 worker_results。
  *
@@ -98,7 +98,7 @@ function stopReasonFailure(stopReason: string): string | null {
 }
 
 /**
- * 薄封装：把一次 Worker 执行落到一个 one-shot subagent run 上。
+ * 薄封装：把一次 LEGACY_COMPAT Worker 执行落到一个 one-shot subagent run 上。
  *
  * 失败一律收敛成 `executor-failure`，**从不抛异常给 Task Core**
  * —— 让状态机只面对两种确定结局（result / executor-failure），

@@ -71,80 +71,86 @@ export class KingdomManager {
    * 幂等：重复调用只接入，绝不覆盖既有数据。
    */
   init(): InitResult {
-    const kingdom = this.store.getDefaultKingdom()
+    // One transaction covers the canonical facts and creation event.  The
+    // second read occurs while holding the IMMEDIATE lock, so concurrent
+    // direct Slash calls cannot create a second Kingdom/Owner projection.
+    return this.store.withImmediateTransaction(() => {
+      const kingdom = this.store.getDefaultKingdom()
 
-    if (!kingdom) {
-      // ── 初始化路径 ──
-      const now = new Date().toISOString()
-      const kingdomId = randomUUID()
-      const ownerId = randomUUID()
-      const created: KingdomRowInput = {
-        kingdom_id: kingdomId,
-        name: this.opts.kingdomName,
-        created_at: now,
-        owner_id: ownerId,
-        owner_name: this.opts.ownerName,
-        schema_version: SCHEMA_VERSION,
+      if (!kingdom) {
+        const now = new Date().toISOString()
+        const kingdomId = randomUUID()
+        const ownerId = randomUUID()
+        const created: KingdomRowInput = {
+          kingdom_id: kingdomId,
+          name: this.opts.kingdomName,
+          created_at: now,
+          owner_id: ownerId,
+          owner_name: this.opts.ownerName,
+          schema_version: SCHEMA_VERSION,
+        }
+        this.store.insertKingdom(created)
+        this.store.insertBinding({
+          binding_id: randomUUID(),
+          kingdom_id: kingdomId,
+          role_type: 'OWNER',
+          role_name: `Owner-${this.opts.ownerName}`,
+          runtime_type: 'dsh',
+          session_id: null,
+          model_name: null,
+          agent_name: null,
+          session_meta: null,
+          execution_profile_json: null,
+          status: 'ACTIVE',
+          retired_at: null,
+          retired_reason: null,
+          principal_id: ownerId,
+          created_at: now,
+          updated_at: now,
+        })
+        this.store.appendEvent({
+          event_id: randomUUID(),
+          kingdom_id: kingdomId,
+          event_type: 'KINGDOM_CREATED',
+          actor_role: 'OWNER',
+          actor_id: ownerId,
+          target_type: 'kingdom',
+          target_id: kingdomId,
+          payload_json: JSON.stringify({
+            operation: 'init',
+            name: this.opts.kingdomName,
+            owner: this.opts.ownerName,
+            source_channel: 'LOCAL_DIRECT_SLASH',
+          }),
+          created_at: now,
+        })
+        return {
+          action: 'initialized' as const,
+          kingdomId,
+          kingdomName: this.opts.kingdomName,
+          ownerId,
+          ownerName: this.opts.ownerName,
+          territoryCount: 0,
+          bindingCount: 1,
+          detail: `已初始化王国「${this.opts.kingdomName}」，Owner = ${this.opts.ownerName}（id=${ownerId}）。`,
+        }
       }
-      this.store.insertKingdom(created)
-      // Owner binding：principal_id = ownerId（Kingdom 内部稳定引用）
-      this.store.insertBinding({
-        binding_id: randomUUID(),
-        kingdom_id: kingdomId,
-        role_type: 'OWNER',
-        role_name: `Owner-${this.opts.ownerName}`,
-        runtime_type: 'dsh',
-        session_id: null,
-        model_name: null,
-        agent_name: null,
-        session_meta: null,
-        execution_profile_json: null,
-        status: 'ACTIVE',
-        retired_at: null,
-        retired_reason: null,
-        principal_id: ownerId,
-        created_at: now,
-        updated_at: now,
-      })
-      this.store.appendEvent({
-        event_id: randomUUID(),
-        kingdom_id: kingdomId,
-        event_type: 'KINGDOM_CREATED',
-        actor_role: 'OWNER',
-        actor_id: ownerId,
-        target_type: 'kingdom',
-        target_id: kingdomId,
-        payload_json: JSON.stringify({ name: this.opts.kingdomName, owner: this.opts.ownerName }),
-        created_at: now,
-      })
-      const result: InitResult = {
-        action: 'initialized',
-        kingdomId,
-        kingdomName: this.opts.kingdomName,
-        ownerId,
-        ownerName: this.opts.ownerName,
-        territoryCount: 0,
-        bindingCount: 1,
-        detail: `已初始化王国「${this.opts.kingdomName}」，Owner = ${this.opts.ownerName}（id=${ownerId}）。`,
-      }
-      return result
-    }
 
-    // ── 接入路径（王国已存在）──
-    const territories = this.store.listTerritories(kingdom.kingdom_id)
-    const bindings = this.store.listBindings(kingdom.kingdom_id)
-    return {
-      action: 'attached',
-      kingdomId: kingdom.kingdom_id,
-      kingdomName: kingdom.name,
-      ownerId: kingdom.owner_id,
-      ownerName: kingdom.owner_name,
-      territoryCount: territories.length,
-      bindingCount: bindings.length,
-      detail:
-        `已接入现有王国「${kingdom.name}」（id=${kingdom.kingdom_id}），` +
-        `Owner = ${kingdom.owner_name}，${territories.length} 个领地，${bindings.length} 个角色绑定。`,
-    }
+      const territories = this.store.listTerritories(kingdom.kingdom_id)
+      const bindings = this.store.listBindings(kingdom.kingdom_id)
+      return {
+        action: 'attached' as const,
+        kingdomId: kingdom.kingdom_id,
+        kingdomName: kingdom.name,
+        ownerId: kingdom.owner_id,
+        ownerName: kingdom.owner_name,
+        territoryCount: territories.length,
+        bindingCount: bindings.length,
+        detail:
+          `已接入现有王国「${kingdom.name}」（id=${kingdom.kingdom_id}），` +
+          `Owner = ${kingdom.owner_name}，${territories.length} 个领地，${bindings.length} 个角色绑定。`,
+      }
+    })
   }
 
   /** 重新扫描接入（不删除任何数据）。 */
