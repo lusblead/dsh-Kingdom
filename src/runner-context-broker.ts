@@ -433,9 +433,15 @@ async function pathAbsent(path: string): Promise<boolean> {
 
 function expectedEndpoint(rendezvousDir: string, launchNonce: string): string {
   const runRoot = dirname(dirname(rendezvousDir))
-  return process.platform === 'win32'
+  const endpoint = process.platform === 'win32'
     ? `\\\\.\\pipe\\dsh-kingdom-broker-${createHash('sha256').update(runRoot).digest('hex').slice(0, 24)}-${launchNonce.slice(0, 12)}`
-    : join(rendezvousDir, `${launchNonce}.sock`)
+    : join(rendezvousDir, `${launchNonce.slice(0, 20)}.sock`)
+  // Unix sun_path is 107 bytes on Linux and 103 on macOS. Keep 120 bits
+  // of random endpoint identity; authentication still uses the full nonce.
+  if (process.platform !== 'win32' && Buffer.byteLength(endpoint, 'utf8') > 103) {
+    throw new RunnerContextBrokerError('SOCKET_PATH_TOO_LONG', '本地通信路径超过 Unix socket 长度限制，请使用更短的 runRoot。')
+  }
+  return endpoint
 }
 
 function descriptorPathFor(environment: RunnerContextBrokerEnvironment): string {

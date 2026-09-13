@@ -1,7 +1,7 @@
 /** R18 Product-child broker boundary regressions. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { createHmac, randomUUID } from 'node:crypto'
 import { createConnection, type Socket } from 'node:net'
@@ -338,6 +338,8 @@ test('R18 public broker exposes only bootstrap/connect/close and bounded no-ID v
   try {
     assert.deepEqual(Object.keys(launch).sort(), ['childEnvironment', 'close', 'connect'])
     const environment = launch.childEnvironment()
+    const descriptor = await descriptorForEnvironment(environment)
+    if (process.platform !== 'win32') assert.ok(Buffer.byteLength(descriptor.endpoint, 'utf8') <= 103)
     assert.deepEqual(Object.keys(environment).sort(), [
       'DSH_KINGDOM_BROKER_LAUNCH_NONCE',
       'DSH_KINGDOM_BROKER_RENDEZVOUS_DIR',
@@ -391,6 +393,22 @@ test('R18 public broker exposes only bootstrap/connect/close and bounded no-ID v
     fixture.store.close()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('Unix broker rejects oversized UTF-8 paths before creating files or a launch', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dk-path-'))
+  try {
+    const unicodeRoom = 103 - join(root, '.local', 'runner-context-broker', 'x'.repeat(20) + '.sock').length - 1
+    const unicodeSuffix = '界'.repeat(Math.max(1, unicodeRoom))
+    for (const suffix of ['x'.repeat(110), unicodeSuffix]) {
+      if (suffix === unicodeSuffix && unicodeRoom > 0) {
+        const endpoint = join(root, suffix, '.local', 'runner-context-broker', 'x'.repeat(20) + '.sock')
+        assert.ok(endpoint.length <= 103 && Buffer.byteLength(endpoint, 'utf8') > 103)
+      }
+      assert.throws(() => createRunnerContextBrokerLaunch({ runRoot: join(root, suffix) }), /SOCKET_PATH_TOO_LONG/u)
+      assert.deepEqual(await readdir(root), [])
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('R18 wire auth, NDJSON bounds, timeout, half-close, and control data fail closed', async () => {

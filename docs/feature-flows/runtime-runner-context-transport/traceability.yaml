@@ -1,0 +1,134 @@
+version: 1
+feature_id: runtime.runner-context-transport
+title: Bounded local RunnerContext transport
+status: implemented
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  E1:
+    description: "Product explicitly requests an absolute runRoot"
+    kind: "entry"
+    trigger: "Product explicitly requests an absolute runRoot"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "createRunnerContextBrokerLaunch"
+  D1:
+    description: "Root is absolute and safe; Unix endpoint is at most 103 UTF-8 bytes"
+    kind: "decision"
+    condition: "Root is absolute and safe; Unix endpoint is at most 103 UTF-8 bytes"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "expectedEndpoint"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "Unix broker rejects oversized UTF-8 paths before creating files or a launch"
+  T1:
+    description: "Safe root and successful exclusive startup"
+    kind: "transition"
+    entity: "BrokerLocalResources"
+    from: "ABSENT"
+    to: "READY"
+    trigger: "Safe root and successful exclusive startup"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "startServer"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 public broker exposes only bootstrap/connect/close and bounded no-ID view"
+  E2:
+    description: "Child receives exact serialized bootstrap"
+    kind: "entry"
+    trigger: "Child receives exact serialized bootstrap"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "connectRunnerContextBroker"
+  D2:
+    description: "Descriptor belongs to the exact environment and full-nonce authentication succeeds"
+    kind: "decision"
+    condition: "Descriptor belongs to the exact environment and full-nonce authentication succeeds"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "validateDescriptor"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R20 serialized cross-realm consumer connects to the existing Product broker and rejects tamper/stale/foreign bootstrap"
+  A1:
+    external_call:
+      system: authenticated local child IPC
+      timeout: 5 seconds of socket inactivity
+      failure_behavior: Close rejected or idle connection without Product action
+      failure_nodes: [X2]
+      retry:
+        max_attempts: 1
+        backoff: no automatic replay of a Product request
+    description: "wireRequestResponse"
+    kind: "action"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "wireRequestResponse"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 exact request replay is cached, mismatched replay/stale revision/foreign ticket do zero Product action"
+  E3:
+    description: "Product close or context revocation"
+    kind: "entry"
+    trigger: "Product close or context revocation"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "createRunnerContextBrokerProductLifecycle"
+  T2:
+    description: "Explicit owned cleanup"
+    kind: "transition"
+    entity: "BrokerLocalResources"
+    from: "READY"
+    to: "CLOSED"
+    trigger: "Explicit owned cleanup"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "createRunnerContextBrokerProductLifecycle"
+    tests:
+      - path: tests/real-dsh-provider-runner-contract.test.ts
+        symbol: package-root Product lifecycle issues fresh-child bootstrap and closes owned resources exactly once
+  X1:
+    description: "Reject without launch effects for invalid path; startup failure cleans only owned resources"
+    kind: "outcome"
+    result: "Reject without launch effects for invalid path; startup failure cleans only owned resources"
+  X2:
+    description: "Reject the untrusted connection without Product action"
+    kind: "outcome"
+    result: "Reject the untrusted connection without Product action"
+  X3:
+    description: "Transport cleanup only; no task settlement or Lease release"
+    kind: "outcome"
+    result: "Transport cleanup only; no task settlement or Lease release"
+  G1:
+    description: "Short endpoint filename does not weaken full-nonce authentication"
+    kind: "safeguard"
+    safeguard_type: "authentication"
+    guarantee: "Short endpoint filename does not weaken full-nonce authentication"
+    protects: ["D2"]
+    failure_behavior: "Reject foreign descriptor or proof"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "handleFrame"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "R18 wire auth, NDJSON bounds, timeout, half-close, and control data fail closed"
+  G2:
+    description: "Check paths before startup and never unlink an unowned endpoint"
+    kind: "safeguard"
+    safeguard_type: "concurrency"
+    guarantee: "Check paths before startup and never unlink an unowned endpoint"
+    protects: ["T1", "T2"]
+    failure_behavior: "Reject unsafe or stale paths and retain cleanup uncertainty"
+    code:
+      - path: src/runner-context-broker.ts
+        symbol: "startServer"
+    tests:
+      - path: tests/r13-runner-context-broker.test.ts
+        symbol: "Unix broker rejects oversized UTF-8 paths before creating files or a launch"
