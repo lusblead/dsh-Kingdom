@@ -41,12 +41,8 @@ test('testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions', 
   assert.match(CONSOLE_APP_HTML, /data-realm-node="chancellor"/u)
   assert.match(CONSOLE_APP_HTML, /data-realm-node="supervisor"/u)
   assert.match(CONSOLE_APP_HTML, /data-realm-node="worker"/u)
-  assert.match(CONSOLE_APP_HTML, /--gate: #E9DEC7/u)
-  assert.match(CONSOLE_APP_HTML, /--patina: #FFF9EB/u)
-  assert.match(CONSOLE_APP_HTML, /--bamboo: #392C20/u)
-  assert.match(CONSOLE_APP_HTML, /--gold: #B38A4E/u)
-  assert.match(CONSOLE_APP_HTML, /--jade: #3D734E/u)
-  assert.match(CONSOLE_APP_HTML, /--cinnabar: #B75227/u)
+  // Theme contrast and geometry are checked against the rendered cascade;
+  // matching superseded color declarations cannot prove the visible theme.
   assert.match(CONSOLE_APP_HTML, /Noto Serif SC/u)
   assert.match(CONSOLE_APP_HTML, /Noto Sans SC/u)
   assert.match(CONSOLE_APP_HTML, /kingdom-organogram/u)
@@ -65,18 +61,18 @@ test('testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions', 
   assert.match(CONSOLE_APP_HTML, /\.main-nav \{ display: flex; gap: 4px; overflow-x: auto/u)
   assert.match(CONSOLE_APP_HTML, /body \{[^}]*overflow-x: hidden/u)
   assert.match(CONSOLE_APP_HTML, /skip-link/u)
-  assert.match(CONSOLE_APP_HTML, /href="#overview">跳到王国总览/u)
+  assert.match(CONSOLE_APP_HTML, /href="#today">跳到今日工作台/u)
   assert.match(CONSOLE_APP_HTML, /focus-visible/u)
   assert.match(CONSOLE_APP_HTML, /prefers-reduced-motion/u)
   for (const marker of ['主导航', '领地名册', '任务导航器', '执行', '史册', 'aria-current="page"', 'data-task-selector']) {
     assert.match(CONSOLE_APP_HTML, new RegExp(marker))
   }
-  assert.match(CONSOLE_APP_HTML, /href="#overview"/u)
+  assert.match(CONSOLE_APP_HTML, /href="#map"/u)
   assert.match(CONSOLE_APP_HTML, /href="#organization"/u)
   assert.match(CONSOLE_APP_HTML, /href="#tasks"/u)
   assert.match(CONSOLE_APP_HTML, /href="#executions"/u)
   assert.match(CONSOLE_APP_HTML, /href="#activity"/u)
-  assert.match(CONSOLE_APP_HTML, /href="#management"/u)
+  assert.match(CONSOLE_APP_HTML, /href="#settings"/u)
   assert.match(CONSOLE_APP_HTML, /href="#ledger"/u)
   assert.match(CONSOLE_APP_HTML, /#task=/u)
   assert.match(CONSOLE_APP_HTML, /hashchange/u)
@@ -115,8 +111,7 @@ test('testConsoleRestoresFourThemesAndHumanFirstProgressiveDisclosure', () => {
   assert.match(CONSOLE_APP_HTML, /data-theme-choice="parchment"[^>]+aria-pressed="false"/u)
   assert.match(CONSOLE_APP_HTML, /id="active-theme-name"[^>]*>森林墨绿</u)
   assert.match(CONSOLE_APP_HTML, /localStorage\.getItem\(THEME_STORAGE_KEY\) \|\| 'forest'/u)
-  assert.match(CONSOLE_APP_HTML, /\.realm-map \{ min-height: calc\(100vh - 150px\);[^}]*border: 0 !important;[^}]*background: transparent !important;/u)
-  assert.match(CONSOLE_APP_HTML, /\.status-bar \{ position: fixed;[^}]*pointer-events: none;/u)
+  assert.match(CONSOLE_APP_HTML, /class="governance-flow"/u)
   assert.match(CONSOLE_APP_HTML, /王国地图/u)
   assert.match(CONSOLE_APP_HTML, /宰相统筹全局，领地主管承接任务，骑士完成使命/u)
   assert.match(CONSOLE_APP_HTML, /当前任务 · /u)
@@ -142,16 +137,16 @@ test('testOrganogramConnectorsFollowActualTerritoryCountAndElementGeometry', () 
 })
 
 test('testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst', () => {
-  for (const marker of ['常用任务流转', '交给宰相统筹', '交给宰相规划', '写下任务，按 / 选择领地', '领地主管承接', '领地主管接手并派发', '主管确认派发']) {
+  for (const marker of ['明确目标与验收', '任务草稿', '提交任务草稿', '写下任务，按 / 选择领地', '领地主管承接', '领地主管接手并派发', '主管确认派发']) {
     assert.match(CONSOLE_APP_HTML, new RegExp(marker, 'u'))
   }
   assert.match(CONSOLE_APP_HTML, /按 <kbd>\/<\/kbd> 唤出领地/u)
   assert.match(CONSOLE_APP_HTML, /aria-autocomplete="list"/u)
   assert.match(CONSOLE_APP_HTML, /role="listbox"/u)
-  assert.doesNotMatch(CONSOLE_APP_HTML, /id="task-acceptance"/u)
-  assert.doesNotMatch(CONSOLE_APP_HTML, /id="task-description"/u)
+  assert.match(CONSOLE_APP_HTML, /id="task-acceptance"/u)
+  assert.match(CONSOLE_APP_HTML, /id="task-description"/u)
   assert.match(CONSOLE_APP_HTML, /不会跨领地代派/u)
-  assert.match(CONSOLE_APP_HTML, /CONFIG\.commands\.taskCreate[^\n]+\{ title, territory_id: formValue\(form, 'territory_id'\) \}/u)
+  assert.match(CONSOLE_APP_HTML, /CONFIG\.commands\.taskCreate[^\n]+\{ title, description: formValue\(form, 'description'\), acceptance_criteria: formValue\(form, 'acceptance_criteria'\), territory_id: territory \}/u)
   assert.match(CONSOLE_APP_HTML, /CONFIG\.commands\.assign[^\n]+task_id:[^\n]+worker_binding_id/u)
 })
 
@@ -184,7 +179,7 @@ test('testConsoleShellKeepsOwnerBoundaryAndUsesExplicitChineseActionVerbs', () =
   assert.doesNotMatch(CONSOLE_APP_HTML, /data-gated-action="setup\.basic"/u)
   assert.doesNotMatch(CONSOLE_APP_HTML, /CONFIG\.commands\.setup/u)
   assert.doesNotMatch(CONSOLE_APP_HTML, /name="worker_model"/u)
-  assert.match(CONSOLE_APP_HTML, />交给宰相规划</u)
+  assert.match(CONSOLE_APP_HTML, />提交任务草稿</u)
   assert.match(CONSOLE_APP_HTML, />主管确认派发</u)
   assert.match(CONSOLE_APP_HTML, />开始执行</u)
   assert.match(CONSOLE_APP_HTML, />暂停</u)
@@ -482,6 +477,7 @@ test('testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissin
   const makeSvg = () => ({
     tagName: 'svg',
     attributes: {} as Record<string, string>,
+    style: { properties: {} as Record<string, string>, setProperty(name: string, value: string) { this.properties[name] = value } },
     setAttribute(name: string, value: string) { this.attributes[name] = value },
   })
   const image = {
@@ -495,6 +491,7 @@ test('testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissin
     replaceChildren(...children: unknown[]) { this.children = children },
   }
   const fakeDocument = {
+    timeline: { currentTime: 1250 as number | null },
     getElementById: () => null,
     querySelectorAll: () => [],
     createElement: (tagName: string) => tagName === 'template'
@@ -532,8 +529,19 @@ test('testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissin
   assert.equal((image.children[0] as { tagName: string }).tagName, 'svg')
   assert.equal(image.getAttribute('src'), null)
   assert.equal(image.getAttribute('aria-label'), '宰相像素人物')
+  const firstSvg = image.children[0] as ReturnType<typeof makeSvg>
+  assert.equal(firstSvg.style.properties['--kingdom-motion-offset'], '-1.25s')
+  fakeDocument.timeline.currentTime = 7000
   harnessSink.capture.applyCharacterVisual(image, 'CHANCELLOR', recoveredVisual)
   assert.equal(inlineParseCount, 1, 'the same inline SVG asset is not rebuilt on polling')
+  assert.equal(image.children[0], firstSvg, 'an existing SVG keeps its own animation clock')
+  const rebuiltImage = { ...image, dataset: {}, children: [] }
+  harnessSink.capture.applyCharacterVisual(rebuiltImage, 'CHANCELLOR', recoveredVisual)
+  assert.equal((rebuiltImage.children[0] as ReturnType<typeof makeSvg>).style.properties['--kingdom-motion-offset'], '-7s', 'a rebuilt role joins the current page phase')
+  fakeDocument.timeline.currentTime = null
+  const clocklessImage = { ...image, dataset: {}, children: [] }
+  harnessSink.capture.applyCharacterVisual(clocklessImage, 'CHANCELLOR', recoveredVisual)
+  assert.equal((clocklessImage.children[0] as ReturnType<typeof makeSvg>).style.properties['--kingdom-motion-offset'], '0s')
   for (const assetName of GUI_CHARACTER_ASSET_FILES) {
     assert.match(GUI_CHARACTER_ASSET_SVGS[assetName] ?? '', /<svg[\s\S]*@keyframes/u, `${assetName} is embedded in the registry`)
   }
@@ -844,7 +852,7 @@ test('testResourceActionsRequireStructuredExecutableProjection', () => {
 })
 
 test('testFragmentNavigationIsStableAndUnrecognizedHashesFailSoft', () => {
-  assert.deepEqual(parseConsoleFragment(''), { known: true, section: 'overview', taskId: null })
+  assert.deepEqual(parseConsoleFragment(''), { known: true, section: 'today', taskId: null })
   assert.deepEqual(parseConsoleFragment('#organization'), { known: true, section: 'organization', taskId: null })
   assert.deepEqual(parseConsoleFragment('#management'), { known: true, section: 'management', taskId: null })
   assert.deepEqual(parseConsoleFragment('#ledger'), { known: true, section: 'ledger', taskId: null })

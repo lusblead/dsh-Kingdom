@@ -1,64 +1,24 @@
-# dsh-kingdom v1.0 发布手册
+# dsh-kingdom 发布手册
 
-## 当前状态（先读）
+发布使用独立工作区和明确文件清单，保留开发目录中的其他修改。发布授权、测试结果、远端可见性分别核对；本地打包成功不等于已发布。
 
-- **Owner 发布授权**：2026-08-27 已授权 v1.0 发布，2026-08-28 要求继续推进；授权不等于技术门、独立审计、远端写入或发布完成。
-- **本轮自动化**：隔离 stage 的 P0–P3 仍待重跑（`NOT_RUN`）。此前候选快照的 `192/192 PASS` 仅是历史记录，不能继承为本轮结果。
-- **远端事实**：P4–P8 的精确暂存、commit/tag/push、GitHub Release、npm latest、Discussion 和 Market 复验均为 `NOT_RUN`。在这些事实出现并完成独立审计前，v1.0 不是已发布版本。
-- **产品运行证据**：真实 Provider、正式数据库迁移、真实 DSH 重启恢复保持 `NOT_RUN`；不得以打包、静态检查或历史记录改写它们。
+## 准备和验证
 
-## v1.0 发布链与职责边界
+1. 核实官方 npm 与 GitHub 上的现有版本、远端分支和发布权限。冻结本次范围，排除数据库、凭据、个人路径、本地报告与未确认许可的媒体。
+2. 在独立工作区安装锁定依赖：`npm ci --registry=https://registry.npmjs.org`。运行 `npm run typecheck`、`npm test` 及三个隔离 smoke 入口：`scripts/p2-smoke.mjs`、`scripts/p3-smoke.mjs`、`scripts/hotplug-audit.mjs`。
+3. 完成独立审查并修复具体问题，更新用户指南、版本说明、受影响流程契约和测试。Windows 专用发布脚本故障测试在其他系统跳过，其余测试必须通过。
+4. 按明确清单形成源码提交。在干净工作区运行 `pwsh -File scripts/release.ps1 -Version 2.0.0 -DryRun`。此脚本只执行本地 P0–P3，编译和测试非零退出都会停止；不提交、不推送、不发布。
+5. 冻结准确 tgz 和 SHA-256，核对公开入口、类型、12 个 SVG、指南与许可证。`prepack` 重新构建，避免旧编译产物混入。用提取的准确包检查官方 DSH 接线、GUI 四主题与窄屏、隔离安装和数据恢复；记录实际测试来源及未测项。
 
-本轮只允许 `scripts/release.ps1` 作为 P0–P3 的隔离技术门。它不拥有 v1.0 的 P4 选择权，也不能因自身成功而产生发布事实。
+## 发布与对账
 
-```text
-P0 预检（隔离 stage）
-→ P1 版本一致性
-→ P2 typecheck + 全量测试
-→ P3 prepack + npm pack + tgz 内容核验
-→ 独立审计
-→ P4 冻结 manifest 的逐路径精确暂存、commit、tag、push
-→ P5 GitHub Release
-→ P6 npm publish latest
-→ P7 Discussion 公告
-→ P8 只读远端对账与 Market 可见性检查
-```
+- 推送准确提交后等待 GitHub CI 通过，再创建同版本标签和 GitHub Release。仅上传核实过的 tgz、摘要和公开说明。
+- 使用官方 registry 发布已测试的准确 tgz：`npm publish <absolute-tgz-path> --registry=https://registry.npmjs.org --access=public --tag=latest`。不要在此时重新选取开发目录打包。
+- 核对 npm 版本、latest、dist integrity，GitHub main/tag/Release 及资产摘要。写入结果不明时先读远端再决定是否重试，不重复发布或覆盖标签。
+- 本地 GUI 随插件交付，无需另行部署网站。外部市场收录和第三方镜像同步不由本项目保证；普通版本发布不自动向他人发送公告。
 
-### P0–P3：仅技术门
+## 升级边界
 
-使用隔离 stage 运行 P0–P3，并记录命令、退出码、tgz 文件名和内容核验。任一失败、候选漂移或缺少 tgz 都必须停止；不得将历史 `192/192` 代替本轮重跑。
+DSH 兼容范围以本版 package.json 和用户指南为准。不要在插件目录安装第二份宿主 Core。升级前一致备份 SQLite，并在独立路径恢复验证；WAL 模式不能只复制主数据库。
 
-`-DryRun` 的成功只表示它在 P4 前停止，绝不表示 commit、tag、push、GitHub Release、npm publish、Discussion 或 Market 已发生。
-
-### P4：冻结 manifest 的精确暂存
-
-只有独立审计通过后，Construction 发布主体才按 Work Order 冻结的逐路径 manifest 执行 P4。禁止使用脚本中的固定 `git add package.json README.md`，也禁止 `git add -A`；不得把 `.local/**`、证据、临时目录、正式数据库、凭据或未审查的 dirty 文件纳入 index。
-
-P4 前须明确记录每个暂存路径及其审计依据。P4 之后若任一远端步骤部分成功，先只读对账已存在的远端事实，禁止盲目重复写入。
-
-### P5–P8：远端事实而非脚本声称
-
-| 阶段 | 需要的可核对事实 |
-|---|---|
-| P5 | GitHub Release `v1.0.0`、Release Notes 与必需 tgz 资产均可只读核对 |
-| P6 | 官方 npm registry 的 `dsh-kingdom@1.0.0` 与 `latest` dist-tag 可只读核对 |
-| P7 | Discussion 3064 的公告评论可只读核对 |
-| P8 | packument `latest`、Release 资产与 Market 可见性分别核对；任一未核对保持 `NOT_RUN` |
-
-## 发布物规则
-
-- **必需资产**：P3 生成的版本化 `dsh-kingdom-<version>.tgz`。该包必须包含 `lib/**`，内置 GUI 也随 `lib/**` 交付。
-- **可选资产**：GUI zip 仅可作为 GitHub Release 的辅助下载资产；它不替代 tgz，不是安装 GUI 的前提，也不能被写成独立前端或必需发布物。
-- GUI 只在本地运行；不重新引入云端部署步骤。
-
-## 发布前与发布后核对
-
-发布前确认：Owner 授权、当前 Work Order、独立审计、P0–P3 本轮证据、冻结 manifest、许可证与资产来源均可核对。真实 Provider、正式数据库迁移和真实重启恢复若未执行，Release Notes 必须保留 `NOT_RUN`。
-
-发布后按 P5–P8 的表逐项只读核对。只有事实已存在的阶段可以写为完成；发布后的知识同步也只能在对应远端事实核对后进行。
-
-## 历史负知识
-
-- pnpm 的 `minimumReleaseAge` 与镜像同步可能使新版本暂不可见；验证使用官方 `https://registry.npmjs.org`，但不得把等待或命令退出码写成发布完成。
-- Discussion REST 创建评论曾返回 404；如需公告，使用经验证的 GraphQL 路径，并在 P7 后只读核对实际评论。
-- Market 收录不因普通版本迭代而自动要求 Awesome PR；仅核心定位变化才另行评估。
+正式用户数据库迁移、真实付费模型收益和真人验收必须有单独证据；隔离 fixture、GUI smoke 或绿色 CI 不能代替它们。保留原版本包与备份，以便回退。

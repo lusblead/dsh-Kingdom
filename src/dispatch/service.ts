@@ -39,6 +39,11 @@ import type {
   DispatchReceipt,
 } from '../adapter/contract.js'
 import { reconstructDispatchEvidence } from './evidence.js'
+import { readDshSessionEvents, readDshDispatchSummary } from '../adapter/dsh-session-events.js'
+import type { BudgetAdmissionHandle } from '../core/budget.js'
+import type { WorkspaceAdmissionHandle } from '../core/workspace-admission.js'
+import type { CollaborationReadiness } from '../core/collaboration.js'
+import { decideRecovery } from './reconcile.js'
 import {
   forgetRunnerContextPort,
   registerProductRunnerContext,
@@ -46,6 +51,7 @@ import {
 } from '../runner-context-broker.js'
 
 export interface GovernedDispatchInput {
+  stillAuthorized?: () => boolean
   store: KingdomStore
   adapter: RuntimeAdapter
   kingdomId: string
@@ -61,6 +67,9 @@ export interface GovernedDispatchInput {
   requestSnapshot: string
   inputRefJson: string
   payloadHash: string
+  budgetAdmission?: BudgetAdmissionHandle
+  workspaceAdmission?: WorkspaceAdmissionHandle
+  collaboration?: CollaborationReadiness | null
   /** 终端等待选项（测试可调小）。 */
   pollIntervalMs?: number
   maxPolls?: number
@@ -134,12 +143,122 @@ const pendingTrustFences = new Map<string, {
   sessionRef: string
 }>()
 
+interface RetainedRecovery {
+  input: GovernedDispatchInput
+  port: RunnerContextPort
+  fence: RuntimeTrustFence
+  dispatchRef: string
+  cleanupReceipt?: CleanupReceipt
+  active: boolean
+  inFlight?: Promise<GovernedReconcileResult>
+}
+const retainedRecoveries = new WeakMap<KingdomStore, Map<string, RetainedRecovery>>()
+
+export interface GovernedReconcileResult {
+  status: 'WAIT' | 'RECOVERING' | 'TERMINAL'
+  reason: string
+  dispatchId: string
+  cleanupReceipt?: CleanupReceipt
+  summary?: string
+}
+
+/** Plugin teardown drops process evidence, never releases a governance Lease. */
+export function discardGovernedRecoveryContexts(store: KingdomStore): void {
+  const entries = retainedRecoveries.get(store)
+  if (!entries) return
+  for (const retained of entries.values()) {
+    retained.active = false
+    retained.input.adapter.releaseTrustFence(retained.fence, 'RECOVERING', {
+      leaseId: retained.input.leaseId, sessionRef: retained.input.sessionHandle.refs.sessionRef,
+    })
+    revokeRunnerContextBrokerContext(retained.port)
+  }
+  entries.clear()
+  retainedRecoveries.delete(store)
+}
+
+/** Explicit, single-flight observation of an existing original dispatch; never calls dispatch/materialize. */
+export async function reconcileGovernedDispatch(store: KingdomStore, dispatchId: string, stillAuthorized: () => boolean): Promise<GovernedReconcileResult> {
+  const result = (status: GovernedReconcileResult['status'], reason: string): GovernedReconcileResult => ({ status, reason, dispatchId })
+  const dispatch = store.getDispatch(dispatchId)
+  if (!dispatch) return result('RECOVERING', 'DISPATCH_MISSING')
+  if (!stillAuthorized()) return result('RECOVERING', 'AUTHORITY_REVOKED')
+  if (dispatch.state === 'TERMINAL') return result('TERMINAL', 'TERMINAL_ALREADY_RECORDED; cleanup is not retried')
+  if (!dispatch.runtime_dispatch_ref || !dispatch.receipt_json) return result('RECOVERING', 'RECEIPT_UNAVAILABLE; no resend')
+  const entries = retainedRecoveries.get(store)
+  const retained = entries?.get(dispatchId)
+  if (!retained?.active) return result('RECOVERING', 'ORIGINAL_PROCESS_CONTEXT_UNAVAILABLE; restart or lost context cannot prove cleanup')
+  if (retained.inFlight) return retained.inFlight
+  const run = async (): Promise<GovernedReconcileResult> => {
+    const { input, port, fence } = retained
+    const expectation = { leaseId: input.leaseId, sessionRef: input.sessionHandle.refs.sessionRef }
+    const abandon = (reason: string): GovernedReconcileResult => {
+      retained.active = false
+      input.adapter.releaseTrustFence(fence, 'RECOVERING', expectation)
+      entries?.delete(dispatchId)
+      return result('RECOVERING', reason)
+    }
+    try {
+      if (!stillAuthorized()) return abandon('AUTHORITY_REVOKED')
+      port.checkRecovery(port.handle, port.initialVersion)
+      const events = readDshSessionEvents(input.sessionHandle.session)
+      if (events === null) return abandon('EVENTS_UNAVAILABLE; original continuity cannot be verified')
+      const checked = input.adapter.checkTrustFence(fence, 'terminal-write', expectation)
+      if (!checked.ok) return abandon(`ORIGINAL_FENCE_UNTRUSTED: ${checked.reason}`)
+      const evidence = reconstructDispatchEvidence({ events }, retained.dispatchRef)
+      const summary = readDshDispatchSummary(input.sessionHandle.session, retained.dispatchRef)
+      const decision = decideRecovery({ store, dispatch, sessionObservation: 'AVAILABLE', evidence })
+      if (decision.action === 'UNTRUSTED_RECOVERING') return abandon(decision.reason)
+      if (decision.action !== 'TERMINAL_OK' || !evidence.terminalOutcome || evidence.turnObserved === null) {
+        return result(decision.action === 'WAIT' ? 'WAIT' : 'RECOVERING', decision.reason)
+      }
+      if (!retained.active || !stillAuthorized()) return abandon('AUTHORITY_REVOKED')
+      port.checkRecovery(port.handle, port.initialVersion)
+      // This exact original callback is consumed once. No fresh adapter/empty disposer can replace it.
+      try {
+        retained.cleanupReceipt = input.cleanup
+          ? await input.cleanup(fence, expectation)
+          : { status: 'MISSING_EVIDENCE', evidenceJson: null, reason: 'Original cleanup callback unavailable' }
+      } catch (error: unknown) {
+        retained.cleanupReceipt = { status: 'THREW', evidenceJson: null,
+          reason: boundedText(error instanceof Error ? error.message : String(error), 256) }
+      }
+      if (!retained.active || !stillAuthorized()) return abandon('AUTHORITY_REVOKED_DURING_CLEANUP')
+      const settlement = input.adapter.checkTrustFence(fence, 'settlement', expectation)
+      if (!settlement.ok) return abandon(`ORIGINAL_FENCE_UNTRUSTED: ${settlement.reason}`)
+      const terminal = port.recoverTerminal(port.handle, port.initialVersion, {
+        evidenceJson: JSON.stringify({ type: 'DshTerminalEvidence/v1', payload: { reason: evidence.terminalReason, turn: evidence.turnObserved, outcome: evidence.terminalOutcome } }),
+        executionTerminalState: evidence.terminalOutcome,
+        runtimeExecutionRef: `turn-${evidence.turnObserved}`,
+      })
+      port.settleRecovery(port.handle, terminal.view.version, () => settleAndRelease(store, input.leaseId, retained.cleanupReceipt!, 'governed-recovered-terminal-settlement', {
+        adapter: input.adapter, fence, ...expectation,
+      }))
+      retained.active = false
+      entries?.delete(dispatchId)
+      return { ...result('TERMINAL', 'LATE_TERMINAL_RECONCILED'), cleanupReceipt: retained.cleanupReceipt,
+        summary: summary ?? '(无本次最终消息文本；以 terminal 证据为准)' }
+    } catch (error: unknown) {
+      const current = store.getDispatch(dispatchId)
+      if (current?.state === 'TERMINAL') {
+        recordDispatchTerminalIntegrityIncident(store, { dispatchId, reasonCode: 'TRUST_FENCE_CHECK_FAILED', phase: 'settlement' })
+      }
+      return abandon(`RECOVERY_EVIDENCE_REJECTED: ${boundedText(error instanceof Error ? error.message : String(error), 256)}`)
+    }
+  }
+  // Publish the flight before executing an async cleanup, including callbacks that re-enter.
+  const flight = Promise.resolve().then(run)
+  retained.inFlight = flight
+  try { return await flight } finally { retained.inFlight = undefined }
+}
+
 /**
  * 受治理派发（TX-3..TX-5）：
  * 1. Execution + Intent（同一事务，COMMIT POINT）→ 2. dispatch（commit 之后）→
  * 3. Receipt → 4. Correlation（观测到 turn）→ 5. 等待 terminal 证据 → TX-4。
  */
 export async function runGovernedDispatch(input: GovernedDispatchInput): Promise<GovernedDispatchResult> {
+  if (input.stillAuthorized && !input.stillAuthorized()) throw new Error('AUTHORITY_CHANGED: 当前调用者或范围已变化，未创建派发意图。')
   const { store, adapter, kingdomId, taskId, attemptNo, workerBindingId, leaseId, capabilityDecisionId, sessionHandle } = input
   const pollIntervalMs = input.pollIntervalMs ?? 100
   const maxPolls = input.maxPolls ?? 40
@@ -178,6 +297,9 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
     requestSnapshot: input.requestSnapshot,
     inputRefJson: input.inputRefJson,
     payloadHash: input.payloadHash,
+    budgetAdmission: input.budgetAdmission,
+    workspaceAdmission: input.workspaceAdmission,
+    collaboration: input.collaboration,
   })
   let execution = prepared.execution
   const decision = prepared.decision
@@ -190,8 +312,11 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
   // v0.8：open the opaque Runtime reservation after the Kingdom COMMIT POINT
   // but before the external dispatch side effect. The baseline is captured
   // from the same live Session object used for correlation.
-  const readEvents = (): readonly { type: string; data?: Record<string, unknown> }[] =>
-    (sessionHandle.session as { events?: readonly { type: string; data?: Record<string, unknown> }[] }).events ?? []
+  const readEvents = (): readonly { type: string; data?: Record<string, unknown> }[] => {
+    const events = readDshSessionEvents(sessionHandle.session)
+    if (events === null) throw new Error('DSH Session event snapshot unavailable')
+    return events
+  }
 
   try {
     // R18: TX-3 is already committed, but no Runtime side effect is allowed
@@ -209,6 +334,7 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
     })
 
     // COMMIT POINT 之后才允许 Runtime side effect
+    if (input.stillAuthorized && !input.stillAuthorized()) throw new Error('AUTHORITY_CHANGED: 准备期间调用者变化，未向 Runtime 派发。')
     const receipt = await adapter.dispatch({ sessionRef: sessionHandle.refs.sessionRef, text: input.text })
 
     // TX-3R：Receipt（INTENDED→DISPATCHED→RECEIVED）
@@ -363,18 +489,18 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
     }
 
     if (!terminal && !untrustedRecovery) {
-      const recovered = markGovernedDispatchRecovering(
-        store,
-        dispatch.dispatch_id,
-        'TERMINAL_POLL_EXHAUSTED',
-      )
+      if (!runnerContext || !trustFence) throw new Error('Timeout lost the original RunnerContext or fence')
+      const recovered = runnerContext.deferRecovery(runnerContext.handle, runnerVersion).value
       dispatch = recovered.dispatch
       execution = recovered.execution
       lease = recovered.lease
-      if (trustFence) adapter.releaseTrustFence(trustFence, 'RECOVERING', fenceExpectation)
+      let recoveries = retainedRecoveries.get(store)
+      if (!recoveries) { recoveries = new Map(); retainedRecoveries.set(store, recoveries) }
+      recoveries.set(dispatch.dispatch_id, { input, port: runnerContext, fence: trustFence,
+        dispatchRef: receipt.refs.runtimeDispatchRef!, active: true })
     }
 
-    if (!terminal && trustFence) adapter.releaseTrustFence(trustFence, 'RECOVERING', fenceExpectation)
+    if (!terminal && untrustedRecovery && trustFence) adapter.releaseTrustFence(trustFence, 'RECOVERING', fenceExpectation)
     if (!terminal) {
       revokeRunnerContextBrokerContext(runnerContext)
       forgetRunnerContextPort(intent.dispatch_id)

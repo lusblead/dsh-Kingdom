@@ -42,6 +42,7 @@ const SESSION_ACTION_COMMANDS: Record<string, GuiSessionCommand> = {
   plan: 'plan',
   assign: 'assign',
   start: 'start',
+  reconcile: 'reconcile',
   review: 'review',
   'review:accept': 'review',
   'review:rework': 'review',

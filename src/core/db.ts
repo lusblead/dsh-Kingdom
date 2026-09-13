@@ -1309,6 +1309,27 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
     this.db.prepare('UPDATE territories SET supervisor_binding_id = ? WHERE territory_id = ?').run(supervisorBindingId, territoryId)
   }
 
+  updateTerritoryMetadata(territoryId: string, name: string, summary: string | null): void {
+    this.db.prepare('UPDATE territories SET name = ?, summary = ? WHERE territory_id = ?').run(name, summary, territoryId)
+  }
+
+  getEventById(eventId: string): EventRow | null {
+    return this.db.prepare('SELECT * FROM events WHERE event_id = ?').get(eventId) as unknown as EventRow | undefined ?? null
+  }
+
+  /** Global append cursor; callers predicting a receipt sequence must hold the write transaction. */
+  eventSequence(): number {
+    const row = this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get() as unknown as { n: number }
+    return row.n
+  }
+
+  /** Owner topology guards include RECOVERING and unknown future nonterminal states. */
+  listUnsettledOwnerExecutions(kingdomId: string): ExecutionRow[] {
+    return this.db.prepare(`SELECT e.* FROM executions e JOIN tasks t ON t.task_id = e.task_id
+      JOIN territories te ON te.territory_id = t.territory_id WHERE te.kingdom_id = ?
+      AND e.state NOT IN ('COMPLETED', 'FAILED', 'ABORTED') ORDER BY e.started_at`).all(kingdomId) as unknown as ExecutionRow[]
+  }
+
   // ── task_assignments（v0.7.0 M2-B Assignment Ledger）──────────
 
   insertTaskAssignment(row: TaskAssignmentRow): TaskAssignmentRow {
@@ -1577,6 +1598,60 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
     return row?.n ?? 0
   }
 
+  /** Observations and future admission/window policy cannot change an in-flight Runner relation. */
+  runnerContextRevision(kingdomId: string, scope?: { taskId: string; workerBindingId: string; sessionRef: string }): number {
+    const rows = this.db.prepare(`SELECT * FROM events
+      WHERE kingdom_id = ? AND event_type NOT IN (
+        'RUNTIME_ROLE_USAGE_OBSERVED', 'RUNTIME_PROMPT_COST_OBSERVED', 'DISPATCH_USAGE_OBSERVED',
+        'BUDGET_POLICY_UPDATED', 'BUDGET_ADMISSION_RESERVED', 'BUDGET_ADMISSION_BOUND', 'BUDGET_ADMISSION_CANCELLED',
+        'OWNER_DECISION_CREATED', 'OWNER_DECISION_REVOKED', 'OWNER_DECISION_CONSUMED'
+      ) AND NOT (event_type = 'OWNER_OPERATION_APPLIED' AND COALESCE(
+        CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.action') = 'budget.policy' ELSE 0 END, 0
+      )) ORDER BY seq DESC`).all(kingdomId) as unknown as EventRow[]
+    if (!scope) return rows[0]?.seq ?? 0
+    // Only a known event with a provably independent live Core relation can be
+    // ignored. Missing/corrupt targets and future event kinds remain invalidating.
+    const independentTask = (taskId: string | null | undefined, worker?: string | null, session?: string | null): boolean => {
+      if (!taskId || taskId === scope.taskId || worker === scope.workerBindingId || session === scope.sessionRef) return false
+      const task = this.getTask(taskId), territory = task ? this.getTerritoryById(task.territory_id) : null
+      if (!task || territory?.kingdom_id !== kingdomId || task.assigned_binding_id === scope.workerBindingId) return false
+      return !this.listExecutions(taskId).some(row => row.worker_binding_id === scope.workerBindingId || row.session_id === scope.sessionRef)
+        && !this.listTaskAssignments(taskId).some(row => row.worker_binding_id === scope.workerBindingId)
+    }
+    for (const event of rows) {
+      let independent = false
+      const id = event.target_id
+      if (id) {
+        if (event.target_type === 'task' && ['TASK_PLANNED', 'TASK_ASSIGNED', 'TASK_ACCEPTED', 'TASK_REWORK_REQUESTED', 'TASK_FAILED',
+          'TASK_HANDED_OFF', 'WORKER_RESULT_SUBMITTED', 'WORKER_EXECUTION_STARTED', 'WORKER_EXECUTION_FAILED', 'COLLABORATION_CHILD_CREATED'].includes(event.event_type)) {
+          independent = independentTask(id)
+        } else if (event.target_type === 'execution' && ['EXECUTION_GOVERNED_CREATED', 'EXECUTION_RECOVERING', 'SESSION_STARTED',
+          'SESSION_STOPPED', 'SESSION_FAILED', 'SESSION_PAUSED', 'SESSION_RESUMED'].includes(event.event_type)) {
+          const row = this.getExecution(id)
+          independent = !!row && independentTask(row.task_id, row.worker_binding_id, row.session_id)
+        } else if (event.target_type === 'lease' && ['LEASE_ACQUIRED', 'LEASE_STATE_CHANGED', 'LEASE_RELEASED'].includes(event.event_type)) {
+          const row = this.getLease(id)
+          independent = row?.kingdom_id === kingdomId && independentTask(row.task_id, row.worker_binding_id, row.session_ref)
+        } else if (event.target_type === 'dispatch' && ['DISPATCH_INTENDED', 'DISPATCH_STATE_CHANGED'].includes(event.event_type)) {
+          const row = this.getDispatch(id), lease = row ? this.getLease(row.lease_id) : null
+          independent = row?.kingdom_id === kingdomId && !!lease && lease.task_id === row.task_id
+            && independentTask(row.task_id, lease.worker_binding_id, row.session_ref)
+        } else if (event.target_type === 'decision' && event.event_type === 'CAPABILITY_DECISION_RECORDED') {
+          const row = this.getCapabilityDecision(id)
+          independent = row?.kingdom_id === kingdomId && independentTask(row.task_id, row.worker_binding_id)
+        } else if (event.target_type === 'affinity' && ['AFFINITY_ESTABLISHED', 'AFFINITY_RETIRED'].includes(event.event_type)) {
+          const row = this.getAffinity(id)
+          independent = row?.kingdom_id === kingdomId && row.worker_binding_id !== scope.workerBindingId && row.session_ref !== scope.sessionRef
+        } else if (event.target_type === 'workspace-admission' && ['WORKSPACE_ADMISSION_RESERVED', 'WORKSPACE_ADMISSION_BOUND', 'WORKSPACE_ADMISSION_CANCELLED'].includes(event.event_type)) {
+          try { const row = JSON.parse(event.payload_json); independent = row.type === 'KingdomWorkspaceAdmission/v1' && row.admissionId === id
+            && row.kingdomId === kingdomId && independentTask(row.taskId, row.workerBindingId) } catch { /* retain invalidation */ }
+        }
+      }
+      if (!independent) return event.seq
+    }
+    return 0
+  }
+
   /**
    * v0.7.0（M2）：外层事务包装——HANDOFF 等**原子治理操作**（多步写 + 事件）整体提交/回滚。
    * appendEvent 的内层 BEGIN 在事务中会抛错，由 appendEvent 的嵌套容忍逻辑接管（见下）。
@@ -1754,6 +1829,51 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
       .prepare('SELECT * FROM worker_results WHERE task_id = ? ORDER BY attempt_no DESC LIMIT 1')
       .all(taskId) as unknown as WorkerResultRow[]
     return rows[0] ?? null
+  }
+
+  /** Exact task/attempt lookup; unrelated kingdom activity cannot hide the reviewed attempt. */
+  latestTaskReworkEvent(kingdomId: string, taskId: string, reviewedAttemptNo: number): EventRow | null {
+    const rows = this.db.prepare("SELECT * FROM events WHERE kingdom_id = ? AND event_type = 'TASK_REWORK_REQUESTED' AND target_type = 'task' AND target_id = ? ORDER BY seq DESC")
+      .all(kingdomId, taskId) as unknown as EventRow[]
+    for (const row of rows) {
+      try {
+        if (JSON.parse(row.payload_json).reviewed_attempt_no === reviewedAttemptNo) return row
+      } catch { /* Malformed historical evidence cannot establish a review reference. */ }
+    }
+    return null
+  }
+
+  listDispatchUsageEvents(dispatchId: string): EventRow[] {
+    return this.db.prepare("SELECT * FROM events WHERE event_type = 'DISPATCH_USAGE_OBSERVED' AND target_type = 'dispatch' AND target_id = ? ORDER BY seq")
+      .all(dispatchId) as unknown as EventRow[]
+  }
+
+  /** Complete exact budget ledger; display event windows must never be used as accounting history. */
+  listBudgetEvents(kingdomId: string): EventRow[] {
+    return this.db.prepare(`SELECT * FROM events WHERE kingdom_id = ? AND event_type IN
+      ('BUDGET_POLICY_UPDATED', 'BUDGET_ADMISSION_RESERVED', 'BUDGET_ADMISSION_BOUND', 'BUDGET_ADMISSION_CANCELLED', 'DISPATCH_INTENDED')
+      ORDER BY seq ASC`).all(kingdomId) as unknown as EventRow[]
+  }
+
+  listWorkspaceAdmissionEvents(kingdomId: string): EventRow[] {
+    return this.db.prepare(`SELECT * FROM events WHERE kingdom_id = ? AND event_type IN
+      ('WORKSPACE_ADMISSION_RESERVED', 'WORKSPACE_ADMISSION_BOUND', 'WORKSPACE_ADMISSION_CANCELLED')
+      ORDER BY seq ASC`).all(kingdomId) as unknown as EventRow[]
+  }
+
+  listRuntimeCostEvents(kingdomId: string): EventRow[] {
+    return this.db.prepare(`SELECT * FROM events WHERE kingdom_id = ? AND event_type IN
+      ('RUNTIME_ROLE_USAGE_OBSERVED', 'RUNTIME_PROMPT_COST_OBSERVED') ORDER BY seq ASC`).all(kingdomId) as unknown as EventRow[]
+  }
+
+  listActorEventsSince(kingdomId: string, actorId: string, afterSeq: number): EventRow[] {
+    return this.db.prepare('SELECT * FROM events WHERE kingdom_id = ? AND actor_id = ? AND seq > ? ORDER BY seq ASC')
+      .all(kingdomId, actorId, afterSeq) as unknown as EventRow[]
+  }
+
+  getLatestRuntimeRoleUsageEvent(kingdomId: string, sourceUnitRef: string): EventRow | null {
+    return this.db.prepare("SELECT * FROM events WHERE kingdom_id = ? AND event_type = 'RUNTIME_ROLE_USAGE_OBSERVED' AND target_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(kingdomId, sourceUnitRef) as unknown as EventRow | undefined ?? null
   }
 
   /** 已落库的最大 attempt_no；无结果时为 0。下一次尝试 = 本值 + 1。 */

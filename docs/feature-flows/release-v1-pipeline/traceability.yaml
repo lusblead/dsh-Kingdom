@@ -45,7 +45,7 @@ nodes:
   D3:
     kind: decision
     description: "P2 typecheck and node tests complete successfully"
-    condition: "the P2 checks observe successful command results"
+    condition: "typecheck, emitted build and node test process each exit zero; test summary also reports no failures"
     code:
       - path: scripts/release.ps1
         symbol: "$testOut"

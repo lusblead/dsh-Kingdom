@@ -1,0 +1,344 @@
+version: 1
+feature_id: "governed-reconcile"
+title: "Governed reconcile"
+status: "implemented"
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  D0:
+    kind: decision
+    description: Original terminal evidence is already recorded
+    condition: Canonical Dispatch state is TERMINAL
+    code:
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+    tests:
+      - path: tests/governed-reconcile.test.ts
+        symbol: late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim
+  E1:
+    kind: "entry"
+    description: "Current Supervisor explicitly reconciles an existing task dispatch"
+    trigger: "kingdom_reconcile_task or GUI POST /api/commands/reconcile"
+    code:
+      -
+        path: "src/index.ts"
+        symbol: "runGovernedReconcile"
+        role: "implementation"
+      -
+        path: "src/gui/control-contract.ts"
+        symbol: "GUI_SESSION_COMMANDS"
+        role: "implementation"
+  D1:
+    kind: "decision"
+    description: "Current caller remains authorized"
+    condition: "Tool current initiator or original GUI activation is live, unrevoked, and bound to the current task territory Supervisor"
+    code:
+      -
+        path: "src/index.ts"
+        symbol: "runGovernedReconcile"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-start-supervisor-authz.test.ts"
+        symbol: "public reconcile rechecks current scope and submits the original late Claim once without redispatch"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "authority loss after cleanup and related task changes both reject recovery before terminal mutation"
+  D2:
+    kind: "decision"
+    description: "Original process context is available"
+    condition: "Original receipt, adapter, fence, port and cleanup callback remain retained for the dispatch"
+    code:
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "running evidence waits without cleanup; process teardown cannot restore an old fence"
+  D3:
+    kind: "decision"
+    description: "Original event interval proves a clean known terminal outcome"
+    condition: "Exact dispatch evidence is terminal and original fence has no foreign input or broken event continuity"
+    code:
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "foreign messages before terminal or during cleanup never mint terminal evidence"
+  A1:
+    kind: "action"
+    description: "Read live events through the original session and fence"
+    code:
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+      -
+        path: "src/adapter/dsh-session-events.ts"
+        symbol: "readDshSessionEvents"
+        role: "implementation"
+  A2:
+    kind: "action"
+    description: "Consume original one-shot cleanup and recheck authority and fence after await"
+    code:
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    external_call:
+      system: "DeepSeek Harness original live cleanup callback"
+      timeout: "One callback; GUI control expiry or plugin teardown invalidates authority, never retries cleanup"
+      failure_behavior: "Unconfirmed cleanup retains Lease recovery; foreign or lost authority prevents terminal mutation"
+      failure_nodes:
+        - "X2"
+      retry:
+        max_attempts: 1
+        backoff: "No automatic retry"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "trusted late terminal preserves Claim"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "authority loss after cleanup and related task changes both reject recovery before terminal mutation"
+  A3:
+    kind: "action"
+    description: "Persist exact dispatch usage as a separate typed runtime observation"
+    code:
+      -
+        path: "src/core/usage.ts"
+        symbol: "recordDispatchUsage"
+        role: "implementation"
+      -
+        path: "src/index.ts"
+        symbol: "collectDispatchUsage"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "usage observations have exact dispatch identity, idempotent coverage and a scoped GUI recovery action"
+  T0:
+    kind: "transition"
+    description: "Original port defers the incomplete observation"
+    entity: "Dispatch Execution Lease"
+    from: "RECEIVED or CORRELATED with live Execution and EXECUTING Lease"
+    to: "RECOVERING"
+    trigger: "Observation poll exhausted"
+    code:
+      -
+        path: "src/core/governed.ts"
+        symbol: "RunnerContextPort"
+        role: "implementation"
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "runGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "running evidence waits without cleanup; process teardown cannot restore an old fence"
+  T1:
+    kind: "transition"
+    description: "Record late terminal under original capability"
+    entity: "Dispatch and Execution"
+    from: "RECOVERING"
+    to: "TERMINAL Dispatch and known terminal Execution; Lease remains RECOVERING"
+    trigger: "Original fence and cleanup observation permit terminal write"
+    code:
+      -
+        path: "src/core/governed.ts"
+        symbol: "recordRecoveredTerminalEvidence"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "recovered terminal transaction rolls back both rows if execution write fails"
+  T2:
+    kind: "transition"
+    description: "Consume recovery settlement without changing terminal history"
+    entity: "Lease"
+    from: "RECOVERING"
+    to: "RELEASED or RECOVERING"
+    trigger: "Original cleanup and fence settlement"
+    code:
+      -
+        path: "src/core/governed.ts"
+        symbol: "RunnerContextPort"
+        role: "implementation"
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "settleAndRelease"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "failure after Runtime fence release preserves terminal history and does not retry cleanup or release"
+  T3:
+    kind: "transition"
+    description: "Submit one Claim and retain Supervisor acceptance boundary"
+    entity: "Task and WorkerResult"
+    from: "ASSIGNED or RUNNING with no original attempt Claim"
+    to: "REVIEW with one Claim"
+    trigger: "Exact terminal relation settled or explicitly recovering"
+    code:
+      -
+        path: "src/core/governed-claim.ts"
+        symbol: "submitGovernedClaim"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-start-supervisor-authz.test.ts"
+        symbol: "public reconcile rechecks current scope and submits the original late Claim once without redispatch"
+  T4:
+    kind: "transition"
+    description: "Uncertainty retains the existing recovery state"
+    entity: "Dispatch Execution Lease"
+    from: "RECOVERING"
+    to: "RECOVERING"
+    trigger: "Missing original context, indeterminate events or foreign input"
+    code:
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "running evidence waits without cleanup; process teardown cannot restore an old fence"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "foreign messages before terminal or during cleanup never mint terminal evidence"
+  T5:
+    kind: "transition"
+    description: "Duplicate request returns original Claim without new writes"
+    entity: "Task and WorkerResult"
+    from: "REVIEW with original Claim"
+    to: "REVIEW with original Claim"
+    trigger: "Repeated or concurrent reconcile"
+    code:
+      -
+        path: "src/core/governed-claim.ts"
+        symbol: "submitGovernedClaim"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-start-supervisor-authz.test.ts"
+        symbol: "public reconcile rechecks current scope and submits the original late Claim once without redispatch"
+  G1:
+    kind: "safeguard"
+    description: "Current identity and scope authorization"
+    safeguard_type: "authorization"
+    guarantee: "Browser fields cannot grant authority and revoked callers cannot consume recovery evidence"
+    protects:
+      - "D1"
+      - "A2"
+      - "T1"
+    failure_behavior: "Return authorization or recovery-required result before the protected mutation"
+    code:
+      -
+        path: "src/index.ts"
+        symbol: "runGovernedReconcile"
+        role: "implementation"
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-start-supervisor-authz.test.ts"
+        symbol: "public reconcile rechecks current scope and submits the original late Claim once without redispatch"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "authority loss after cleanup and related task changes both reject recovery before terminal mutation"
+  G2:
+    kind: "safeguard"
+    description: "Original opaque port and exact canonical relation"
+    safeguard_type: "integrity"
+    guarantee: "No recreated port or fresh fence can establish historical trust; related row changes invalidate recovery"
+    protects:
+      - "T1"
+    failure_behavior: "Retain RECOVERING with rejected-evidence reason"
+    code:
+      -
+        path: "src/core/governed.ts"
+        symbol: "RunnerContextPort"
+        role: "implementation"
+      -
+        path: "src/dispatch/service.ts"
+        symbol: "reconcileGovernedDispatch"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "authority loss after cleanup and related task changes both reject recovery before terminal mutation"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "running evidence waits without cleanup; process teardown cannot restore an old fence"
+  G3:
+    kind: "safeguard"
+    description: "One Claim per original attempt; no automatic task acceptance"
+    safeguard_type: "idempotency"
+    guarantee: "Repeated reconciliation creates no duplicate Claim, task completion or dispatch"
+    protects:
+      - "T3"
+    failure_behavior: "Conflicting existing Claim or changed task blocks submission atomically"
+    code:
+      -
+        path: "src/core/governed-claim.ts"
+        symbol: "submitGovernedClaim"
+        role: "implementation"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"
+      -
+        path: "tests/governed-start-supervisor-authz.test.ts"
+        symbol: "public reconcile rechecks current scope and submits the original late Claim once without redispatch"
+  X1:
+    kind: "outcome"
+    description: "Unauthorized request rejected"
+    result: "No Runtime recovery or Claim mutation"
+  X2:
+    kind: "outcome"
+    description: "Recovery remains required"
+    result: "WAIT, missing context, uncertain evidence or authorization loss; no resend and no unproven Lease release"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "running evidence waits without cleanup; process teardown cannot restore an old fence"
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "authority loss after cleanup and related task changes both reject recovery before terminal mutation"
+  X3:
+    kind: "outcome"
+    description: "Original terminal reconciled"
+    result: "One Claim, task REVIEW, and released or explicitly recovering Lease"
+    tests:
+      -
+        path: "tests/governed-reconcile.test.ts"
+        symbol: "late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim"

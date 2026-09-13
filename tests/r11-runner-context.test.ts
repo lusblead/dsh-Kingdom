@@ -317,6 +317,80 @@ test('R11 RunnerContext happy path consumes one handle through acquire/receipt/t
   }
 })
 
+test('neutral cost and future budget policy redraw the GUI without invalidating an unchanged Runner relation', () => {
+  const fixture = makeFixture()
+  try {
+    const port = createRunnerContextPort(fixture.store, fixture.dispatchId)
+    let version = port.initialVersion
+    const before = fixture.store.revision(fixture.kingdomId)
+    for (const event_type of ['RUNTIME_ROLE_USAGE_OBSERVED', 'RUNTIME_PROMPT_COST_OBSERVED', 'DISPATCH_USAGE_OBSERVED',
+      'BUDGET_POLICY_UPDATED', 'BUDGET_ADMISSION_RESERVED', 'BUDGET_ADMISSION_BOUND', 'BUDGET_ADMISSION_CANCELLED',
+      'OWNER_DECISION_CREATED', 'OWNER_DECISION_REVOKED', 'OWNER_OPERATION_APPLIED']) {
+      fixture.store.appendEvent({ event_id: randomUUID(), kingdom_id: fixture.kingdomId, event_type,
+        actor_role: 'SYSTEM', actor_id: 'cost-fixture', target_type: 'observation', target_id: fixture.dispatchId,
+        payload_json: event_type === 'OWNER_OPERATION_APPLIED' ? '{"action":"budget.policy"}' : '{}', created_at: now() })
+      const view = port.read(port.handle, version)
+      assert.equal(view.dispatchId, fixture.dispatchId)
+      version = view.version
+    }
+    assert.ok(fixture.store.revision(fixture.kingdomId) > before)
+    fixture.store.db.prepare("UPDATE tasks SET status = 'REVIEW' WHERE task_id = ?").run(fixture.taskId)
+    assert.throws(() => port.read(port.handle, version), (e: unknown) => (e as { code?: string }).code === 'STALE_VERSION')
+  } finally { fixture.store.close() }
+})
+
+test('non-budget and malformed Owner receipts still invalidate a Runner before product action', () => {
+  for (const payload_json of ['{"action":"ceiling"}', '{}', 'malformed']) {
+    const fixture = makeFixture()
+    try {
+      const port = createRunnerContextPort(fixture.store, fixture.dispatchId)
+      fixture.store.appendEvent({ event_id: randomUUID(), kingdom_id: fixture.kingdomId, event_type: 'OWNER_OPERATION_APPLIED',
+        actor_role: 'OWNER', actor_id: 'owner', target_type: 'kingdom', target_id: fixture.kingdomId, payload_json, created_at: now() })
+      assert.throws(() => port.read(port.handle, port.initialVersion), (e: unknown) => (e as { code?: string }).code === 'STALE_VERSION')
+    } finally { fixture.store.close() }
+  }
+})
+
+test('bounded collaboration keeps one Runner valid while another exact Worker executes in parallel', () => {
+  const f = makeFixture()
+  try {
+    const otherWorker = 'parallel-worker', otherTask = 'parallel-task'
+    f.store.insertBinding({ ...f.store.getBindingById(f.workerBindingId)!, binding_id: otherWorker, role_name: 'Parallel worker' })
+    const port = createRunnerContextPort(f.store, f.dispatchId)
+    f.store.insertTask({ ...f.store.getTask(f.taskId)!, task_id: otherTask, assigned_binding_id: otherWorker, status: 'ASSIGNED' })
+    f.store.appendEvent({ event_id: randomUUID(), kingdom_id: f.kingdomId, event_type: 'TASK_ASSIGNED', actor_role: 'SUPERVISOR', actor_id: 'fixture', target_type: 'task', target_id: otherTask, payload_json: '{}', created_at: now() })
+    const session = { runtimeType: 'dsh', runtimeInstanceRef: 'r11-runtime', sessionRef: 'parallel-session' }
+    establishAffinity(f.store, { kingdomId: f.kingdomId, workerBindingId: otherWorker, session, territoryId: f.territoryId })
+    const lease = acquireExecutionLease(f.store, { kingdomId: f.kingdomId, workerBindingId: otherWorker, session, territoryId: f.territoryId, taskId: otherTask, attemptNo: 1 })
+    setLeasePlan(f.store, lease.lease_id, '{}'); advanceLeaseState(f.store, lease.lease_id, 'PREPARING'); advanceLeaseState(f.store, lease.lease_id, 'MATERIALIZING')
+    const decision = recordCapabilityDecision(f.store, { kingdomId: f.kingdomId, taskId: otherTask, workerBindingId: otherWorker,
+      supervisorBindingId: f.store.getTerritoryById(f.territoryId)!.supervisor_binding_id, decision: 'GRANTED', enforcementStatus: 'ENFORCED', enforcementEvidenceJson: '{}', requirementCoverage: 'FULL' })
+    bindCapabilityDecision(f.store, lease.lease_id, decision.decision_id); advanceLeaseState(f.store, lease.lease_id, 'DISPATCH_READY')
+    const prepared = prepareGovernedDispatch(f.store, { kingdomId: f.kingdomId, taskId: otherTask, attemptNo: 1, workerBindingId: otherWorker,
+      leaseId: lease.lease_id, capabilityDecisionId: decision.decision_id, session, requestSnapshot: '{}', inputRefJson: '{}', payloadHash: 'test' })
+    const original = port.read(port.handle, port.initialVersion)
+    assert.equal(original.dispatchId, f.dispatchId)
+    recordDispatchReceipt(f.store, prepared.intent.dispatch_id, { runtimeDispatchRef: 'parallel-message', receiptJson: '{}' })
+    correlateRuntimeExecution(f.store, prepared.intent.dispatch_id, 'parallel-turn')
+    f.store.transitionExecution(f.store.getExecution(prepared.execution.execution_id)!, 'RUNNING')
+    recordTerminalEvidence(f.store, prepared.intent.dispatch_id, { evidenceJson: '{}', executionTerminalState: 'COMPLETED', settleLease: true })
+    assert.equal(port.read(port.handle, original.version).dispatchId, f.dispatchId)
+  } finally { f.store.close() }
+})
+
+test('parallel event exceptions reject missing targets, wrong target kinds, shared Worker and future events', () => {
+  for (const mode of ['missing', 'wrong-type', 'shared-worker', 'future']) {
+    const f = makeFixture()
+    try {
+      const port = createRunnerContextPort(f.store, f.dispatchId)
+      if (mode === 'shared-worker') f.store.insertTask({ ...f.store.getTask(f.taskId)!, task_id: 'other-task' })
+      f.store.appendEvent({ event_id: randomUUID(), kingdom_id: f.kingdomId, event_type: mode === 'future' ? 'FUTURE_GOVERNANCE_CHANGE' : 'TASK_ASSIGNED',
+        actor_role: 'SYSTEM', actor_id: 'fixture', target_type: mode === 'wrong-type' ? 'binding' : 'task', target_id: 'other-task', payload_json: '{}', created_at: now() })
+      assert.throws(() => port.read(port.handle, port.initialVersion), { code: 'STALE_VERSION' })
+    } finally { f.store.close() }
+  }
+})
+
 test('R11 copied/foreign/stale handle and version fail closed before product action', () => {
   const fixture = makeFixture()
   const foreign = makeFixture()

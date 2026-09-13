@@ -67,6 +67,7 @@ interface FakeAgents {
 interface FakeAgentOptions {
   allowTerminal?: boolean
   cleanupThrows?: boolean
+  throwAfterAccept?: boolean
 }
 
 function makeFakeAgents(options: FakeAgentOptions = {}): FakeAgents {
@@ -89,6 +90,11 @@ function makeFakeAgents(options: FakeAgentOptions = {}): FakeAgents {
     },
     followup: (message?: { id?: string }) => {
       followup++
+      if (options.throwAfterAccept) {
+        const session = (agents.get(id) as { session: { events: { type: string; data?: Record<string, unknown> }[] } }).session
+        session.events.push({ type: 'user/message', data: { id: message?.id } })
+        throw new Error('fixture receipt lost after message accepted')
+      }
       if (!options.allowTerminal) return
       const events = (agents.get(id) as { session: { events: { type: string; data?: Record<string, unknown> }[] } } | undefined)?.session.events
       if (!events) return
@@ -153,6 +159,7 @@ interface Harness {
   store: KingdomStore
   tool: CapturedTool
   legacyTool: CapturedTool
+  reconcileTool: CapturedTool
   agents: FakeAgents
   kingdomId: string
   worker: string
@@ -170,6 +177,8 @@ interface Harness {
 
 interface HarnessOptions extends FakeAgentOptions {
   allowCapability?: boolean
+  forceTimeout?: boolean
+  beforePolicyLoad?: () => Promise<void>
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -217,7 +226,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       authMode: 'declarative',
       migrateV4: true,
     }, {
-      loadS4Policy: async () => ({
+      governedPolling: options.forceTimeout ? { intervalMs: 0, maxPolls: 0 } : undefined,
+      loadS4Policy: async () => { await options.beforePolicyLoad?.(); return ({
         sandboxPolicy: {
           setSandboxMode: (session: unknown, mode: string) => {
             const events = (session as { events?: { type: string; data?: Record<string, unknown> }[] }).events
@@ -230,7 +240,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
             events?.push({ type: 'approval/policy', data: { policy } })
           },
         },
-      }),
+      }) },
     })
   } finally {
     if (originalDshHome === undefined) delete process.env.DSH_HOME
@@ -240,6 +250,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const init = tools.get('kingdom_init')
   const tool = tools.get('kingdom_start_task_governed')
   const legacyTool = tools.get('kingdom_start_task')
+  const reconcileTool = tools.get('kingdom_reconcile_task')
+  assert.ok(reconcileTool)
   assert.ok(init, 'apply() 必须注册 kingdom_init')
   assert.ok(tool, 'apply() 必须注册 kingdom_start_task_governed')
   assert.ok(legacyTool, 'apply() 必须保留显式 LEGACY_COMPAT kingdom_start_task')
@@ -352,6 +364,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     store,
     tool,
     legacyTool,
+    reconcileTool,
     agents,
     kingdomId,
     worker,
@@ -435,6 +448,23 @@ function assertCapabilityDeniedCleanup(harness: Harness, taskId: string, supervi
   assert.equal(harness.store.listWorkerResults(taskId).length, 0)
   assert.equal(harness.store.getTask(taskId)!.status, 'ASSIGNED')
 }
+
+test('public governed start rechecks the original Supervisor after asynchronous policy loading', async () => {
+  let resumed!: () => void, entered!: () => void
+  const waiting = new Promise<void>(resolve => { resumed = resolve }), ready = new Promise<void>(resolve => { entered = resolve })
+  const harness = await makeHarness({ allowCapability: true, allowTerminal: true, beforePolicyLoad: async () => { entered(); await waiting } })
+  try {
+    const run = executeGoverned(harness, harness.taskA, S.supervisorA)
+    await ready
+    harness.store.updateBindingSession(harness.supA, 'replacement-supervisor-session', NOW())
+    resumed()
+    assert.match(String(await run), /AUTHORITY_CHANGED/)
+    assert.deepEqual(harness.agents.counts(), { create: 0, resume: 0, followup: 0 })
+    assert.equal(harness.store.listLeases(harness.kingdomId).length, 0)
+    assert.equal(harness.store.listExecutions(harness.taskA).length, 0)
+    assert.equal(harness.store.listBudgetEvents(harness.kingdomId).length, 0)
+  } finally { resumed(); harness.close() }
+})
 
 test('public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup', async (t) => {
   const harness = await makeHarness()
@@ -809,4 +839,49 @@ test('headless route contract: governed failure never suggests legacy fallback',
   assert.doesNotMatch(output, /改用 kingdom_start_task/)
   assert.match(output, /不会自动降级为 LEGACY_COMPAT/)
   assertCapabilityDeniedCleanup(harness, harness.taskA, harness.supA)
+})
+
+test('public reconcile rechecks current scope and submits the original late Claim once without redispatch', async t => {
+  const h = await makeHarness({ allowCapability: true, forceTimeout: true }); t.after(() => h.close())
+  const started = await executeGoverned(h, h.taskA, S.supervisorA)
+  assert.match(started, /RECOVERING/)
+  assert.match(started, /kingdom_reconcile_task/)
+  assert.doesNotMatch(started, /同一 governed persistent 入口重试/)
+  const dispatch = h.store.listDispatches(h.kingdomId).find(row => row.task_id === h.taskA)!
+  assert.ok(dispatch)
+  const invoke = async (session: string, args: Record<string, unknown> = { task_id: h.taskA }) => {
+    h.agents.setCurrent(session)
+    return String(await h.reconcileTool.execute(args, { agent: h.agents.ensure(session), signal: { aborted: false } }))
+  }
+  const before = h.store.revision(h.kingdomId)
+  assert.match(await invoke(S.supervisorB), /^AUTHZ_DENIED/)
+  assert.equal(h.store.revision(h.kingdomId), before)
+  assert.match(await invoke(S.supervisorA, { task_id: h.taskB, dispatch_id: dispatch.dispatch_id }), /^AUTHZ_DENIED/)
+  const runtime = h.agents.service.get(dispatch.session_ref) as { session: { events: { type: string; data?: Record<string, unknown> }[] } }
+  runtime.session.events.push({ type: 'user/message', data: { id: dispatch.runtime_dispatch_ref } }, { type: 'turn/start', data: { turn: 1 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }, { type: 'assistant/message', data: { text: 'public late Claim' } })
+  h.agents.setCurrent(S.supervisorA)
+  const caller = { agent: h.agents.ensure(S.supervisorA), signal: { aborted: false } }
+  const outputs = await Promise.all([h.reconcileTool.execute({ task_id: h.taskA }, caller), h.reconcileTool.execute({ task_id: h.taskA }, caller)])
+  assert.ok(outputs.every(output => String(output).includes('Claim')), JSON.stringify(outputs))
+  assert.equal(h.store.listWorkerResults(h.taskA).length, 1)
+  assert.equal(h.store.getTask(h.taskA)!.status, 'REVIEW')
+  assert.equal(h.agents.counts().followup, 1)
+  assert.equal(h.store.getLease(dispatch.lease_id)!.state, 'RELEASED')
+  const revision = h.store.revision(h.kingdomId)
+  assert.match(await invoke(S.supervisorA), /已存在/)
+  assert.equal(h.store.revision(h.kingdomId), revision)
+})
+
+test('public reconcile never resends a dispatch whose Runtime accepted message but Receipt was lost', async t => {
+  const h = await makeHarness({ allowCapability: true, forceTimeout: true, throwAfterAccept: true }); t.after(() => h.close())
+  assert.match(await executeGoverned(h, h.taskA, S.supervisorA), /DISPATCH_EXCEPTION/)
+  const dispatch = h.store.listDispatches(h.kingdomId).find(row => row.task_id === h.taskA)!
+  assert.equal(dispatch.runtime_dispatch_ref, null)
+  h.agents.setCurrent(S.supervisorA)
+  const result = String(await h.reconcileTool.execute({ task_id: h.taskA }, { agent: h.agents.ensure(S.supervisorA), signal: { aborted: false } }))
+  assert.match(result, /RECEIPT_UNAVAILABLE/)
+  assert.equal(h.agents.counts().followup, 1)
+  assert.equal(h.store.listWorkerResults(h.taskA).length, 0)
+  assert.equal(h.store.getLease(dispatch.lease_id)!.state, 'RECOVERING')
 })

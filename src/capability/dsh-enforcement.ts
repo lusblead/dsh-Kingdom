@@ -18,9 +18,13 @@ import type {
   MaterializeResult,
   RuntimeEnforceableSet,
 } from '../adapter/contract.js'
+import { readDshSessionEvents, type DshSessionEventSource } from '../adapter/dsh-session-events.js'
+import type { RuntimeEvent } from '../adapter/contract.js'
 
 /** DSH 政策注入面（结构型）。 */
 export interface DshPolicyDeps {
+  /** Optional display-only pilot; it never changes the Gate's allowed set. */
+  toolDisclosure?: { install(agent: DshEnforcementContext['agent'], tools: readonly string[]): () => void }
   /** ctx.get('permission')——permissionPresets.set(session, name)。 */
   permission?: { set(session: unknown, name: string): void }
   /** @deepseek-ai/dsh-sandbox-policy 的 setSandboxMode。 */
@@ -31,7 +35,9 @@ export interface DshPolicyDeps {
 
 /** 结构面：live agent 的作用域工具 API（guard/restrict 返回 disposer；schemas 为真实 Runtime inventory）。 */
 export interface DshAgentScopeLike {
+  on?(event: string, callback: (...args: any[]) => any): () => void
   tools?: {
+    get?(name: string): unknown
     guard?(guard: (exec: { name: string }) => string | undefined): () => void
     restrict?(filter: { allow?: string[]; deny?: string[] }): () => void
     /** 真实 `tools.schemas()`：返回 `[{name, description, parameters}, …]`（实证 @ 00b7102f1d）。 */
@@ -49,7 +55,7 @@ export interface DshEnforcementContext {
   /** live agent（agent.ctx.tools 用于 per-execution guard/restrict）。 */
   agent: {
     ctx: DshAgentScopeLike
-    session: { events: readonly { type: string; data?: Record<string, unknown> }[] }
+    session: DshSessionEventSource
   }
   /**
    * 真实 **agent preset** id（createSession 时装配的 preset：standard/code/minimal/…）。
@@ -163,7 +169,7 @@ function disposeDisposers(context: DshEnforcementContext, disposers: readonly ((
   return { disposed, failures }
 }
 
-type SessionEvent = DshEnforcementContext['agent']['session']['events'][number]
+type SessionEvent = RuntimeEvent
 
 /** 只接受本次 setter 调用后追加、且字段值精确匹配的政策事件。 */
 function hasAppendedPolicyEvent(
@@ -173,8 +179,8 @@ function hasAppendedPolicyEvent(
   field: string,
   expected: string,
 ): boolean {
-  const events = context.agent.session.events
-  return events.slice(startIndex).some((event: SessionEvent) => event.type === type && event.data?.[field] === expected)
+  const events = readDshSessionEvents(context.agent.session)
+  return events !== null && events.slice(startIndex).some((event: SessionEvent) => event.type === type && event.data?.[field] === expected)
 }
 
 /**
@@ -188,7 +194,8 @@ function hasAppendedPolicyEvent(
  * - **Runtime Enforceable Tool Set = A ∩ B**；任一来源无法证明 → 空（fail-closed，不默认放行）。
  */
 export async function readEnforceableSet(context: DshEnforcementContext, deps?: EnforceableSetDeps): Promise<RuntimeEnforceableSet> {
-  const events = context.agent.session.events
+  const events = readDshSessionEvents(context.agent.session)
+  if (events === null) return { tools: [], sandboxMode: null, approvalPolicy: null, presetId: null }
   const sandboxEvents = events.filter(e => e.type === 'sandbox/mode')
   const approvalEvents = events.filter(e => e.type === 'approval/policy')
   const presetEvents = events.filter(e => e.type === 'permission/preset')
@@ -252,7 +259,9 @@ export async function materializeDshEnforcement(
   const applied: string[] = []
 
   const toolsApi = context.agent.ctx.tools
-  const policyEventStart = context.agent.session.events.length
+  const beforeEvents = readDshSessionEvents(context.agent.session)
+  if (beforeEvents === null) return { ok: false, evidenceJson: null, reasons: ['Session event snapshot unreadable; enforcement not attempted'] }
+  const policyEventStart = beforeEvents.length
 
   // 1) 工具面：restrict（允许清单）+ guard（单调拒绝，body 不执行）
   if (!hasToolEnforcementSeam(toolsApi)) {
@@ -370,6 +379,10 @@ export async function materializeDshEnforcement(
     applied.push(`permission:preset=${request.presetId}:idempotent-existing-state`)
   }
 
+  if (reasons.length === 0 && deps.toolDisclosure) {
+    try { disposers.push(deps.toolDisclosure.install(context.agent, request.tools)); applied.push('tool-disclosure:authorized-native-pilot') }
+    catch (error) { reasons.push(`工具展示试点无法安装: ${error instanceof Error ? error.message : String(error)}`) }
+  }
   if (reasons.length > 0) {
     disposerRegistry.set(sessionKey(context), disposers)
     const cleanup = disposeDisposers(context, disposers)

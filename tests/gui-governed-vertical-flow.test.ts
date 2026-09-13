@@ -53,6 +53,7 @@ function fakeAgents(): {
   const workerSessionIds = new Set<string>()
   let currentInitiator: Agent | undefined
   let followups = 0
+  let terminalEnabled = true
 
   const makeAgent = (id: string, cwd: string, status: 'idle' | 'running' = 'running'): Agent => ({
     id,
@@ -70,6 +71,7 @@ function fakeAgents(): {
       const turn = followups
       this.session.events.push({ type: 'user/message', data: { id: message.id } })
       this.session.events.push({ type: 'turn/start', data: { turn } })
+      if (!terminalEnabled) return
       this.session.events.push({
         type: 'turn/end',
         data: { turn, reason: { kind: 'completed' } },
@@ -120,6 +122,7 @@ function fakeAgents(): {
     registerAgent,
     sessionRefs: () => [...workerSessionIds],
     followupCount: () => followups,
+    setTerminalEnabled: (enabled: boolean) => { terminalEnabled = enabled },
   }
 }
 
@@ -134,6 +137,7 @@ test('loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance', 
   agents.registerAgent(ACTIVATION_SESSION, 'running')
   let launchUrl = ''
   let store: KingdomStore | null = null
+  const polling = { intervalMs: 0, maxPolls: 1 }
 
   const permission = {
     set(session: unknown, preset: string): void {
@@ -188,6 +192,7 @@ test('loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance', 
     authMode: 'session-bound',
     migrateV4: true,
   }, {
+    governedPolling: polling,
     openLocalConsole(url) {
       launchUrl = url
       return true
@@ -200,7 +205,7 @@ test('loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance', 
 
   const slash = commands.get('kingdom')
   assert.ok(slash)
-  const activationAgent = { session: { id: ACTIVATION_SESSION } }
+  const activationAgent = agents.service.get(ACTIVATION_SESSION)
   const setupFixture = {
     territory_name: 'Vertical Territory',
     workspace_path: root,
@@ -378,6 +383,29 @@ test('loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance', 
 
   assert.equal(agents.sessionRefs().length, 1, 'same Worker and Territory reuse one persistent fake session')
   assert.equal(agents.followupCount(), 4)
+  agents.setTerminalEnabled(false)
+  polling.maxPolls = 0
+  const lateTask = await createAssignedTask('Vertical late result')
+  const timedOut = await postRaw('start', { task_id: lateTask, grant_json: CAPABILITY_JSON, sandbox_mode: 'workspace-write' })
+  assert.equal(timedOut.body.ok, false)
+  const waiting = await postRaw('reconcile', { task_id: lateTask })
+  assert.equal(waiting.body.ok, false, 'a still-running dispatch is not a successful recovery')
+  assert.equal(waiting.body.errorCode, 'RECOVERY_REQUIRED')
+  assert.match(String(waiting.body.message), /WAIT/)
+  const lateDispatch = store.listDispatches(kingdom.kingdom_id).find(row => row.task_id === lateTask)!
+  const live = agents.service.get(lateDispatch.session_ref)
+  append(live.session, 'turn/end', { turn: 5, reason: { kind: 'completed' } })
+  append(live.session, 'assistant/message', { text: 'GUI late result' })
+  await post('reconcile', { task_id: lateTask })
+  assert.equal(store.getTask(lateTask)!.status, 'REVIEW')
+  assert.equal(store.listWorkerResults(lateTask).length, 1)
+  await post('reconcile', { task_id: lateTask })
+  assert.equal(store.listWorkerResults(lateTask).length, 1)
+  assert.equal(agents.followupCount(), 5)
+  const unstarted = await createAssignedTask('No original dispatch')
+  const missing = await postRaw('reconcile', { task_id: unstarted })
+  assert.equal(missing.body.ok, false)
+  assert.equal(missing.body.errorCode, 'RECOVERY_REQUIRED')
   const stopped = await slash.handler({ rawInput: 'gui stop', agent: activationAgent })
   assert.equal(stopped.kind, 'success')
 })

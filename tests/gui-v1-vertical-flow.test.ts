@@ -19,7 +19,7 @@ import {
   parseConsoleFragment,
   renderConsoleApp,
   shouldCommitConsoleTaskDetail,
-} from '../src/gui/console-app.ts'
+} from '../lib/gui/console-app.js'
 
 const CAPABILITY_JSON = '{"tool:pwsh":true}'
 const ACTIVATION_SESSION = 'v1-vertical-supervisor-session'
@@ -176,12 +176,11 @@ test('v1 Console fragment and Task navigator preserve public navigation without 
   assert.deepEqual(command, { name: 'plan', payload: { title: 'bounded task' } })
 
   const html = renderConsoleApp()
-  for (const section of ['overview', 'management', 'ledger']) {
+  for (const section of ['today', 'tasks', 'inbox', 'map', 'usage', 'settings']) {
     assert.match(html, new RegExp(`href="#${section}"[^>]+data-nav-section="${section}"`, 'u'))
   }
-  for (const section of ['organization', 'tasks', 'executions', 'activity']) {
-    assert.match(html, new RegExp(`href="#${section}"[^>]+data-nav-section="ledger"`, 'u'))
-  }
+  // Legacy deep links remain covered by parseConsoleFragment above; the visible
+  // navigation now follows the personal workbench's six user-facing pages.
   assert.match(html, /aria-label="任务导航器"/u)
   assert.match(html, /'#task=' \+ encodeURIComponent/u)
 })

@@ -7,6 +7,7 @@
  * - G12 Foreign/Unmanaged Dispatch 检测：active dispatch 期间出现**非本次 dispatch 的
  *   user 消息** → 标记 untrusted（禁止 settle/release 并声称可信）。
  */
+import { locateDshDispatchRef, readDshSessionEvents, type DshSessionEventSource } from '../adapter/dsh-session-events.js'
 /**
  * turn/end reason → 已知终态 outcome 映射（Owner FINAL REAL-DSH VALIDATION WINDOW · 不改 Schema）：
  *   completed(+assistant) → COMPLETED；aborted → ABORTED；blocked/error/max-tokens → FAILED；
@@ -42,13 +43,11 @@ export interface DispatchEvidence {
   terminalReason: string | null
 }
 
-export interface SessionEventsLike {
-  events: readonly { type: string; data?: Record<string, unknown> }[]
-}
+export interface SessionEventsLike extends DshSessionEventSource {}
 
 /** 在事件序列化负载中找 dispatch ref 首次出现的位置（容错 data 嵌套）。 */
 function locateDispatchRef(events: readonly { type: string; data?: Record<string, unknown> }[], ref: string): number {
-  return events.findIndex((event) => JSON.stringify(event).includes(ref))
+  return locateDshDispatchRef(events, ref)
 }
 
 function turnNumberOf(event: { data?: Record<string, unknown> }): number | null {
@@ -83,7 +82,8 @@ function messageIdOf(event: { data?: Record<string, unknown> }): string | null {
  */
 export function reconstructDispatchEvidence(session: SessionEventsLike, sinceDispatchRef: string): DispatchEvidence {
   try {
-    const events = session.events
+    const events = readDshSessionEvents(session)
+    if (events === null) throw new Error('Session event snapshot unreadable')
     const startIndex = locateDispatchRef(events, sinceDispatchRef)
     if (startIndex === -1) {
       return { located: false, turnObserved: null, turnEndObserved: false, turnEndReason: null, terminalOutcome: null, assistantMessageObserved: false, foreignUserMessages: [], state: 'UNKNOWN', terminalReason: null }

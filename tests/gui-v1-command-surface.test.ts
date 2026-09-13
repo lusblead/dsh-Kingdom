@@ -227,7 +227,7 @@ test('v1 GUI command surface is session-bound, state-safe, replay-safe, and dire
       actions: Record<string, { executable: boolean; disabledReason: string | null }>
     }
     assert.deepEqual(control.commands, [
-      'plan', 'assign', 'start', 'review',
+      'plan', 'assign', 'start', 'reconcile', 'review',
       'execution.pause', 'execution.resume', 'execution.abort', 'control.revoke',
     ])
     assert.deepEqual(control.reviewDecisions, ['ACCEPT', 'REWORK', 'FAIL', 'HANDOFF'])

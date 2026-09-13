@@ -40,9 +40,11 @@ Check "P1 版本已冻结为 $Version" ($pkg.version -eq $Version) "current=$($p
 & npx tsc -p tsconfig.json --noEmit 2>&1 | Out-Null
 Check "P2 tsc typecheck" ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 & npx tsc -p tsconfig.json 2>&1 | Out-Null
+Check "P2 tsc build" ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 $testOut = & node --test tests/*.test.ts 2>&1 | Out-String
+$testExit = $LASTEXITCODE
 $testSummary = (($testOut -split [Environment]::NewLine | Select-String '^ℹ (pass|fail) ' | ForEach-Object { $_.Line.Trim() }) -join ' | ')
-Check "P2 node --test 全绿" ($testOut -match 'ℹ pass \d+' -and $testOut -notmatch 'ℹ fail [1-9]') $testSummary
+Check "P2 node --test 全绿" ($testExit -eq 0 -and $testOut -match 'ℹ pass \d+' -and $testOut -notmatch 'ℹ fail [1-9]') "exit=$testExit; $testSummary"
 
 # 3) npm pack
 $packDestination = Join-Path ([System.IO.Path]::GetTempPath()) ("dsh-kingdom-pack-" + [guid]::NewGuid().ToString('N'))

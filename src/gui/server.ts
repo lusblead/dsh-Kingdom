@@ -24,6 +24,7 @@ import type { CommandResultView, SnapshotView, TaskDetailView } from './contract
 import { GUI_SCHEMA_VERSION } from './contract.js'
 import type { EventView } from './contract.js'
 import { CONSOLE_APP_HTML, guiCharacterAssetLocations, isGuiCharacterAssetFile, type GuiCharacterAssetFile } from './console-app.js'
+import { handleOwnerRequest, type OwnerLocalControlManager } from './owner-control.js'
 import {
   DuplicateJsonKeyError,
   GUI_COMMAND_PAYLOAD_FIELDS,
@@ -63,6 +64,8 @@ export interface GuiServerOptions {
   token?: string
   allowOrigins?: string[]
   control?: GuiControlBroker
+  /** Independent direct-human decision transport; never upgrades Role cookies. */
+  ownerControl?: OwnerLocalControlManager
   onListening?(address: GuiServerAddress): void
   onUnavailable?(error: Error): void
   logger?: { info(message: string): void; warn(message: string): void }
@@ -379,6 +382,7 @@ export function startGuiServer(handlers: GuiServerHandlers, options: GuiServerOp
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${host}`)
     const path = url.pathname.replace(/\/+$/, '') || '/'
+    if (await handleOwnerRequest(req, res, url, options.ownerControl)) return
     const address = server.address()
     const localOrigin = typeof address === 'object' && address !== null
       ? `http://${host}:${address.port}`
@@ -685,5 +689,6 @@ export function startGuiServer(handlers: GuiServerHandlers, options: GuiServerOp
     server.close()
     server.closeAllConnections?.()
     options.control?.dispose()
+    options.ownerControl?.dispose()
   }
 }

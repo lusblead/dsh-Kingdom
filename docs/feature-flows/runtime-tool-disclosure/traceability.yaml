@@ -1,0 +1,287 @@
+version: 1
+feature_id: "runtime.tool-disclosure"
+title: "Authorized native tool progressive disclosure"
+status: "implemented"
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: false
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  E1:
+    kind: "entry"
+    description: "Configure the plugin and reach the existing successful enforcement boundary"
+    trigger: "Plugin apply and governed execution materialization"
+    code:
+      - path: "src/index.ts"
+        symbol: "apply"
+      - path: "src/capability/dsh-enforcement.ts"
+        symbol: "materializeDshEnforcement"
+  D1:
+    kind: "decision"
+    description: "Enable the opt-in native disclosure pilot"
+    condition: "toolDisclosure.mode is pilot; absent configuration defaults to off"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "install"
+      - path: "src/index.ts"
+        symbol: "toolDisclosure"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "off mode has no listener, and live pilots reject wrong agents, invalid input, cancellation and overlapping installation"
+  A1:
+    kind: "action"
+    description: "Register discovery in pilot mode and install only after existing enforcement succeeds"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "install"
+      - path: "src/index.ts"
+        symbol: "DISCOVERY_TOOL_NAME"
+      - path: "src/capability/dsh-enforcement.ts"
+        symbol: "materializeDshEnforcement"
+  E2:
+    kind: "entry"
+    description: "Observe an Agent-local prompt assembly"
+    trigger: "system-prompt/assemble"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "system-prompt/assemble"
+  A2:
+    kind: "action"
+    description: "Await the remaining host assembly middleware before filtering"
+    external_call:
+      system: "DSH system-prompt assembly middleware"
+      timeout: "Inherited from host; no disclosure-specific timeout"
+      failure_behavior: "Propagate downstream assembly errors without retrying or synthesizing requests"
+      failure_nodes: ["X3"]
+      retry:
+        max_attempts: 1
+        backoff: "None"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "await next()"
+  D2:
+    kind: "decision"
+    description: "Modify only the active exact Agent object"
+    condition: "state.active is true and context.agent equals the installation Agent"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "context.agent !== agent"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "off mode has no listener, and live pilots reject wrong agents, invalid input, cancellation and overlapping installation"
+  A3:
+    kind: "action"
+    description: "Validate the native tools array, intersect with A and refresh the catalog"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "TOOL_DISCLOSURE_ASSEMBLY_INVALID"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "catalog"
+  D3:
+    kind: "decision"
+    description: "Decide whether discovery requires authorized-surface fallback"
+    condition: "A fallback reason exists after catalog refresh or discovery grant/schema checks"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "DISCOVERY_NOT_GRANTED"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "DISCOVERY_SCHEMA_UNAVAILABLE"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "missing discovery grant falls back to exactly the granted native surface and never self-grants discovery"
+  A4:
+    kind: "action"
+    description: "Return assembled A surface with off metadata and fallback reason"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "const selected = reason ? allowed"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "observations.set"
+  A5:
+    kind: "action"
+    description: "Preserve native schemas and order for configured and discovered tools inside A"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "const visible = new Set"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "observations.set"
+  E3:
+    kind: "entry"
+    description: "Request currently granted tools using a short query"
+    trigger: "kingdom_find_tools native tool execution"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "find"
+      - path: "src/index.ts"
+        symbol: "disclosure.find"
+  D4:
+    kind: "decision"
+    description: "Reject incorrect identity, cancellation, missing permission and malformed input"
+    condition: "Exact active Agent has discovery in A, signal is not aborted and input contains only a valid nonempty query of at most 160 characters"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "TOOL_DISCOVERY_NOT_AUTHORIZED"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "TOOL_DISCOVERY_QUERY_INVALID"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "off mode has no listener, and live pilots reject wrong agents, invalid input, cancellation and overlapping installation"
+  A6:
+    kind: "action"
+    description: "Refresh permitted definitions and rank lexical matches without external search"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "catalog"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "const scored = catalog.filter"
+  D5:
+    kind: "decision"
+    description: "Bound candidate response and cumulative discovered set"
+    condition: "Selected response fits maxResultBytes and newly discovered tools do not exceed a cumulative 32"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "DISCOVERY_RESULT_TOO_LARGE"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "DISCOVERY_SET_LIMIT"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "discovery response size is bounded and oversized authorized schemas restore A instead of becoming unreachable"
+  A7:
+    kind: "action"
+    description: "Set an in-memory fallback reason and announce next-step recovery without resending"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "AUTHORIZED_NATIVE_SURFACE_NEXT_STEP"
+  A8:
+    kind: "action"
+    description: "Add bounded matches to this execution discovery set and return native schemas"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "state.discovered.add"
+  E4:
+    kind: "entry"
+    description: "End execution enforcement or unload plugin"
+    trigger: "Existing enforcement cleanup or plugin effect disposal"
+    code:
+      - path: "src/capability/dsh-enforcement.ts"
+        symbol: "cleanupDshEnforcement"
+      - path: "src/index.ts"
+        symbol: "disclosure.dispose"
+  A9:
+    kind: "action"
+    description: "Remove listener before declaring teardown complete and dropping memory associations"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "state.dispose"
+      - path: "src/capability/dsh-enforcement.ts"
+        symbol: "cleanupDshEnforcement"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+  G1:
+    kind: "safeguard"
+    description: "Disclosure remains a subset of the current execution grant"
+    safeguard_type: "authorization"
+    guarantee: "Search, resident configuration and fallback never add permission; native calls retain the existing restrict and monotonic deny guard"
+    protects: ["A3", "A6"]
+    failure_behavior: "Exclude ungranted schemas and reject discovery without its own grant"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "state.allowed.has"
+      - path: "src/capability/dsh-enforcement.ts"
+        symbol: "capability not granted"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "missing discovery grant falls back to exactly the granted native surface and never self-grants discovery"
+  G2:
+    kind: "safeguard"
+    description: "Keep discovery local to the correct Agent and later assembly"
+    safeguard_type: "concurrency"
+    guarantee: "A query never changes an already returned assembly or another Agent assembly"
+    protects: ["D2", "A8"]
+    failure_behavior: "Return foreign assemblies unchanged and reject inactive or wrong-Agent discovery"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "context.agent !== agent"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "const transformed"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "pilot waits for later assembly, filters own-scope ungranted schemas, and discovers native tools only inside A"
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "off mode has no listener, and live pilots reject wrong agents, invalid input, cancellation and overlapping installation"
+  G3:
+    kind: "safeguard"
+    description: "Invalidate discovery on schema or definition identity changes"
+    safeguard_type: "validation"
+    guarantee: "Replacing a same-name definition cannot silently retain a prior discovered entry"
+    protects: ["A3", "A6"]
+    failure_behavior: "Clear discovery and fallback on changes; reject or fallback on unreadable catalogs according to entry"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "state.catalogStamp !== stamp"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "catalog and same-name shadow changes invalidate discovery without leaking the replacement outside A"
+  G4:
+    kind: "safeguard"
+    description: "Oversized authorized schemas remain reachable through bounded fallback"
+    safeguard_type: "compensation"
+    guarantee: "Oversized discovery returns a short recovery indication and next assembly restores only A"
+    protects: ["A7", "A4"]
+    failure_behavior: "Record an in-memory reason and restore authorized visibility without granting or resending"
+    code:
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "DISCOVERY_RESULT_TOO_LARGE"
+      - path: "src/capability/tool-disclosure.ts"
+        symbol: "const selected = reason ? allowed"
+    tests:
+      - path: "tests/v14-tool-disclosure.test.ts"
+        symbol: "discovery response size is bounded and oversized authorized schemas restore A instead of becoming unreachable"
+  X1:
+    kind: "outcome"
+    description: "Default mode disabled"
+    result: "No discovery tool registration or listener from this feature"
+  X2:
+    kind: "outcome"
+    description: "Scoped pilot installed"
+    result: "Await assembly or discovery without executing a model request"
+  X3:
+    kind: "outcome"
+    description: "Installation, assembly, query or teardown failed"
+    result: "Error propagates through caller; existing enforcement reports cleanup failure without claiming successful teardown"
+  X4:
+    kind: "outcome"
+    description: "Foreign or inactive assembly unaffected"
+    result: "Return host result unchanged"
+  X5:
+    kind: "outcome"
+    description: "Native-surface fallback"
+    result: "Current assembly contains only its A schemas with off mode and reason code"
+  X6:
+    kind: "outcome"
+    description: "Reduced native surface"
+    result: "Preserve native schema objects and order within A and expose byte metadata"
+  X7:
+    kind: "outcome"
+    description: "Discovery requests next-step recovery"
+    result: "Short fallback response; no target execution or current-request resend"
+  X8:
+    kind: "outcome"
+    description: "Bounded discovery completed"
+    result: "Native matches including valid empty result; discovered names available next step"
+  X9:
+    kind: "outcome"
+    description: "Successful teardown"
+    result: "Listener and in-memory association removed; future discovery rejected"

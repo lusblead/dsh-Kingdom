@@ -24,6 +24,7 @@ import type { DshEnforcementContext } from './dsh-enforcement.js'
 import { effectiveTools, resolveEffectiveCapability, type GrantMap, type Resolution } from './resolver.js'
 
 export interface CapabilityGateInput {
+  stillAuthorized?: () => boolean
   store: KingdomStore
   adapter: RuntimeAdapter
   kingdomId: string
@@ -201,6 +202,9 @@ export async function runCapabilityGate(input: CapabilityGateInput): Promise<Cap
   }
 
   const emptyEnforceable = { tools: [], sandboxMode: null, approvalPolicy: null, presetId: null } as const
+  if (input.stillAuthorized && !input.stillAuthorized()) {
+    return deny(resolveEffectiveCapability({ requirement, grant: input.grant, ceiling, enforceable: emptyEnforceable }), 'NOT_ATTEMPTED', 'AUTHORITY_CHANGED')
+  }
 
   // TX-0D：ceiling 缺失 → 拒（B-7），且不触碰 Runtime。
   if (ceiling === null) {
@@ -224,6 +228,7 @@ export async function runCapabilityGate(input: CapabilityGateInput): Promise<Cap
     return deny(resolution, 'UNAVAILABLE', `ENFORCEABLE_SET_FAILED:${detail}`)
   }
   const resolution = resolveEffectiveCapability({ requirement, grant: input.grant, ceiling, enforceable })
+  if (input.stillAuthorized && !input.stillAuthorized()) return deny(resolution, 'NOT_ATTEMPTED', 'AUTHORITY_CHANGED')
 
   const writeRequired = requirement['filesystem.write'] === true
   const writeEffective = resolution.effective['filesystem.write'] === true
@@ -301,6 +306,7 @@ export async function runCapabilityGate(input: CapabilityGateInput): Promise<Cap
   }
 
   // TX-2S/2F：materialize
+  if (input.stillAuthorized && !input.stillAuthorized()) return deny(materializationResolution, 'NOT_ATTEMPTED', 'AUTHORITY_CHANGED')
   let materialized: Awaited<ReturnType<RuntimeAdapter['materialize']>>
   try {
     materialized = await adapter.materialize(request, input.context)
@@ -317,6 +323,10 @@ export async function runCapabilityGate(input: CapabilityGateInput): Promise<Cap
       `MATERIALIZE_FAILED:${(materialized.reasons ?? []).join(';') || 'no-reason'}`,
       cleanupOk,
     )
+  }
+  if (input.stillAuthorized && !input.stillAuthorized()) {
+    const cleanupOk = await cleanupConfirmed(adapter, request, input.context)
+    return deny(materializationResolution, 'FAILED', 'AUTHORITY_CHANGED', cleanupOk)
   }
 
   let enforcementEvidenceJson: string

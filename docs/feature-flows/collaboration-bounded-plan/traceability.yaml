@@ -1,0 +1,585 @@
+version: 1
+feature_id: "collaboration.bounded-plan"
+title: "Explicit bounded personal collaboration plan"
+status: "implemented"
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+evidence_status: "Source reconciled; 460 tests, official isolated DSH journey and 16 browser scenarios passed; human acceptance separate"
+nodes:
+  E1:
+    kind: "entry"
+    description: "Current Chancellor explicitly proposes bounded collaboration"
+    trigger: "Explicit bounded collaboration proposal"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "proposeCollaborationPlan"
+  D1:
+    kind: "decision"
+    description: "Reject invalid parent, recursive graph, excess workers and invalid scoped members"
+    condition: "Parent is root CREATED; plan is one-level acyclic with valid current members and no more than three distinct Workers including integrator"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "proposeCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "proposal rejects recursive parents, duplicate members, extra fields and cyclic or foreign dependencies without writes"
+  T1:
+    kind: "transition"
+    description: "Record immutable versioned proposal content"
+    entity: "CollaborationPlan"
+    from: "Absent"
+    to: "PROPOSED"
+    trigger: "Valid current Chancellor proposal"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "proposeCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "proposal rejects recursive parents, duplicate members, extra fields and cyclic or foreign dependencies without writes"
+  A1:
+    kind: "action"
+    description: "Project complete current plan, responsible integrator and soft-budget scope"
+    code:
+      - path: "src/gui/snapshot.ts"
+        symbol: "buildWorkbenchCollaboration"
+      - path: "src/gui/workbench-ui.ts"
+        symbol: "renderCollaboration"
+    tests:
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "collaboration projection is read-only and distinguishes one plan adoption from dependency readiness and parent integration"
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "collaboration plan display is bounded without turning omitted plans into a complete list"
+  E2:
+    kind: "entry"
+    description: "Human prepares and commits one exact plan in the independent Owner window"
+    trigger: "Explicit plan.adopt via Owner prepare and commit"
+    code:
+      - path: "src/gui/owner-ui.ts"
+        symbol: "payload"
+      - path: "src/gui/owner-ui.ts"
+        symbol: "plan.adopt"
+      - path: "src/gui/owner-control.ts"
+        symbol: "prepare"
+    tests:
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "Owner plan adoption sends only the exact catalog plan version and digest and rejects stale or altered references"
+  D2:
+    kind: "decision"
+    description: "Revalidate exact adoption references and scoped canonical authority"
+    condition: "Canonical Owner operation covers all affected resources and plan ID, version, digest, parent and members still match"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "adoption rechecks current parent role and territory facts and atomically rolls back children on event failure"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "adoptCollaborationPlan"
+      - path: "src/core/owner-window.ts"
+        symbol: "plan.adopt"
+      - path: "src/core/owner-window.ts"
+        symbol: "context"
+  T2:
+    kind: "transition"
+    description: "Commit plan adoption and child Tasks atomically with original Owner receipt"
+    entity: "CollaborationPlan"
+    from: "PROPOSED"
+    to: "ADOPTED"
+    trigger: "Explicit exact Owner commit"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "adoptCollaborationPlan"
+      - path: "src/core/owner-window.ts"
+        symbol: "commit"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "adoption rechecks current parent role and territory facts and atomically rolls back children on event failure"
+      - path: "tests/owner-window.test.ts"
+        symbol: "Concurrent identical commits, lost response and post-revoke receipt read perform exactly one mutation"
+  E3:
+    kind: "entry"
+    description: "Current authentic Supervisor requests a bounded batch"
+    trigger: "kingdom_advance_collaboration invokes advanceCollaboration with the current authentic Supervisor context"
+    code:
+      - path: "src/index.ts"
+        symbol: "kingdom_advance_collaboration"
+      - path: "src/worker/collaboration.ts"
+        symbol: "advanceCollaboration"
+  D3:
+    kind: "decision"
+    description: "Adopted plan and current actor, assignment and worker scope allow advancement"
+    condition: "Plan remains adopted and non-stale; current Supervisor owns affected territory and exact Worker/Assignment is legal"
+    code:
+      - path: "src/worker/collaboration.ts"
+        symbol: "check"
+    tests:
+      - path: "tests/collaboration-advance.test.ts"
+        symbol: "advance requires exact adopted plan and current session-bound Supervisor before any assignment"
+      - path: "tests/collaboration-advance.test.ts"
+        symbol: "advance preflights the entire batch scope and rejects duplicate or invalid Grant inputs with zero writes"
+  D4:
+    kind: "decision"
+    description: "Accept dependencies only with current exact accepted result references"
+    condition: "Every required item has the latest expected attempt, result and valid Supervisor ACCEPT with usable artifact references"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "handoff rejects altered references and stale attempts while bounding untrusted summaries and artifact lists"
+  A2:
+    kind: "action"
+    description: "Prepare directed bounded handoffs while retaining ordinary assignment authority"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+      - path: "src/core/collaboration.ts"
+        symbol: "validateCollaborationHandoffs"
+      - path: "src/worker/collaboration.ts"
+        symbol: "advanceCollaboration"
+  A3:
+    kind: "action"
+    description: "Before Session effects check the plan and reserve budget plus canonical workspace resources in one IMMEDIATE transaction"
+    code:
+      - path: "src/worker/governed-executor.ts"
+        symbol: "runGovernedTask"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "reserveWorkspaceAdmission"
+      - path: "src/core/budget.ts"
+        symbol: "reserveBudgetAdmission"
+  D5:
+    kind: "decision"
+    description: "Admission permits new work without duplicate or unsettled dispatch"
+    condition: "Kingdom and plan budget permit new admission and canonical shared-read or exclusive-write resources are available"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readPlanBudgetView"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "reserveWorkspaceAdmission"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "budget carries pending coordination and missing coverage conservatively without allocating an exact team bill"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace and budget reservations roll back together when budget admission fails"
+  C1:
+    kind: "compensation"
+    description: "Cancel only provably undispatched reservations and retain unsettled occupancy"
+    restores_or_resolves: "Failed pre-dispatch admission cannot leak a safely cancellable reservation or erase unresolved execution occupancy"
+    failure_behavior: "Retain reservations when safe cancellation cannot be proven and surface recovery or blocking reason"
+    code:
+      - path: "src/core/budget.ts"
+        symbol: "cancelBudgetAdmissionIfSafe"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "cancelWorkspaceAdmissionIfSafe"
+    tests:
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace safe cancellation permits retry while duplicate live attempts remain blocked"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace keeps RECOVERING ownership and only a terminal dispatch plus released Lease frees the directory"
+  A4:
+    kind: "action"
+    description: "Reuse governed start, Gate and TX-3 after fresh dependency checks"
+    external_call:
+      system: "DSH governed Worker runtime"
+      timeout: "Existing governed dispatch and recovery policy; no new collaboration timeout"
+      failure_behavior: "No automatic resend; preserve uncertain dispatch and occupancy for normal reconciliation"
+      failure_nodes: ["C1"]
+      retry:
+        max_attempts: 1
+        backoff: "None within bounded advance"
+    code:
+      - path: "src/core/governed.ts"
+        symbol: "prepareGovernedDispatch"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "bindWorkspaceAdmissionInTransaction"
+  T3:
+    kind: "transition"
+    description: "Original assignment, execution and Claim lifecycle reaches review"
+    entity: "Task"
+    from: "RUNNING"
+    to: "REVIEW"
+    trigger: "Legally assigned Worker returns a Claim; no direct state bypass"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "startTask"
+    tests:
+      - path: "tests/gui-v1-vertical-flow.test.ts"
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+  E4:
+    kind: "entry"
+    description: "Current Supervisor reviews an exact child Claim"
+    trigger: "Ordinary Supervisor review"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "reviewTask"
+  T6:
+    kind: "transition"
+    description: "Current Supervisor assigns the exact item or parent integrator through ordinary Task governance"
+    entity: "Task"
+    from: "CREATED"
+    to: "ASSIGNED"
+    trigger: "Current authorized Supervisor assignment"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "assignTask"
+    tests:
+      - path: "tests/gui-v1-vertical-flow.test.ts"
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+  T7:
+    kind: "transition"
+    description: "Assigned child or parent starts only through the original governed execution chain"
+    entity: "Task"
+    from: "ASSIGNED"
+    to: "RUNNING"
+    trigger: "Current scope, assignment, dependency, budget, resource and Gate checks permit execution"
+    code:
+      - path: "src/worker/governed-executor.ts"
+        symbol: "runGovernedTask"
+    tests:
+      - path: "tests/gui-v1-vertical-flow.test.ts"
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+  D6:
+    kind: "decision"
+    description: "Supervisor accepts only the current child Claim through normal validation"
+    condition: "Current authorized Supervisor explicitly chooses ACCEPT and original Claim/task/evidence guards pass"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "reviewTask"
+    tests:
+      - path: "tests/gui-v1-vertical-flow.test.ts"
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+  T4:
+    kind: "transition"
+    description: "Ordinary accepted child becomes DONE"
+    entity: "Task"
+    from: "REVIEW"
+    to: "DONE"
+    trigger: "Current Supervisor ACCEPT for this exact child"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "reviewTask"
+    tests:
+      - path: "tests/gui-v1-vertical-flow.test.ts"
+        symbol: "v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary"
+  D7:
+    kind: "decision"
+    description: "All item results permit parent integration but cannot complete parent"
+    condition: "All plan item Tasks are currently accepted with non-stale handoff references"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "readiness requires latest exact attempt result and Supervisor ACCEPT while child completion never completes parent integration"
+  E5:
+    kind: "entry"
+    description: "Supervisor explicitly advances assigned integrator on parent Task"
+    trigger: "New explicit parent integration advancement"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+  D8:
+    kind: "decision"
+    description: "Parent integration passes current dependency, worker, budget and resource checks"
+    condition: "Parent integration has exact designated Worker and all current dependencies plus normal authority and admission checks pass"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "readiness requires latest exact attempt result and Supervisor ACCEPT while child completion never completes parent integration"
+  A5:
+    kind: "action"
+    description: "Designated Worker performs actual parent integration and returns a separate Claim"
+    code:
+      - path: "src/worker/governed-executor.ts"
+        symbol: "runGovernedTask"
+  D9:
+    kind: "decision"
+    description: "Only current Supervisor ACCEPT can finish parent integration"
+    condition: "Actual parent Claim is REVIEW and authorized Supervisor passes all normal ACCEPT checks"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "reviewTask"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "readiness requires latest exact attempt result and Supervisor ACCEPT while child completion never completes parent integration"
+  T5:
+    kind: "transition"
+    description: "Parent becomes DONE only through its own ordinary review"
+    entity: "ParentTask"
+    from: "REVIEW"
+    to: "DONE"
+    trigger: "Supervisor ACCEPT of actual parent integration Claim"
+    code:
+      - path: "src/core/task-service.ts"
+        symbol: "reviewTask"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "readiness requires latest exact attempt result and Supervisor ACCEPT while child completion never completes parent integration"
+  G1:
+    kind: "safeguard"
+    description: "Bound participants, roles and write capability"
+    safeguard_type: "authorization"
+    guarantee: "One level and at most three Workers; EXPERT items are read-only and never gain Supervisor or Owner authority"
+    protects: ["D1"]
+    failure_behavior: "Reject the proposal before child creation"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "proposeCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "proposal rejects recursive parents, duplicate members, extra fields and cyclic or foreign dependencies without writes"
+  G2:
+    kind: "safeguard"
+    description: "Human adoption remains exact and independent of Agent authority"
+    safeguard_type: "authorization"
+    guarantee: "Agents or stale role cookies cannot create Owner adoption or expand resource scope"
+    protects: ["D2"]
+    failure_behavior: "Reject without adoption or child Task writes"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "adoptCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "adoption rechecks current parent role and territory facts and atomically rolls back children on event failure"
+  G3:
+    kind: "safeguard"
+    description: "Adoption and children commit once with an exact receipt"
+    safeguard_type: "atomicity"
+    guarantee: "Exact replay does not duplicate children and commit failure leaves no partial adoption"
+    protects: ["T2"]
+    failure_behavior: "Rollback; uncertain response queries original receipt without a new operation"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "adoptCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "adoption rechecks current parent role and territory facts and atomically rolls back children on event failure"
+  G4:
+    kind: "safeguard"
+    description: "Advance uses fresh authentic Supervisor identity on every call"
+    safeguard_type: "authorization"
+    protects: ["D3", "D8", "A4"]
+    failure_behavior: "Reject current advancement without spawning or dispatching"
+    code:
+      - path: "src/worker/collaboration.ts"
+        symbol: "check"
+      - path: "src/worker/collaboration.ts"
+        symbol: "advanceCollaboration"
+      - path: "src/index.ts"
+        symbol: "trustedToolPrincipal"
+      - path: "src/index.ts"
+        symbol: "stillAuthorized"
+      - path: "src/worker/governed-executor.ts"
+        symbol: "stillAuthorized"
+      - path: "src/capability/service.ts"
+        symbol: "stillAuthorized"
+      - path: "src/dispatch/service.ts"
+        symbol: "stillAuthorized"
+    tests:
+      - path: "tests/collaboration-advance.test.ts"
+        symbol: "advance refreshes identity before every start and blocks a duplicate pending invocation"
+      - path: "tests/m3s2-v4-governed-runner.test.ts"
+        symbol: "governed start authority changes during preflight or materialization never reach dispatch"
+    guarantee: "Every start and asynchronous governance boundary rechecks current authentic Supervisor authority before the next side effect"
+  G5:
+    kind: "safeguard"
+    description: "Only current exact dependency evidence enters bounded handoffs"
+    safeguard_type: "validation"
+    guarantee: "Wrong or stale attempt/result/ACCEPT blocks dependent work; handoff text remains Claim"
+    protects: ["D4", "A2"]
+    failure_behavior: "Return explicit dependency Task IDs and reason without starting work"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "handoff rejects altered references and stale attempts while bounding untrusted summaries and artifact lists"
+  G6:
+    kind: "safeguard"
+    description: "Canonical resource admission preserves shared reads and exclusive writes"
+    safeguard_type: "concurrency"
+    guarantee: "Overlapping directories, aliases, active Legacy executions and preexisting non-team leases participate in resource conflict checks before Session effects"
+    protects: ["A3", "C1"]
+    failure_behavior: "Wait or block; unresolved/recovering occupancy is never released on assumption"
+    code:
+      - path: "src/core/workspace-admission.ts"
+        symbol: "canonicalWorkspaceKey"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "reserveWorkspaceAdmission"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "cancelWorkspaceAdmissionIfSafe"
+      - path: "src/core/workspace-admission.ts"
+        symbol: "assertWorkspaceAvailable"
+      - path: "src/core/task-service.ts"
+        symbol: "startTask"
+    tests:
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace Legacy and governed admission exclude each other before any execution effects"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace Legacy start rolls back Task and Execution if fact creation fails"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace ancestor descendant and junction aliases conflict while distinct directories remain independent"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace admits concurrent read-only access but queues a writer"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace excludes unresolved legacy Leases and budget-only preparation in an overlapping directory"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace keeps RECOVERING ownership and only a terminal dispatch plus released Lease frees the directory"
+  G7:
+    kind: "safeguard"
+    description: "Team budget uses an explicit conservative coordination risk upper bound"
+    safeguard_type: "validation"
+    guarantee: "Both budgets constrain new work and exact Worker cost stays distinct from coordination upper bound and uncovered usage"
+    protects: ["A3"]
+    failure_behavior: "Block or warn according to explicit policy while preserving in-flight execution facts"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readPlanBudgetView"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "budget carries pending coordination and missing coverage conservatively without allocating an exact team bill"
+  G8:
+    kind: "safeguard"
+    description: "Accepted children do not auto-complete their parent"
+    safeguard_type: "validation"
+    guarantee: "Parent needs actual designated-Worker integration, a new Claim and ordinary Supervisor ACCEPT"
+    protects: ["D9"]
+    failure_behavior: "Keep parent pending integration or normal review/repair"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "readCollaborationReadiness"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "readiness requires latest exact attempt result and Supervisor ACCEPT while child completion never completes parent integration"
+  X1:
+    kind: "outcome"
+    description: "Proposal rejected"
+    result: "No new plan or child Tasks"
+  X2:
+    kind: "outcome"
+    description: "Adoption rejected or stale"
+    result: "Preserve exact input and original operation reference"
+  X3:
+    kind: "outcome"
+    description: "Adopted awaiting Supervisor"
+    result: "Child Tasks exist; no implicit assignment, grant, dispatch or acceptance"
+  X4:
+    kind: "outcome"
+    description: "Advancement rejected"
+    result: "Return current authority or state reason without new work"
+  X5:
+    kind: "outcome"
+    description: "Dependency blocked"
+    result: "Show prerequisite Task IDs and precise missing, failed or stale evidence"
+  X6:
+    kind: "outcome"
+    description: "Admission blocked or unresolved"
+    result: "Show budget/resource/recovery cause, retain unsettled occupancy and never auto-retry"
+  X7:
+    kind: "outcome"
+    description: "Exact settled failed rework or explicit failure; adopted members cannot change worker"
+    result: "Retry only explicitly reviewed settled failures, including the exact TX3 preparation, while blocking new unfailed sibling work"
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/collaboration.ts
+        symbol: hasSettledFailedRework
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+    tests:
+      - path: tests/collaboration.test.ts
+        symbol: adopted plan member HANDOFF is rejected atomically and leaves the plan usable
+      - path: tests/collaboration.test.ts
+        symbol: failed REWORK crosses real TX3 with only its exact new preparation Lease excluded
+      - path: tests/collaboration.test.ts
+        symbol: two explicitly reworked settled failures can recover serially without mutual deadlock
+  X8:
+    kind: "outcome"
+    description: "Child progress retained"
+    result: "Next explicit advancement rechecks all current facts"
+  X9:
+    kind: "outcome"
+    description: "Parent integration ready"
+    result: "Child acceptance does not finish parent"
+  X10:
+    kind: "outcome"
+    description: "Parent accepted by Supervisor"
+    result: "Human acceptance is not inferred"
+
+
+  G9:
+    kind: "safeguard"
+    description: "Bounded GUI projects actual evidence without inventing queue state or exact costs"
+    safeguard_type: "observability"
+    guarantee: "Reads create no authority, dispatch or acceptance; omitted plans retain total adoption counts and private runtime/workspace values remain omitted"
+    protects: ["A1"]
+    failure_behavior: "Show truncation, explicit coverage gaps and coordination upper bound; absence of occupancy does not prove availability"
+    code:
+      - path: "src/gui/snapshot.ts"
+        symbol: "buildWorkbenchCollaboration"
+      - path: "src/gui/workbench-ui.ts"
+        symbol: "renderCollaboration"
+    tests:
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "collaboration resource projection exposes actual held task reservations without paths or invented queue status"
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "collaboration display separates accepted results, estimated coordination exposure and resource uncertainty without executable controls"
+      - path: "tests/v15-collaboration-gui.test.ts"
+        symbol: "collaboration plan display is bounded without turning omitted plans into a complete list"
+  T8:
+    kind: "transition"
+    description: "Exact previous version is revised before adoption"
+    entity: "CollaborationPlan"
+    from: "PROPOSED"
+    to: "PROPOSED"
+    trigger: "Exact previous version is revised before adoption"
+    code:
+      - path: "src/core/collaboration.ts"
+        symbol: "proposeCollaborationPlan"
+    tests:
+      - path: "tests/collaboration.test.ts"
+        symbol: "proposal revisions require the exact baseline and adoption rejects replaced versions"
+  T9:
+    kind: "transition"
+    description: "Atomic admission before Session effects"
+    entity: "WorkspaceAdmission"
+    from: "Absent"
+    to: "RESERVED"
+    trigger: "Atomic admission before Session effects"
+    code:
+      - path: "src/core/workspace-admission.ts"
+        symbol: "reserveWorkspaceAdmission"
+    tests:
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace and budget reservations roll back together when budget admission fails"
+  T10:
+    kind: "transition"
+    description: "TX-3 binds exact Dispatch and Lease"
+    entity: "WorkspaceAdmission"
+    from: "RESERVED"
+    to: "BOUND"
+    trigger: "TX-3 binds exact Dispatch and Lease"
+    code:
+      - path: "src/core/workspace-admission.ts"
+        symbol: "bindWorkspaceAdmissionInTransaction"
+    tests:
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace TX3 rejects missing forged and cross-store handles and retains the exact original handle after rollback"
+  T11:
+    kind: "transition"
+    description: "Safe proof of undispatched unused reservation"
+    entity: "WorkspaceAdmission"
+    from: "RESERVED"
+    to: "CANCELLED"
+    trigger: "Safe proof of undispatched unused reservation"
+    code:
+      - path: "src/core/workspace-admission.ts"
+        symbol: "cancelWorkspaceAdmissionIfSafe"
+    tests:
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace safe cancellation permits retry while duplicate live attempts remain blocked"

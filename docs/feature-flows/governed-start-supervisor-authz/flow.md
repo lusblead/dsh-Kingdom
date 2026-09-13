@@ -7,11 +7,29 @@ status: implemented
 # Governed-start Supervisor caller authorization and persistent dispatch
 
 - Feature ID: `governed-start.supervisor-authz`
-- Status: `implemented` (R02 reconciled against the final candidate source and
-  isolated verification evidence)
+- Status: `implemented` (1.1 runtime compatibility, rework context, and usage baseline)
 - Impact: `updated`
 
 ## Scope and classification
+
+The 1.5 composition is defined in [bounded collaboration](../collaboration-bounded-plan/flow.md).
+Every public start retains the original caller identity and rechecks its current binding, task,
+workspace, profile and ceiling after policy loading and Session preparation, after capability
+inspection, before materialization, after materialization and after opening the Runtime fence.
+Revocation stops further work; any materialized request follows existing cleanup evidence rules.
+Runner revisions ignore another task's events only when a known event kind and its exact Core
+target prove independent Worker and Session relationships. Missing targets, shared workers,
+authority changes and future event types still invalidate; opaque version replay remains rejected.
+
+The 1.1 update reads the current DSH `snapshotEvents()` API at every observation;
+only its absence permits the older `events` projection. An advertised broken API
+or malformed event array fails closed before enforcement/dispatch or taints the
+active fence. Rework dispatches include the exact preceding Claim and matching
+Supervisor reason when available, with explicit missing-context markers otherwise.
+New dispatch payloads carry the actual SHA-256 of their UTF-8 prompt; historical
+length labels are not treated as valid digests. A separate adapter observation
+folds provider-reported usage within the exact dispatch turn, including retries;
+missing/incomplete usage remains unavailable/partial and never changes governance.
 
 `kingdom_start_task_governed` is the canonical headless execution route after
 plan and assign. It derives the caller only from the DSH execution context,
@@ -234,7 +252,7 @@ flowchart TD
 
     G1[["G1 Only the current initiator plus exact Agent/Session registry identity, running status, and non-aborted signal can establish the caller target"]] -.-> A1
     G1 -.-> D1
-    G2[["G2 Exact caller-owned Supervisor binding and Territory scope precede Grant and executor"]] -.-> A2
+    G2[["G2 Original caller-owned Supervisor and exact scope are rechecked across asynchronous preparation before each new effect"]] -.-> A2
     G2 -.-> D2
     G2 -.-> A4
     G3[["G3 Capability Gate is the sole capability authority"]] -.-> D4
@@ -253,6 +271,11 @@ flowchart TD
     G8 -.-> T8
     G8 -.-> D7
     G8 -.-> T4
+    G21[["G21 Current event API fails closed; exact message IDs bind observations, and Claims never borrow an older dispatch response"]] -.-> A11
+    G21 -.-> D7
+    G21 -.-> A10
+    G22[["G22 Rework prompt reads the exact preceding Claim/review; new payload SHA-256 hashes UTF-8 content"]] -.-> T1
+    G22 -.-> A6
     G9[["G9 Any latest nonterminal persistent Execution excludes a new attempt before all Runtime and ledger effects"]] -.-> D6
     G9 -.-> X7
     G10[["G10 Recovery is atomic and idempotent; RECOVERING forbids redispatch, release, and Task mutation"]] -.-> C1
@@ -292,7 +315,7 @@ flowchart TD
     G18 -.-> T17
     G12 -.-> D9
     G12 -.-> T1
-    G19[["G19 The product RunnerContext factory derives one exact Task/Execution/Lease/Dispatch relation; every operation consumes the same opaque handle and internal-metadata monotonic version, rereads the relation, and rejects stale, copied, cross-target, duplicate, recovery, or released use"]] -.-> A16
+    G19[["G19 Exact RunnerContext and opaque version; neutral observations and proven independent-task events are excluded; related or unclassified changes invalidate"]] -.-> A16
     G19 -.-> D15
     G19 -.-> D19
     G19 -.-> A10
@@ -380,7 +403,7 @@ sequenceDiagram
                 Executor->>Store: INTENDED -> DISPATCHED -> RECEIVED; Receipt is not Terminal
                 Executor->>Runtime: bind Runtime dispatch ref and inspect exact Adapter/lease/Session expectation plus fence generation
                 loop bounded correlation and terminal polling
-                    Executor->>Runtime: re-read correlated session events
+                    Executor->>Runtime: re-read snapshotEvents; legacy events only when modern API absent
                 end
                 alt turn observed, including turn and terminal first appearing together
                      Executor->>Store: RunnerContextPort.bindRuntimeReceipt then correlateRuntimeExecution; RECEIVED -> CORRELATED and Execution STARTING -> RUNNING
@@ -479,6 +502,39 @@ stateDiagram-v2
 
 ## Safeguards and failure semantics
 
+The 1.1 adapter usage observation is independent of terminal authority:
+
+```mermaid
+flowchart TD
+    E3(["E3 Observe usage for one accepted dispatch reference"]) --> A19["A19 Read current snapshot and isolate the exact admitted message turn"]
+    A19 --> D21{"D21 Complete boundaries and optional public usage reader available?"}
+    D21 -->|Yes| A20["A20 Fold every attempt including retries; validate disjoint token counts"]
+    D21 -->|No| X17(["X17 Unavailable or partial coverage; no invented total"])
+    A20 --> D22{"D22 Every attempt has consistent complete usage?"}
+    D22 -->|Yes| X18(["X18 Provider-reported complete usage; caller associates canonical task and dispatch"])
+    D22 -->|No| X17
+    G23[["G23 Usage cannot authorize completion; unreported cache counts stay absent and reasoning is an output subset"]] -.-> A20
+    G23 -.-> X17
+```
+
+```mermaid
+sequenceDiagram
+    participant Consumer as Dispatch observation consumer
+    participant Adapter as DSH usage adapter
+    participant Session as Live Session
+    participant Meter as Optional public token-meter/client
+    Consumer->>Adapter: observeDshDispatchUsage(session, dispatchRef)
+    Adapter->>Session: snapshotEvents()
+    Session-->>Adapter: current events or unreadable
+    alt exact dispatch turn and public reader available
+        Adapter->>Meter: deriveTurnTokenUsage(exact turn)
+        Meter-->>Adapter: complete attempt totals or undefined
+        Adapter-->>Consumer: complete totals or partial/missing coverage
+    else unreadable, foreign, incomplete or optional dependency absent
+        Adapter-->>Consumer: unavailable; no fabricated zero or governance transition
+    end
+```
+
 - `G1` and `G2` ensure caller identity, active Supervisor binding, and exact
   Territory scope are resolved before Grant parsing and executor entry.
 - `G3` keeps authorization separate from capability enforceability.
@@ -562,7 +618,16 @@ stateDiagram-v2
   escalated. The Supervisor `ACCEPT` gate consumes the same exact relation and
   blocks only the incident-correlated Claim; `REWORK` and `FAIL` remain open.
 
+The Runner governance revision excludes the three neutral cost observations,
+the four future budget admission/policy event types, and Owner window lifecycle
+events. Only the budget.policy Owner operation receipt is excluded; malformed,
+missing-action and other Owner receipts still invalidate. GUI revision includes
+every event. The exact Task/Execution/Lease/Dispatch row tuple remains checked,
+so a budget receipt never masks a related execution or authority mutation.
+
 The machine-readable implementation and test mapping is maintained in
 `traceability.yaml`. This contract describes the current source seam exactly;
 in particular, `SESSION_STOPPED` is an event label rather than evidence of a
 Runtime Session stop.
+
+发布审查补充：Legacy 启动也在执行事实创建事务内核对工作区；未登记资源的活动执行保守视为写独占。协作失败返工在 TX-3 重验准确 Claim/REWORK，仅将本次准确下一尝试的 DISPATCH_READY Lease 排除于历史未结算锁检查，仍核对同一 Session/Decision 及原接纳凭据。

@@ -93,6 +93,7 @@ export type KingdomErrorCode =
   | 'CLAIM_INTEGRITY_BLOCKED'
   | 'EXECUTION_NOT_FOUND'
   | 'ILLEGAL_EXECUTION_STATE'
+  | 'RECOVERY_REQUIRED'
 
 /**
  * v0.5.2（M1-B/P0-B）：GUI 写命令守卫。
@@ -111,6 +112,7 @@ export function guiWriteGuard(authMode: string): { allowed: true } | { allowed: 
 export type AllowedAction =
   | 'assign'
   | 'start'
+  | 'reconcile'
   | 'review:accept'
   | 'review:rework'
   | 'review:fail'
@@ -291,12 +293,142 @@ export interface TaskProjectionData {
   actionAvailability: ActionAvailability[]
 }
 
+/** v1.2：工作台只是现有事实的有界投影，不创建待办/验收状态库。 */
+export interface WorkbenchQueue<T> {
+  totalCount: number
+  items: T[]
+  truncated: boolean
+}
+
+export interface WorkbenchActionItem {
+  id: string
+  kind: string
+  taskId: string | null
+  territoryId: string | null
+  title: string
+  summary: string
+  responsibility: 'OWNER' | 'CHANCELLOR' | 'SUPERVISOR' | 'UNDETERMINED'
+  responsibleBindingId: string | null
+  /** 复用原有服务端许可；责任分类本身不授予调用权限。 */
+  actionAvailability: ActionAvailability[]
+  sourceRefs: SourceRef[]
+}
+
+export interface WorkbenchDeliveryItem {
+  taskId: string
+  title: string
+  status: string
+  claim: ClaimView | null
+  supervisorAccepted: boolean
+  supervisorDecision: SupervisorDecisionView | null
+  /** 当前没有人类验收事实；DONE 也不能填为人类已验收。 */
+  humanAcceptance: 'NOT_RECORDED'
+  updatedAt: string
+  sourceRefs: SourceRef[]
+}
+
+export interface WorkbenchRoleItem {
+  bindingId: string
+  roleType: string
+  roleName: string
+  sessionBound: boolean
+  taskCount: number
+  taskIds: string[]
+  taskIdsTruncated: boolean
+  activeExecutionCount: number
+  reviewTaskCount: number
+  recoveringTaskCount: number
+  sourceRefs: SourceRef[]
+}
+
+export interface WorkbenchUsageSummary {
+  scope: 'WORKER_DISPATCH_ONLY'
+  totalDispatches: number
+  completeDispatches: number
+  partialDispatches: number
+  unavailableDispatches: number
+  /** 实际执行中没有对应 Dispatch 的次数，可能包括 legacy 执行。 */
+  executionsWithoutDispatch: number
+  coverage: 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE'
+  /** 仅累加完整、对应当前 Dispatch 的供应商报告；无完整报告返回 null。 */
+  reportedTotals: { uncachedInputTokens: number; outputTokens: number; totalTokens: number } | null
+  cost: null
+  costStatus: 'NOT_RECORDED'
+  sourceRefs: SourceRef[]
+}
+
+export interface WorkbenchCostRuntime {
+  toolDisclosureMode: 'off' | 'pilot'
+  observerAvailable: boolean
+}
+
+/** Public assembly measurements, without runtime/session references or prompt text. */
+export interface WorkbenchPromptCostView {
+  bindingId: string | null
+  roleType: string
+  toolsBefore: number | null
+  toolsAfter: number | null
+  toolsBytesBefore: number | null
+  toolsBytesAfter: number | null
+  sections: { name: string; bytes: number | null }[]
+  contexts: { name: string; bytes: number | null }[]
+  partsTruncated: boolean
+  historyBytes: null
+  tokenEstimate: null
+  mode: 'off' | 'pilot' | 'UNKNOWN'
+  reasonCode: string | null
+}
+
+export interface WorkbenchCostSummary {
+  additionalRoles: import('../core/cost.js').AdditionalRoleCostSummary | null
+  budget: import('../core/budget.js').BudgetView | null
+  prompts: WorkbenchQueue<WorkbenchPromptCostView>
+  runtime: { toolDisclosureMode: 'off' | 'pilot' | 'UNKNOWN'; observerAvailable: boolean | null }
+}
+
+export interface WorkbenchPlanReadiness {
+  ready: boolean
+  reasonCode: string | null
+  blockingTaskIds: string[]
+  acceptedResults: { taskId: string; attemptNo: number; resultId: string; resultDigest: string; acceptEventId: string }[]
+}
+export interface WorkbenchPlanView {
+  planId: string; parentTaskId: string; title: string; version: number; digest: string
+  state: 'PROPOSED' | 'ADOPTED' | 'STALE'; mode: 'EXPERT' | 'TEAM'; reason: string
+  integratorBindingId: string; integratorName: string; parentStatus: string
+  budgetTokens: number; reserveTokens: number; adoptedAt: string | null
+  integration: WorkbenchPlanReadiness | null
+  budget: import('../core/collaboration.js').PlanBudgetView | null
+  items: { key: string; taskId: string; title: string; description: string; acceptanceCriteria: string
+    territoryId: string; territoryName: string; workerBindingId: string; workerName: string
+    access: 'READ_ONLY' | 'WRITE'; dependsOn: string[]; expectedArtifact: string; status: string
+    readiness: WorkbenchPlanReadiness | null }[]
+}
+export interface WorkbenchCollaborationView {
+  plans: WorkbenchQueue<WorkbenchPlanView>
+  pendingAdoptionCount: number
+  /** Held resources only; absence is not proof that a future start can acquire a workspace. */
+  resources: WorkbenchQueue<{ taskId: string; attemptNo: number; access: 'READ_ONLY' | 'WRITE'; state: string; recovery: boolean }>
+}
+
+export interface PersonalWorkbenchData {
+  ownerActions: WorkbenchQueue<WorkbenchActionItem>
+  internalActions: WorkbenchQueue<WorkbenchActionItem>
+  exceptions: WorkbenchQueue<WorkbenchActionItem>
+  deliveries: WorkbenchQueue<WorkbenchDeliveryItem>
+  roles: WorkbenchQueue<WorkbenchRoleItem>
+  usage: WorkbenchUsageSummary
+  cost: WorkbenchCostSummary
+  collaboration: WorkbenchCollaborationView
+}
+
 export interface ReadonlySnapshotProjection {
   overview: ProjectionEnvelope<OverviewProjectionData>
   organization: ProjectionEnvelope<OrganizationProjectionData>
   executions: ProjectionEnvelope<ExecutionProjectionData>
   timeline: ProjectionEnvelope<TimelineItem[]>
   attention: ProjectionEnvelope<AttentionItem[]>
+  workbench: ProjectionEnvelope<PersonalWorkbenchData>
 }
 
 /**
@@ -438,6 +570,7 @@ export interface CapabilityDecisionView {
 
 /** Dispatch Record 投影（RECOVERING 必须如实显示，禁止显示成 Done）。 */
 export interface DispatchView {
+  usage?: import('../core/usage.js').DispatchUsageView | null
   dispatchId: string
   leaseId: string
   executionId: string
@@ -592,10 +725,16 @@ export interface TaskDetailView {
   executions: ExecutionView[]
   /** Supervisor 的历次裁定（从 events 还原，不存在 task_reviews 表）。 */
   reviews: SupervisorDecisionView[]
+  reviewsTruncated: boolean
   relatedEvents: EventView[]
+  /** 先按本任务取事件再应用窗口，不受其他任务的事件数量影响。 */
+  relatedEventsTruncated: boolean
+  humanAcceptance: 'NOT_RECORDED'
   allowedActions: AllowedAction[]
   /** v0.8：本任务的 Runtime Governance 投影（Lease/Decision/Dispatch）。 */
   governance: RuntimeGovernanceView
+  /** Exact single-task attribution only; shared and unattributed units remain outside task totals. */
+  additionalRoleCost: import('../core/cost.js').AdditionalRoleCostSummary | null
   /** v0.9 S1：Task Detail 的只读 Projection Envelope。 */
   projection: ProjectionEnvelope<TaskProjectionData>
 }

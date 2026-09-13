@@ -17,6 +17,9 @@
  * - 命令回传本次产生的事件（已带单调 seq），GUI 可直接接到事件流尾部。
  */
 import { randomUUID } from 'node:crypto'
+import { ownerInputHash } from './owner-control.js'
+import { readCollaborationReadiness, readCollaborationPlan } from './collaboration.js'
+import { assertWorkspaceAvailable, canonicalWorkspaceKey, WorkspaceAdmissionError } from './workspace-admission.js'
 import { asTaskStatus, REVIEW_DECISION_TARGET, type ReviewDecision } from './task.js'
 import { asExecutionState, isLiveExecutionState } from './execution.js'
 import type { EventRow, ExecutionRow, KingdomStore, RoleBindingRow, TaskRow } from './db.js'
@@ -126,7 +129,7 @@ function succeed(
  * `session-bound`：额外要求调用方 session 与 binding.session_id 一致；
  * binding 未绑定 session 时**拒绝**（无法验证就不放行，不猜）。
  */
-function requireRole(
+export function requireRole(
   store: KingdomStore,
   ctx: CommandContext,
   roleType: string,
@@ -184,7 +187,7 @@ function loadTask(
  * resolves the Territory pointer instead of attributing writes to an arbitrary
  * first Supervisor row.
  */
-function resolveTaskSupervisor(
+export function resolveTaskSupervisor(
   store: KingdomStore,
   ctx: CommandContext,
   task: TaskRow,
@@ -517,89 +520,105 @@ export async function startTask(
   ctx: CommandContext,
   input: StartTaskInput,
 ): Promise<CommandResultView> {
-  const loaded = loadTask(store, ctx.kingdomId, input.taskId)
-  if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
-  const role = resolveTaskSupervisor(store, ctx, loaded.task)
-  if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
-  const status = asTaskStatus(loaded.task.status)
-  if (status !== 'ASSIGNED' && status !== 'RUNNING') {
-    return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
-      `错误：任务当前状态为 ${status}，只有 ASSIGNED（首轮）或 RUNNING（Supervisor 已判 REWORK）可以启动 Worker。`)
-  }
+  const prepared = store.withImmediateTransaction(() => {
+    const loaded = loadTask(store, ctx.kingdomId, input.taskId)
+    if (!loaded.ok) return fail(store, ctx.kingdomId, loaded.code, loaded.message)
+    const role = resolveTaskSupervisor(store, ctx, loaded.task)
+    if (!role.ok) return fail(store, ctx.kingdomId, role.code, role.message)
+    const collaboration = readCollaborationReadiness(store, ctx.kingdomId, loaded.task.task_id)
+    if (collaboration && readCollaborationPlan(store, ctx.kingdomId, collaboration.planId)?.state === 'ADOPTED') {
+      return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE', '协作计划成员必须使用受治理执行入口，不能切换 Legacy 绕过依赖、预算或资源检查。')
+    }
+    const status = asTaskStatus(loaded.task.status)
+    if (status !== 'ASSIGNED' && status !== 'RUNNING') {
+      return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE',
+        `错误：任务当前状态为 ${status}，只有 ASSIGNED（首轮）或 RUNNING（Supervisor 已判 REWORK）可以启动 Worker。`)
+    }
 
-  const existing = store.latestExecution(loaded.task.task_id)
-  if (existing && isLiveExecutionState(asExecutionState(existing.state))) {
-    return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
-      `错误：该任务已有一个未结束的 Execution（${existing.execution_id}，${existing.state}），不能重复启动。`)
-  }
+    const existing = store.latestExecution(loaded.task.task_id)
+    if (existing && isLiveExecutionState(asExecutionState(existing.state))) {
+      return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE',
+        `错误：该任务已有一个未结束的 Execution（${existing.execution_id}，${existing.state}），不能重复启动。`)
+    }
 
-  const collector = new EventCollector(store, ctx.kingdomId)
-  let task = status === 'ASSIGNED' ? store.transitionTask(loaded.task, 'RUNNING') : loaded.task
+    const collector = new EventCollector(store, ctx.kingdomId)
+    try {
+      const path = store.getTerritoryById(loaded.task.territory_id)?.workspace_path
+      assertWorkspaceAvailable(store, ctx.kingdomId, path ? canonicalWorkspaceKey(path) : null, 'WRITE')
+    } catch (error) {
+      if (!(error instanceof WorkspaceAdmissionError)) throw error
+      return fail(store, ctx.kingdomId, 'ILLEGAL_EXECUTION_STATE', error.message)
+    }
+    let task = status === 'ASSIGNED' ? store.transitionTask(loaded.task, 'RUNNING') : loaded.task
 
-  const attemptNo = store.nextAttemptNo(task.task_id)
-  const previous = store.latestWorkerResult(task.task_id)
-  const reworkReason = attemptNo > 1 ? lastReworkReason(store, ctx.kingdomId, task.task_id) : undefined
+    const attemptNo = store.nextAttemptNo(task.task_id)
+    const previous = store.latestWorkerResult(task.task_id)
+    const reworkReason = attemptNo > 1 ? lastReworkReason(store, ctx.kingdomId, task.task_id) : undefined
 
-  // ── 建立本轮 Execution（运行事实；v0.6.0 携带执行证据列）──
-  const info = executor.info
-  const evidence = {
-    executor_kind: executor.kind,
-    provider: info?.provider ?? null,
-    provider_source: info?.providerSource ?? null,
-    requested_model: info?.requestedModel ?? null,
-    resolved_model: null, // 结算时一次性补全
-    model_source: info?.modelSource ?? null,
-    execution_profile_json: info
-      ? buildExecutionProfileSnapshot(info, null)
-      : null,
-  }
-  let execution = store.insertExecution({
-    execution_id: randomUUID(),
-    task_id: task.task_id,
-    attempt_no: attemptNo,
-    worker_binding_id: task.assigned_binding_id,
-    session_id: null,
-    state: 'STARTING',
-    detail: null,
-    started_at: now(),
-    heartbeat_at: now(),
-    ended_at: null,
-    pause_requested_at: null,
-    // v0.8（M3-S2 v6）：此函数只由显式选择的 LEGACY_COMPAT one-shot 入口调用。
-    // canonical headless 入口是 kingdom_start_task_governed，由 governed executor 自己建账。
-    execution_contract: 'LEGACY_COMPAT',
-    lease_id: null,
-    capability_decision_id: null,
-    ...evidence,
+    // ── 建立本轮 Execution（运行事实；v0.6.0 携带执行证据列）──
+    const info = executor.info
+    const evidence = {
+      executor_kind: executor.kind,
+      provider: info?.provider ?? null,
+      provider_source: info?.providerSource ?? null,
+      requested_model: info?.requestedModel ?? null,
+      resolved_model: null, // 结算时一次性补全
+      model_source: info?.modelSource ?? null,
+      execution_profile_json: info
+        ? buildExecutionProfileSnapshot(info, null)
+        : null,
+    }
+    let execution = store.insertExecution({
+      execution_id: randomUUID(),
+      task_id: task.task_id,
+      attempt_no: attemptNo,
+      worker_binding_id: task.assigned_binding_id,
+      session_id: null,
+      state: 'STARTING',
+      detail: null,
+      started_at: now(),
+      heartbeat_at: now(),
+      ended_at: null,
+      pause_requested_at: null,
+      // v0.8（M3-S2 v6）：此函数只由显式选择的 LEGACY_COMPAT one-shot 入口调用。
+      // canonical headless 入口是 kingdom_start_task_governed，由 governed executor 自己建账。
+      execution_contract: 'LEGACY_COMPAT',
+      lease_id: null,
+      capability_decision_id: null,
+      ...evidence,
+    })
+    collector.emit('SESSION_STARTED',
+      { role: 'SUPERVISOR', id: role.binding.binding_id },
+      { type: 'execution', id: execution.execution_id },
+      {
+        task_id: task.task_id, attempt_no: attemptNo, worker_binding_id: task.assigned_binding_id,
+        executor: executor.kind,
+        provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
+        requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
+      })
+
+    execution = store.transitionExecution(execution, 'RUNNING')
+    collector.emit('WORKER_EXECUTION_STARTED',
+      { role: 'SUPERVISOR', id: role.binding.binding_id },
+      { type: 'task', id: task.task_id },
+      {
+        attempt_no: attemptNo, execution_id: execution.execution_id, worker_binding_id: task.assigned_binding_id,
+        executor: executor.kind,
+        provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
+        requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
+      })
+
+    const context: WorkerContext = {
+      task,
+      acceptanceCriteria: task.acceptance_criteria,
+      attemptNo,
+      ...previous ? { prevResultSummary: claimSummary(previous.result_json) } : {},
+      ...reworkReason ? { reworkReason } : {},
+    }
+    return { task, execution, attemptNo, context, collector, role, info }
   })
-  collector.emit('SESSION_STARTED',
-    { role: 'SUPERVISOR', id: role.binding.binding_id },
-    { type: 'execution', id: execution.execution_id },
-    {
-      task_id: task.task_id, attempt_no: attemptNo, worker_binding_id: task.assigned_binding_id,
-      executor: executor.kind,
-      provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
-      requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
-    })
-
-  execution = store.transitionExecution(execution, 'RUNNING')
-  collector.emit('WORKER_EXECUTION_STARTED',
-    { role: 'SUPERVISOR', id: role.binding.binding_id },
-    { type: 'task', id: task.task_id },
-    {
-      attempt_no: attemptNo, execution_id: execution.execution_id, worker_binding_id: task.assigned_binding_id,
-      executor: executor.kind,
-      provider: info?.provider ?? null, provider_source: info?.providerSource ?? null,
-      requested_model: info?.requestedModel ?? null, model_source: info?.modelSource ?? null,
-    })
-
-  const context: WorkerContext = {
-    task,
-    acceptanceCriteria: task.acceptance_criteria,
-    attemptNo,
-    ...previous ? { prevResultSummary: claimSummary(previous.result_json) } : {},
-    ...reworkReason ? { reworkReason } : {},
-  }
+  if ('ok' in prepared) return prepared
+  const { task, execution, attemptNo, context, collector, role, info } = prepared
 
   const outcome = await executor.execute(task, context)
 
@@ -859,6 +878,10 @@ export function reviewTask(
 
     try {
       return store.withImmediateTransaction(() => {
+        const planMember = readCollaborationReadiness(store, ctx.kingdomId, input.taskId)
+        if (planMember && readCollaborationPlan(store, ctx.kingdomId, planMember.planId)?.state === 'ADOPTED') {
+          return fail(store, ctx.kingdomId, 'ILLEGAL_TASK_STATE', '已采纳协作计划固定执行者，不能转交换员；请对当前执行者返工，或裁定失败。')
+        }
         const now = new Date().toISOString()
         store.closeActiveAssignment(input.taskId, 'handoff')
         const task = store.transitionTask(loaded.task, 'RUNNING', { assigned_binding_id: target.binding_id })
@@ -946,6 +969,8 @@ export function reviewTask(
           reason,
           reviewer_binding_id: role.binding.binding_id,
           reviewed_attempt_no: currentClaim?.attempt_no ?? 0,
+          reviewed_result_id: currentClaim?.result_id ?? null,
+          reviewed_result_digest: currentClaim ? ownerInputHash(currentClaim) : null,
           claimed_outcome: currentClaim?.outcome ?? null,
         })
 
@@ -973,6 +998,9 @@ export function reviewTask(
       reason,
       reviewer_binding_id: role.binding.binding_id,
       reviewed_attempt_no: attemptNo,
+      reviewed_result_id: claim?.result_id ?? null,
+      reviewed_result_digest: claim ? ownerInputHash(claim) : null,
+      reviewed_execution_id: store.latestExecution(input.taskId)?.execution_id ?? null,
       claimed_outcome: claim?.outcome ?? null,
   })
 

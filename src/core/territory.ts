@@ -33,7 +33,7 @@ export interface DeleteTerritoryInput {
 }
 
 export function createTerritory(store: KingdomStore, input: CreateTerritoryInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.create', input })
   if (!admin.ok) return admin.message
   const name = input.name.trim()
   if (!name) return '错误：领地名称不能为空。'
@@ -58,7 +58,7 @@ export function createTerritory(store: KingdomStore, input: CreateTerritoryInput
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_CREATED',
-    actor_role: admin.owner ? 'OWNER' : null,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
@@ -66,7 +66,7 @@ export function createTerritory(store: KingdomStore, input: CreateTerritoryInput
       operation: 'territory.create',
       name,
       workspace_path: territory.workspace_path,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: now,
   })
@@ -81,6 +81,29 @@ export function listTerritories(store: KingdomStore, kingdomId: string): string 
     .join('\n')
 }
 
+/** Metadata-only update. Workspace paths and identity are immutable through this operation. */
+export function updateTerritory(
+  store: KingdomStore,
+  input: { kingdomId: string; territoryId: string; name?: string; summary?: string | null },
+  auth?: AdminAuth,
+): string {
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.update', input })
+  if (!admin.ok) return admin.message
+  const row = store.getTerritoryById(input.territoryId)
+  if (!row || row.kingdom_id !== input.kingdomId || row.status === 'DELETED') return '错误：领地不存在或已删除。'
+  const name = input.name === undefined ? row.name : input.name.trim()
+  if (!name) return '错误：领地名称不能为空。'
+  const existing = store.getTerritoryByName(input.kingdomId, name)
+  if (existing && existing.territory_id !== row.territory_id) return '错误：领地名称已存在。'
+  const summary = input.summary === undefined ? row.summary : input.summary?.trim() || null
+  store.updateTerritoryMetadata(row.territory_id, name, summary)
+  store.appendEvent({ event_id: randomUUID(), kingdom_id: input.kingdomId, event_type: 'TERRITORY_UPDATED',
+    actor_role: 'OWNER', actor_id: admin.ownerPrincipalId, target_type: 'territory', target_id: row.territory_id,
+    payload_json: JSON.stringify({ operation: 'territory.update', name, summary, ...admin.eventSource }),
+    created_at: new Date().toISOString() })
+  return `领地「${name}」的名称与说明已更新。`
+}
+
 /**
  * v0.7.0（M2）：设置 Territory 主理 Supervisor（Topology Administration Plane）。
  * - 仅 direct Owner Control capability 可执行（requireAdmin → requireOwnerControl）；
@@ -92,7 +115,7 @@ export function setTerritorySupervisor(
   input: { kingdomId: string; territoryId: string; supervisorBindingId: string | null },
   auth?: AdminAuth,
 ): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.supervisor', input })
   if (!admin.ok) return admin.message
   const territory = store.getTerritoryById(input.territoryId)
   if (!territory || territory.kingdom_id !== input.kingdomId) {
@@ -115,7 +138,7 @@ export function setTerritorySupervisor(
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_SUPERVISOR_UPDATED',
-    actor_role: admin.owner ? 'OWNER' : null,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
@@ -123,7 +146,7 @@ export function setTerritorySupervisor(
       name: territory.name,
       supervisor_binding_id: input.supervisorBindingId,
       unassigned: input.supervisorBindingId === null,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),
   })
@@ -142,7 +165,7 @@ export function setTerritorySupervisor(
  *   活跃 Execution ABORTED、终态不篡改；`TERRITORY_DELETED` 留痕（payload 含任务清单）。
  */
 export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.delete', input })
   if (!admin.ok) return admin.message
   let territory = input.territoryId ? store.getTerritoryById(input.territoryId) : null
   if (territory && territory.kingdom_id !== input.kingdomId) territory = null // 越界 id 视同不存在
@@ -181,7 +204,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
       event_id: randomUUID(),
       kingdom_id: input.kingdomId,
       event_type: 'TASK_FAILED',
-      actor_role: admin.owner ? 'OWNER' : null,
+      actor_role: 'OWNER',
       actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
       target_type: 'task',
       target_id: task.task_id,
@@ -190,7 +213,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
         cascade_from_territory: territory.territory_id,
         territory_name: territory.name,
         original_status: original,
-        ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+        ...admin.eventSource,
       }),
       created_at: now,
     })
@@ -202,7 +225,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_DELETED',
-    actor_role: admin.owner ? 'OWNER' : null,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'territory',
     target_id: territory.territory_id,
@@ -215,7 +238,7 @@ export function deleteTerritory(store: KingdomStore, input: DeleteTerritoryInput
       task_count: tasks.length,
       aborted_executions: abortedExecutions,
       tasks: cascade,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: now,
   })

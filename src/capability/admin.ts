@@ -50,7 +50,7 @@ export function setCapabilityCeiling(
   input: SetCapabilityCeilingInput,
   auth?: AdminAuth,
 ): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'ceiling', input })
   if (!admin.ok) return `CONFIG_DENIED: ${admin.message}`
 
   let normalized: string | null = null
@@ -67,15 +67,15 @@ export function setCapabilityCeiling(
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'CAPABILITY_CEILING_UPDATED',
-    actor_role: admin.owner ? 'OWNER' : null,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'kingdom',
     target_id: input.kingdomId,
     payload_json: JSON.stringify({
       ceiling: value,
       cleared: value === null,
-      source: 'direct-owner-slash',
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      source: admin.eventSource.source_channel === 'LOCAL_OWNER_GUI' ? 'local-owner-gui' : 'direct-owner-slash',
+      ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),
   })

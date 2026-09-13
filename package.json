@@ -1,7 +1,7 @@
 {
   "name": "dsh-kingdom",
-  "version": "1.0.0",
-  "description": "独立 dsh 插件：会话内初始化/接入本地王国，Territory/Binding CRUD + Task 治理闭环（Worker Claim ≠ Fact）+ Execution 生命周期 + v0.8 Persistent Governed Worker（长期 Session / Territory Affinity / Capability Gate / Execution Lease / Dispatch Evidence / Reconciliation）+ 本地 GUI 通道",
+  "version": "2.0.0",
+  "description": "个人 Agent 工作台：任务与交付、独立人类管理窗口、有界协作、权限与资源约束、用量和软预算；Worker Claim 经过主管审查才成为事实。",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -18,9 +18,15 @@
     "cordis.patch.yml",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
-    "ASSETS_NOTICE.md"
+    "ASSETS_NOTICE.md",
+    "docs/V2.0-USER-GUIDE.md",
+    "docs/V2.0-RELEASE-NOTES.md"
   ],
   "license": "AGPL-3.0-or-later",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -46,19 +52,24 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-commands": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.1.1-rc.1 <0.2.0-0",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.1.1-rc.1 <0.2.0-0",
-    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.1.1-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.1 <0.1.5",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.1.5",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.1 <0.1.5",
+    "@deepseek-ai/dsh-token-meter": ">=0.1.5-rc.2 <0.1.5",
     "@deepseek-ai/cordis": ">=4.0.0-rc <5",
     "@deepseek-ai/schemastery": "^3.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-token-meter": { "optional": true }
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "typescript": "^5.9.0"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.json && node src/gui/prepare-character-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node --test tests/*.test.ts",
-    "prepack": "node src/gui/prepare-character-assets.mjs"
+    "test": "npm run build && node --test tests/*.test.ts",
+    "prepack": "npm run build"
   }
 }

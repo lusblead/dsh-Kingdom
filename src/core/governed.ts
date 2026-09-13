@@ -29,6 +29,9 @@ import {
   StaleStateError,
 } from './db.js'
 import { asExecutionState, transitionExecution, isTerminalExecutionState } from './execution.js'
+import { bindBudgetAdmissionInTransaction, type BudgetAdmissionHandle } from './budget.js'
+import { bindWorkspaceAdmissionInTransaction, type WorkspaceAdmissionHandle } from './workspace-admission.js'
+import { readCollaborationReadiness, readCollaborationPlan, validateCollaborationHandoffs, type CollaborationReadiness } from './collaboration.js'
 
 /** 完整 Runtime Session identity（M3-S1 冻结：(runtime_type, runtime_instance_ref, session_ref)）。 */
 export interface SessionIdentity {
@@ -67,6 +70,7 @@ export type RunnerContextPhase =
   | 'BOUND'
   | 'TERMINAL'
   | 'RECOVERING'
+  | 'RECOVERY_TERMINAL'
   | 'RELEASED'
   | 'INVALID'
 
@@ -248,11 +252,21 @@ function runnerContextRows(store: KingdomStore, dispatchId: string): RunnerConte
 }
 
 function runnerContextRelationKey(store: KingdomStore, rows: RunnerContextRows): string {
-  // `revision` is the existing monotonically increasing event sequence.  The
-  // row transition tuple remains part of the key because a few Core updates
+  // The governance revision excludes neutral cost, future budget admission and
+  // independent Owner-window lifecycle events. Actual role/config mutations
+  // remain invalidating, including all non-budget Owner operation receipts. The GUI
+  // still sees those samples via its full revision. Unknown event types remain
+  // invalidating; authority or execution changes are never treated as samples.
+  // The row transition tuple remains part of the key because a few Core updates
   // intentionally do not emit an event.  No synthetic DB version is minted.
   return JSON.stringify([
-    store.revision(rows.dispatch.kingdom_id),
+    store.runnerContextRevision(rows.dispatch.kingdom_id, { taskId: rows.task.task_id,
+      workerBindingId: rows.lease.worker_binding_id, sessionRef: rows.lease.session_ref }),
+    store.getTerritoryById(rows.task.territory_id),
+    store.getBindingById(rows.lease.worker_binding_id),
+    store.getActiveAssignmentForTask(rows.task.task_id),
+    store.getCapabilityDecision(rows.lease.capability_decision_id!),
+    rows.task.title, rows.task.description, rows.task.acceptance_criteria, rows.task.capability_requirement_json,
     rows.task.updated_at,
     rows.task.status,
     rows.task.assigned_binding_id,
@@ -350,6 +364,7 @@ export class RunnerContextPort {
     version: RunnerContextVersion,
     operation: string,
     allowed: readonly RunnerContextPhase[],
+    allowUnrelatedRevision = false,
   ): { state: RunnerContextPortState; rows: RunnerContextRows } {
     const state = this.state()
     if (!(handle instanceof RunnerContextHandle) || handle !== state.handle
@@ -376,7 +391,9 @@ export class RunnerContextPort {
     }
     const rows = runnerContextRows(state.store, state.identity.dispatchId)
     const actualKey = runnerContextRelationKey(state.store, rows)
-    if (actualKey !== versionState.relationKey) {
+    const sameRelatedRows = allowUnrelatedRevision
+      && JSON.stringify(JSON.parse(actualKey).slice(1)) === JSON.stringify(JSON.parse(versionState.relationKey).slice(1))
+    if (actualKey !== versionState.relationKey && !sameRelatedRows) {
       state.poisoned = `stale canonical relation at ${operation}`
       state.phase = 'INVALID'
       throw new RunnerContextError('STALE_VERSION', `${operation} 前 exact relation/version 已变化`)
@@ -456,8 +473,9 @@ export class RunnerContextPort {
     before: (rows: RunnerContextRows) => void,
     action: (context: RunnerContextActionContext) => T,
     after: (rows: RunnerContextRows) => RunnerContextPhase,
+    allowUnrelatedRevision = false,
   ): RunnerContextMutationResult<T> {
-    const { state, rows } = this.consume(handle, version, operation, allowed)
+    const { state, rows } = this.consume(handle, version, operation, allowed, allowUnrelatedRevision)
     before(rows)
     const context: RunnerContextActionContext = Object.freeze({
       handle: state.handle,
@@ -583,6 +601,54 @@ export class RunnerContextPort {
         return 'TERMINAL'
       },
     )
+  }
+
+  /** Observation timeout retains this original capability; the factory still rejects RECOVERING. */
+  deferRecovery(handle: RunnerContextHandle, version: RunnerContextVersion): RunnerContextMutationResult<ReturnType<typeof markGovernedDispatchRecovering>> {
+    return this.mutate(handle, version, 'deferRecovery', ['BOUND'], rows => {
+      if (!['RECEIVED', 'CORRELATED'].includes(rows.dispatch.state) || rows.lease.state !== 'EXECUTING') {
+        throw new RunnerContextError('INVALID_ORDER', 'deferRecovery requires an owned receipted dispatch')
+      }
+    }, context => markGovernedDispatchRecovering(this.state().store, context.view.dispatchId, 'TERMINAL_POLL_EXHAUSTED'), rows => {
+      if (rows.dispatch.state !== 'RECOVERING' || rows.execution.state !== 'RECOVERING' || rows.lease.state !== 'RECOVERING') {
+        throw new RunnerContextError('RELATION_MISMATCH', 'deferRecovery did not recover the exact three rows')
+      }
+      return 'RECOVERING'
+    })
+  }
+
+  /** Only the original deferred port can consume late evidence; no recovered factory or new Runner. */
+  checkRecovery(handle: RunnerContextHandle, version: RunnerContextVersion): RunnerContextView {
+    const { state, rows } = this.consume(handle, version, 'checkRecovery', ['RECOVERING'], true)
+    return runnerContextView(state, rows)
+  }
+
+  recoverTerminal(handle: RunnerContextHandle, version: RunnerContextVersion, input: TerminalEvidenceInput & { runtimeExecutionRef: string }): RunnerContextMutationResult<{ dispatch: DispatchRecordRow; execution: ExecutionRow; lease: LeaseRow }> {
+    return this.mutate(handle, version, 'recoverTerminal', ['RECOVERING'], rows => {
+      if (rows.dispatch.state !== 'RECOVERING' || rows.execution.state !== 'RECOVERING' || rows.lease.state !== 'RECOVERING' || !rows.dispatch.runtime_dispatch_ref) {
+        throw new RunnerContextError('INVALID_ORDER', 'recoverTerminal requires the original receipted recovery relation')
+      }
+    }, context => recordRecoveredTerminalEvidence(this.state().store, context.view.dispatchId, input), rows => {
+      if (rows.dispatch.state !== 'TERMINAL' || !isTerminalExecutionState(asExecutionState(rows.execution.state)) || rows.lease.state !== 'RECOVERING') {
+        throw new RunnerContextError('RELATION_MISMATCH', 'recovered terminal relation was not committed')
+      }
+      return 'RECOVERY_TERMINAL'
+    }, true)
+  }
+
+  settleRecovery<T>(handle: RunnerContextHandle, version: RunnerContextVersion, action: (context: RunnerContextActionContext) => T): RunnerContextMutationResult<T> {
+    return this.mutate(handle, version, 'settleRecovery', ['RECOVERY_TERMINAL'], rows => {
+      if (rows.dispatch.state !== 'TERMINAL' || !isTerminalExecutionState(asExecutionState(rows.execution.state)) || rows.lease.state !== 'RECOVERING') {
+        throw new RunnerContextError('INVALID_ORDER', 'settleRecovery requires recovered terminal evidence')
+      }
+    }, action, rows => {
+      if (rows.dispatch.state !== 'TERMINAL' || !isTerminalExecutionState(asExecutionState(rows.execution.state))) {
+        throw new RunnerContextError('RELATION_MISMATCH', 'settleRecovery changed terminal history')
+      }
+      if (rows.lease.state === 'RELEASED') return 'RELEASED'
+      if (rows.lease.state === 'RECOVERING') return 'RECOVERING'
+      throw new RunnerContextError('RELATION_MISMATCH', 'settleRecovery did not settle the original lease')
+    })
   }
 
   settle<T>(
@@ -1140,6 +1206,9 @@ export interface PrepareGovernedDispatchInput {
   dispatchId?: string
   preparedAt?: string
   detail?: string | null
+  budgetAdmission?: BudgetAdmissionHandle
+  workspaceAdmission?: WorkspaceAdmissionHandle
+  collaboration?: CollaborationReadiness | null
 }
 
 export interface PreparedGovernedDispatchRows {
@@ -1161,6 +1230,18 @@ export function prepareGovernedDispatch(
   requireV4(store)
   return store.withImmediateTransaction(() => {
     const preparedAt = input.preparedAt ?? now()
+    let currentPlan = readCollaborationReadiness(store, input.kingdomId, input.taskId, input.leaseId)
+    if (currentPlan && readCollaborationPlan(store, input.kingdomId, currentPlan.planId)?.state !== 'ADOPTED') currentPlan = null
+    if (currentPlan || input.collaboration) {
+      const expected = input.collaboration
+      if (!currentPlan?.ready || !expected || currentPlan.planId !== expected.planId
+        || currentPlan.version !== expected.version || currentPlan.digest !== expected.digest
+        || currentPlan.workerBindingId !== input.workerBindingId || currentPlan.access !== expected.access
+        || !validateCollaborationHandoffs(store, input.kingdomId, input.taskId, expected.handoffs, input.leaseId)
+        || !input.workspaceAdmission || !input.budgetAdmission) {
+        throw new GovernedApiError('PLAN_DISPATCH_STALE: 计划、依赖交接或接纳凭据已变化。')
+      }
+    }
     const startingLease = store.getLease(input.leaseId)
     if (!startingLease) throw new GovernedApiError(`prepareGovernedDispatch: lease ${input.leaseId} 不存在`)
     if (startingLease.state !== 'DISPATCH_READY') {
@@ -1221,6 +1302,14 @@ export function prepareGovernedDispatch(
       createdAt: preparedAt,
     })
     const executingLease = advanceLeaseStateInTransaction(store, startingLease, 'EXECUTING', {}, preparedAt)
+    bindBudgetAdmissionInTransaction(store, input.budgetAdmission, {
+      kingdomId: input.kingdomId, taskId: input.taskId, attemptNo: input.attemptNo,
+      workerBindingId: input.workerBindingId, dispatchId: intent.dispatch_id, leaseId: input.leaseId,
+    })
+    bindWorkspaceAdmissionInTransaction(store, input.workspaceAdmission, {
+      kingdomId: input.kingdomId, taskId: input.taskId, attemptNo: input.attemptNo,
+      workerBindingId: input.workerBindingId, dispatchId: intent.dispatch_id, leaseId: input.leaseId,
+    })
     return {
       execution: preparedExecution.execution,
       decision: preparedExecution.decision,
@@ -1351,6 +1440,30 @@ export function recordTerminalEvidence(store: KingdomStore, dispatchId: string, 
       payload: { from: 'CORRELATED', to: 'TERMINAL', executionTerminalState: input.executionTerminalState ?? undefined },
     })
     return { dispatch: updatedDispatch, execution: updatedExecution, lease: updatedLease }
+  })
+}
+
+/** Private recovery write: reachable only through the retained original RunnerContext capability. */
+function recordRecoveredTerminalEvidence(store: KingdomStore, dispatchId: string, input: TerminalEvidenceInput & { runtimeExecutionRef: string }): { dispatch: DispatchRecordRow; execution: ExecutionRow; lease: LeaseRow } {
+  requireV4(store)
+  runnerContextToken(input.runtimeExecutionRef, 'runtimeExecutionRef')
+  return store.withImmediateTransaction(() => {
+    const rows = runnerContextRows(store, dispatchId)
+    const outcome = input.executionTerminalState
+    if (rows.dispatch.state !== 'RECOVERING' || rows.execution.state !== 'RECOVERING' || rows.lease.state !== 'RECOVERING'
+      || !rows.dispatch.runtime_dispatch_ref || !rows.dispatch.receipt_json || !outcome
+      || !isTerminalExecutionState(asExecutionState(outcome))
+      || (rows.dispatch.runtime_execution_ref !== null && rows.dispatch.runtime_execution_ref !== input.runtimeExecutionRef)) {
+      throw new GovernedApiError('Recovered terminal requires exact original Receipt/Execution/Lease and a known outcome')
+    }
+    const at = input.terminalAt ?? now()
+    const dispatch = store.updateDispatchState(dispatchId, 'RECOVERING', 'TERMINAL', {
+      runtimeExecutionRef: input.runtimeExecutionRef, terminalEvidenceJson: input.evidenceJson, terminalAt: at,
+    }, at)
+    const execution = store.transitionExecution(rows.execution, asExecutionState(outcome), { detail: `recovered terminal evidence: ${dispatchId}` })
+    emit(store, { kingdomId: dispatch.kingdom_id, eventType: 'DISPATCH_STATE_CHANGED', targetType: 'dispatch', targetId: dispatchId,
+      payload: { from: 'RECOVERING', to: 'TERMINAL', executionTerminalState: outcome, recovery: 'retained-original-context' } })
+    return { dispatch, execution, lease: rows.lease }
   })
 }
 

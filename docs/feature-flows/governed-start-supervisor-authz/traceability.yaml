@@ -12,6 +12,98 @@ characteristics:
   security_sensitive: true
 
 nodes:
+  E3:
+    kind: entry
+    description: Observe provider usage for an accepted dispatch
+    trigger: Dispatch consumer requests a usage snapshot
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: observeDshDispatchUsage
+  A19:
+    kind: action
+    description: Read current events and isolate exact admitted dispatch turn
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: extractDshDispatchUsage
+  D21:
+    kind: decision
+    description: Exact turn and optional public reader are available
+    condition: Dispatch message and turn boundaries are unambiguous and public reader is present
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: extractDshDispatchUsage
+    tests:
+      - path: tests/v11-dsh-runtime-baseline.test.ts
+        symbol: "1.1 usage: retries count separately; missing reader and incomplete accounting never become zero"
+  A20:
+    kind: action
+    description: Fold attempts through public token-meter client and validate reported buckets
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: normalizeDshUsageCounts
+  D22:
+    kind: decision
+    description: Complete usage for every billed attempt can be proven
+    condition: Public fold returns safe consistent totals for the complete turn
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: extractDshDispatchUsage
+    tests:
+      - path: tests/v11-dsh-runtime-baseline.test.ts
+        symbol: "1.1 usage: invalid totals, foreign input, cross-turn boundaries and repeated seq fail closed"
+  G21:
+    kind: safeguard
+    description: Current snapshot and exact message identity protect dispatch evidence and Claim text
+    safeguard_type: integrity
+    guarantee: Broken advertised API cannot fall back and current dispatch cannot borrow previous Claim text
+    protects: [A11, D7, A10]
+    failure_behavior: Reject materialization or retain an indeterminate recovery observation and missing Claim marker
+    code:
+      - path: src/adapter/dsh-session-events.ts
+        symbol: readDshSessionEvents
+      - path: src/adapter/dsh-session-events.ts
+        symbol: readDshDispatchSummary
+    tests:
+      - path: tests/v11-dsh-runtime-baseline.test.ts
+        symbol: "1.1 snapshots: current API preserves receiver and rereads; broken advertised API never falls back"
+      - path: tests/v11-dsh-runtime-baseline.test.ts
+        symbol: "1.1 Claim summary: failed dispatch with no output never borrows the previous attempt"
+  G22:
+    kind: safeguard
+    description: Rework input and real payload digest preserve exact attempt context
+    safeguard_type: integrity
+    guarantee: Prior Claim and reason match the preceding attempt and digest reflects UTF-8 prompt bytes
+    protects: [T1, A6]
+    failure_behavior: Missing prior context is explicit; no stale attempt reason is substituted
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+    tests:
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "1.1 governed payload: real SHA-256 distinguishes equal-length prompts"
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: "1.1 governed REWORK dispatch uses exact previous Claim and review despite unrelated recent events"
+  G23:
+    kind: safeguard
+    description: Usage observation is separate from governance and leaves unreported fields absent
+    safeguard_type: integrity
+    guarantee: Incomplete usage never becomes a complete or zero total; reasoning is not counted twice
+    protects: [A20, X17]
+    failure_behavior: Return partial or unavailable coverage without governance changes
+    code:
+      - path: src/adapter/dsh-usage.ts
+        symbol: extractDshDispatchUsage
+    tests:
+      - path: tests/v11-dsh-runtime-baseline.test.ts
+        symbol: "1.1 usage: exact dispatch slice excludes other attempts; cache and reasoning are disjoint"
+  X17:
+    kind: outcome
+    description: Usage incomplete or unavailable
+    result: Counts absent; request coverage and bounded reason remain visible
+  X18:
+    kind: outcome
+    description: Complete provider-reported usage
+    result: Consumer receives exact turn usage without granting authority or completing the task
   E0:
     kind: entry
     description: Human Owner independently invokes the direct local capability-ceiling Slash command
@@ -950,17 +1042,25 @@ nodes:
 
   G2:
     kind: safeguard
-    description: Caller-owned Supervisor binding and exact Territory scope gate
+    description: Original caller-owned Supervisor and exact scope remain current across asynchronous preparation
     safeguard_type: authorization
     guarantee: A caller without the exact active in-scope Supervisor binding cannot submit a Grant or enter the executor
     protects: [A2, D2, A4]
-    failure_behavior: Return AUTHZ_DENIED and preserve zero governed artifacts
+    failure_behavior: Deny new effects; initial rejection creates no artifacts, later revocation preserves admitted evidence and uses proven cleanup only
     code:
       - path: src/core/task-service.ts
         symbol: resolveGovernedStartSupervisor
+      - path: src/index.ts
+        symbol: stillAuthorized
+      - path: src/capability/service.ts
+        symbol: stillAuthorized
     tests:
       - path: tests/governed-start-supervisor-authz.test.ts
         symbol: "public governed start: 同一 DSH session 的多个 Supervisor 必须解析为 Territory 指定 binding"
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public governed start rechecks the original Supervisor after asynchronous policy loading
+      - path: tests/m3s2-v4-governed-runner.test.ts
+        symbol: governed start authority changes during preflight or materialization never reach dispatch
       - path: tests/governed-start-supervisor-authz.test.ts
         symbol: "public governed start: 每个 AUTHZ_DENIED 分支均在 runner 前 fail-closed"
 
@@ -1308,7 +1408,7 @@ nodes:
 
   G19:
     kind: safeguard
-    description: Canonical product Runner context binds settlement to one exact Task/Execution/Lease/Dispatch relation
+    description: Canonical Runner binds one exact relation and excludes neutral observations and only proven independent-task event relations
     safeguard_type: validation
     guarantee: The product factory derives all context identifiers from a committed exact Dispatch relation; every acquire/read/receipt/terminal/settle operation consumes the same opaque handle and a sequence issued from module-private immutable version metadata, rereads the exact rows, treats the public sequence only as diagnostic, and rejects copied, cross-target, stale, duplicate, out-of-order, RECOVERING, or RELEASED use
     protects: [A16, D15, D19, A10]
@@ -1320,6 +1420,8 @@ nodes:
         symbol: RunnerContextPort
       - path: src/core/governed.ts
         symbol: RunnerContextPort.settle
+      - path: src/core/db.ts
+        symbol: runnerContextRevision
       - path: src/index.ts
         symbol: runGovernedStart
     tests:
@@ -1327,6 +1429,14 @@ nodes:
         symbol: "R11 RunnerContext happy path consumes one handle through acquire/receipt/terminal/settle"
       - path: tests/r11-runner-context.test.ts
         symbol: "R11 copied/foreign/stale handle and version fail closed before product action"
+      - path: tests/r11-runner-context.test.ts
+        symbol: "neutral cost and future budget policy redraw the GUI without invalidating an unchanged Runner relation"
+      - path: tests/r11-runner-context.test.ts
+        symbol: bounded collaboration keeps one Runner valid while another exact Worker executes in parallel
+      - path: tests/r11-runner-context.test.ts
+        symbol: parallel event exceptions reject missing targets, wrong target kinds, shared Worker and future events
+      - path: tests/r11-runner-context.test.ts
+        symbol: "non-budget and malformed Owner receipts still invalidate a Runner before product action"
       - path: tests/r11-runner-context.test.ts
         symbol: "R11 wrong order, duplicate token, and recovery/released contexts cannot be reused"
       - path: tests/r11-runner-context.test.ts

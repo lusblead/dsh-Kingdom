@@ -215,6 +215,8 @@ export interface RuntimeAdapter {
 
 /** DSH backend 的构造入参（注入面；结构型，不 import dsh 类型——dsh-subagent.ts 同款模式）。 */
 export interface DshBackendDeps {
+  /** Optional DSH-only display policy, separate from effective capabilities. */
+  toolDisclosure?: unknown
   runtimeInstanceRef: string
   provider: string
   model: string | null

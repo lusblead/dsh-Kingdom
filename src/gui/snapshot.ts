@@ -7,6 +7,12 @@
  * 再次强调边界：本文件只产出 `{ role, state, activity }` 这类语义，
  * 绝不产出贴图、clip、场景文件名——那些是 GUI 的 visual-map 的事。
  */
+import { readDispatchUsage } from '../core/usage.js'
+import { readAdditionalRoleCost, readLatestPromptCosts } from '../core/cost.js'
+import { readBudgetView } from '../core/budget.js'
+import { listCollaborationPlans, readCollaborationReadiness, readPlanBudgetView, type CollaborationReadiness } from '../core/collaboration.js'
+import { readWorkspaceReservations } from '../core/workspace-admission.js'
+import { buildPersonalWorkbench, type PersonalWorkbenchInput } from './workbench.js'
 import type {
   AffinityView,
   AllowedAction,
@@ -31,6 +37,7 @@ import type {
   OrganizationRoleSummary,
   OrganizationTerritorySummary,
   OverviewProjectionData,
+  PersonalWorkbenchData,
   ProjectionEnvelope,
   ProjectionSecurityContext,
   ProjectionTerminality,
@@ -47,6 +54,10 @@ import type {
   SnapshotView,
   TimelineItem,
   AuthView,
+  WorkbenchCostRuntime,
+  WorkbenchCostSummary,
+  WorkbenchCollaborationView,
+  WorkbenchPlanReadiness,
 } from './contract.js'
 import { GUI_SCHEMA_VERSION, TRANSIENT_WINDOW_MS } from './contract.js'
 import {
@@ -688,8 +699,9 @@ function toDecisionView(row: import('../core/db.js').CapabilityDecisionRow): Cap
   }
 }
 
-function toDispatchView(row: import('../core/db.js').DispatchRecordRow): DispatchView {
+function toDispatchView(row: import('../core/db.js').DispatchRecordRow, store: KingdomStore): DispatchView {
   return {
+    usage: readDispatchUsage(store, row.dispatch_id),
     dispatchId: row.dispatch_id,
     leaseId: row.lease_id,
     executionId: row.execution_id,
@@ -711,7 +723,7 @@ export function buildGovernance(store: KingdomStore, kingdomId: string): Runtime
     workerSessions: store.listAffinities(kingdomId).map(toAffinityView),
     leases: store.listLeases(kingdomId).map(toLeaseView),
     decisions: store.listCapabilityDecisions(kingdomId).map(toDecisionView),
-    dispatches: store.listDispatches(kingdomId).map(toDispatchView),
+    dispatches: store.listDispatches(kingdomId).map(row => toDispatchView(row, store)),
   }
 }
 
@@ -722,7 +734,7 @@ export function buildTaskGovernance(store: KingdomStore, taskId: string): Runtim
     workerSessions: [],
     leases: store.listLeases(store.getDefaultKingdom()?.kingdom_id ?? '').filter(l => l.task_id === taskId).map(toLeaseView),
     decisions: store.listCapabilityDecisions(store.getDefaultKingdom()?.kingdom_id ?? '').filter(d => d.task_id === taskId).map(toDecisionView),
-    dispatches: store.listDispatches(store.getDefaultKingdom()?.kingdom_id ?? '').filter(d => d.task_id === taskId).map(toDispatchView),
+    dispatches: store.listDispatches(store.getDefaultKingdom()?.kingdom_id ?? '').filter(d => d.task_id === taskId).map(row => toDispatchView(row, store)),
   }
 }
 
@@ -740,11 +752,11 @@ export function allowedActionsFor(task: TaskRow, execution: ExecutionRow | null)
     case 'CREATED':
       return ['assign']
     case 'ASSIGNED':
-      return isGovernedStartBlocked(execution) ? [] : ['start']
+      return executionState === 'RECOVERING' && execution?.execution_contract === 'GOVERNED_PERSISTENT' ? ['reconcile'] : isGovernedStartBlocked(execution) ? [] : ['start']
     case 'RUNNING': {
       // RECOVERING means the Runtime outcome is unknown. Exposing start here would
       // invite a duplicate attempt before reconciliation, so the projection fails closed.
-      if (executionState === 'RECOVERING') return []
+      if (executionState === 'RECOVERING') return execution?.execution_contract === 'GOVERNED_PERSISTENT' ? ['reconcile'] : []
       if (execution === null || !live) {
         // REWORK 之后：任务已回 RUNNING，但还没有新的 Execution。
         return ['start']
@@ -1326,19 +1338,20 @@ export function buildTimeline(
   const items: TimelineItem[] = []
   const events = store.listEvents(kingdomId, Math.min(options.eventLimit ?? 50, MAX_PROJECTION_TIMELINE_ITEMS))
   for (const event of events) {
+    const usageObservation = event.event_type === 'DISPATCH_USAGE_OBSERVED'
     const refs = [eventSource(event.seq)]
     const entityRef = event.target_type ? publicEntityRef(event.target_type, event.target_id) : null
     items.push({
       id: `event:${event.seq}`,
-      kind: 'GOVERNANCE_FACT',
+      kind: usageObservation ? 'RUNTIME_OBSERVATION' : 'GOVERNANCE_FACT',
       occurredAt: safeDate(event.created_at),
       entityRef,
-      authoritativeState: stateValue(event.event_type, 'GOVERNANCE_FACT', refs),
+      authoritativeState: stateValue(event.event_type, usageObservation ? 'RUNTIME_OBSERVATION' : 'GOVERNANCE_FACT', refs),
       sourceRefs: boundedSourceRefs(refs),
       allowedActions: null,
       attentionReason: timelineAttention(attentions, entityRef),
       terminality: 'UNKNOWN',
-      summary: `Governance Fact: ${boundedText(event.event_type)}`,
+      summary: usageObservation ? 'Provider usage observation (coverage may be partial)' : `Governance Fact: ${boundedText(event.event_type)}`,
       requiresOwnerAction: false,
       rawEvidenceAvailable: false,
     })
@@ -1704,6 +1717,125 @@ export interface ReadonlyProjectionOptions {
   eventLimit?: number
   nowMs?: number
   security?: ProjectionSecurityContext
+  costRuntime?: WorkbenchCostRuntime
+}
+
+/** Keep runtime references and prompt text outside the public cost projection. */
+function buildWorkbenchCost(store: KingdomStore, kingdomId: string, present: boolean, runtime?: WorkbenchCostRuntime): WorkbenchCostSummary {
+  const number = (value: unknown): number | null => Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null
+  const rows = present ? readLatestPromptCosts(store, kingdomId) : []
+  const parts = (value: unknown): { name: string; bytes: number | null }[] => Array.isArray(value)
+    ? value.slice(0, 24).map(item => ({ name: boundedText(typeof item?.name === 'string' ? item.name : 'UNKNOWN'), bytes: number(item?.bytes) })) : []
+  return {
+    additionalRoles: present ? readAdditionalRoleCost(store, kingdomId) : null,
+    budget: present ? readBudgetView(store, kingdomId) : null,
+    prompts: { totalCount: rows.length, truncated: rows.length > 40, items: rows.slice(0, 40).map(row => ({
+      bindingId: publicReferenceId(row.bindingId), roleType: boundedText(row.roleType),
+      toolsBefore: number(row.toolsBefore), toolsAfter: number(row.toolsAfter), toolsBytesBefore: number(row.toolsBytesBefore), toolsBytesAfter: number(row.toolsBytesAfter),
+      sections: parts(row.sections), contexts: parts(row.contexts),
+      partsTruncated: (Array.isArray(row.sections) && row.sections.length > 24) || (Array.isArray(row.contexts) && row.contexts.length > 24),
+      historyBytes: null, tokenEstimate: null, mode: row.mode === 'off' || row.mode === 'pilot' ? row.mode : 'UNKNOWN',
+      reasonCode: typeof row.reasonCode === 'string' ? boundedText(row.reasonCode) : null,
+    })) },
+    runtime: { toolDisclosureMode: runtime?.toolDisclosureMode === 'off' || runtime?.toolDisclosureMode === 'pilot' ? runtime.toolDisclosureMode : 'UNKNOWN',
+      observerAvailable: typeof runtime?.observerAvailable === 'boolean' ? runtime.observerAvailable : null },
+  }
+}
+
+/** Apply the bound after exact task selection, so unrelated activity cannot erase task history. */
+function readTaskEvents(store: KingdomStore, kingdomId: string, taskId: string, limit: number): EventRow[] {
+  return store.db.prepare('SELECT * FROM events WHERE kingdom_id = ? AND target_type = ? AND target_id = ? ORDER BY seq DESC LIMIT ?')
+    .all(kingdomId, 'task', taskId, limit) as unknown as EventRow[]
+}
+
+function readTaskReviewEvents(store: KingdomStore, kingdomId: string, taskId: string, limit: number): EventRow[] {
+  return store.db.prepare("SELECT * FROM events WHERE kingdom_id = ? AND target_type = 'task' AND target_id = ? AND actor_role = 'SUPERVISOR' AND event_type IN ('TASK_ACCEPTED', 'TASK_REWORK_REQUESTED', 'TASK_FAILED', 'TASK_HANDED_OFF') ORDER BY seq DESC LIMIT ?")
+    .all(kingdomId, taskId, limit) as unknown as EventRow[]
+}
+
+/** Canonical reads remain here; the workbench builder only receives public projection values. */
+function buildWorkbenchCollaboration(store: KingdomStore, kingdomId: string, present: boolean): WorkbenchCollaborationView {
+  const publicId = (id: string): string => publicReferenceId(id) ?? 'redacted'
+  const plans = present ? listCollaborationPlans(store, kingdomId) : []
+  const resources = present && store.isSchemaV4 ? readWorkspaceReservations(store, kingdomId) : []
+  const readiness = (value: CollaborationReadiness | null): WorkbenchPlanReadiness | null => value ? {
+    ready: value.ready, reasonCode: value.reasonCode, blockingTaskIds: value.blockingTaskIds.map(publicId),
+    acceptedResults: value.handoffs.map(item => ({ taskId: publicId(item.taskId), attemptNo: item.attemptNo,
+      resultId: publicId(item.resultId), resultDigest: item.resultDigest, acceptEventId: publicId(item.acceptEventId) })),
+  } : null
+  return {
+    pendingAdoptionCount: plans.filter(plan => plan.state === 'PROPOSED').length,
+    plans: { totalCount: plans.length, truncated: plans.length > 40, items: plans.slice(0, 40).map(plan => ({
+      planId: publicId(plan.planId), parentTaskId: publicId(plan.parentTaskId), title: boundedText(store.getTask(plan.parentTaskId)?.title),
+      version: plan.version, digest: plan.digest, state: plan.state, mode: plan.mode, reason: boundedText(plan.reason),
+      integratorBindingId: publicId(plan.integratorBindingId), integratorName: boundedText(store.getBindingById(plan.integratorBindingId)?.role_name),
+      parentStatus: store.getTask(plan.parentTaskId)?.status ?? 'UNKNOWN', budgetTokens: plan.budgetTokens, reserveTokens: plan.reserveTokens,
+      adoptedAt: plan.adoptedAt, integration: readiness(readCollaborationReadiness(store, kingdomId, plan.parentTaskId)),
+      budget: readPlanBudgetView(store, kingdomId, plan.planId),
+      items: plan.items.map(item => ({ key: boundedText(item.key), taskId: publicId(item.taskId), title: boundedText(item.title),
+        description: boundedText(item.description), acceptanceCriteria: boundedText(item.acceptanceCriteria),
+        territoryId: publicId(item.territoryId), territoryName: boundedText(store.getTerritoryById(item.territoryId)?.name),
+        workerBindingId: publicId(item.workerBindingId), workerName: boundedText(store.getBindingById(item.workerBindingId)?.role_name),
+        access: item.access, dependsOn: item.dependsOn.map(boundedText), expectedArtifact: boundedText(item.expectedArtifact),
+        status: store.getTask(item.taskId)?.status ?? 'NOT_CREATED', readiness: readiness(readCollaborationReadiness(store, kingdomId, item.taskId)) })),
+    })) },
+    resources: { totalCount: resources.length, truncated: resources.length > 80, items: resources.slice(0, 80).map(item => ({
+      taskId: publicId(item.taskId), attemptNo: item.attemptNo, access: item.access, state: boundedText(item.state), recovery: item.recovery,
+    })) },
+  }
+}
+
+function buildWorkbenchData(
+  store: KingdomStore,
+  kingdomId: string,
+  tasks: TaskRow[],
+  security: ProjectionSecurityContext | undefined,
+  costRuntime: WorkbenchCostRuntime | undefined,
+): PersonalWorkbenchData {
+  const kingdom = store.getDefaultKingdom()
+  const present = kingdom?.kingdom_id === kingdomId
+  const bindings = present ? store.listBindings(kingdomId) : []
+  const territories = present ? store.listTerritories(kingdomId) : []
+  const publicId = (id: string): string => publicReferenceId(id) ?? 'redacted'
+  const taskInputs: PersonalWorkbenchInput['tasks'] = tasks.map(task => {
+    const view = toTaskView(store, task)
+    const claim = store.latestWorkerResult(task.task_id)
+    const execution = store.latestExecution(task.task_id)
+    const review = readTaskReviewEvents(store, kingdomId, task.task_id, 1)[0]
+    return {
+      task: {
+        taskId: publicId(task.task_id), territoryId: publicId(task.territory_id), title: boundedText(task.title),
+        status: boundedText(task.status), assignedBindingId: publicReferenceId(task.assigned_binding_id), updatedAt: safeDate(task.updated_at) ?? '',
+        latestClaim: view.latestClaim ? { ...view.latestClaim, resultId: publicId(view.latestClaim.resultId),
+          workerBindingId: publicReferenceId(view.latestClaim.workerBindingId), sessionId: null } : null,
+        latestExecution: view.latestExecution ? { ...view.latestExecution, executionId: publicId(view.latestExecution.executionId),
+          taskId: publicId(task.task_id), workerBindingId: publicReferenceId(view.latestExecution.workerBindingId), sessionId: null,
+          leaseId: publicReferenceId(view.latestExecution.leaseId), capabilityDecisionId: publicReferenceId(view.latestExecution.capabilityDecisionId) } : null,
+      },
+      actionAvailability: buildActionAvailability(store, task, execution, security),
+      latestReview: review ? toSupervisorDecisionView(review) : null,
+      claimExecutionMismatch: Boolean(claim && execution && claimExecutionMismatch(claim, execution)),
+    }
+  })
+  const governance = present ? buildGovernance(store, kingdomId) : emptyGovernance()
+  // Only public IDs, reason codes and typed token observations can be consumed by the workbench.
+  governance.decisions = governance.decisions.map(decision => ({ ...decision, decisionId: publicId(decision.decisionId), taskId: publicId(decision.taskId), reasonCode: boundedText(decision.reasonCode) || null }))
+  governance.dispatches = governance.dispatches.map(dispatch => ({ ...dispatch, dispatchId: publicId(dispatch.dispatchId), taskId: publicId(dispatch.taskId),
+    executionId: publicId(dispatch.executionId), leaseId: publicId(dispatch.leaseId), runtimeDispatchRef: null, runtimeExecutionRef: null }))
+  governance.leases = governance.leases.map(lease => ({ ...lease, leaseId: publicId(lease.leaseId), taskId: publicId(lease.taskId) }))
+  return buildPersonalWorkbench({
+    kingdomPresent: present,
+    bindings: bindings.map(binding => ({ bindingId: publicId(binding.binding_id), roleType: boundedText(binding.role_type), roleName: boundedText(binding.role_name),
+      status: boundedText(binding.status), sessionBound: binding.session_id !== null })),
+    territories: territories.map(territory => ({ territoryId: publicId(territory.territory_id), name: boundedText(territory.name), status: boundedText(territory.status),
+      supervisorBindingId: publicReferenceId(territory.supervisor_binding_id) })),
+    tasks: taskInputs,
+    executions: tasks.flatMap(task => store.listExecutions(task.task_id).map(execution => ({ executionId: publicId(execution.execution_id), taskId: publicId(task.task_id),
+      workerBindingId: publicReferenceId(execution.worker_binding_id), state: boundedText(execution.state) }))),
+    governance,
+    cost: buildWorkbenchCost(store, kingdomId, present, costRuntime),
+    collaboration: buildWorkbenchCollaboration(store, kingdomId, present),
+  })
 }
 
 /** S1 顶层只读 Projection；没有 kingdom 时显式返回 UNKNOWN/空数据。 */
@@ -1785,6 +1917,14 @@ export function buildReadonlySnapshotProjection(
       attentionReason: topAttention,
       data: attentions,
     }),
+    workbench: projectionEnvelope({
+      revision,
+      refreshedAt,
+      entityRef: kingdomRef,
+      authoritativeState: null,
+      sourceRefs: [...sourceRefs, ruleSource('PERSONAL_WORKBENCH_DERIVED')],
+      data: buildWorkbenchData(store, actualKingdomId, tasks, options.security, options.costRuntime),
+    }),
   }
 }
 
@@ -1798,6 +1938,7 @@ export interface SnapshotOptions {
   nowMs?: number
   /** 缺少完整主体/scope/Host context 时 action 保持 fail-closed。 */
   security?: ProjectionSecurityContext
+  costRuntime?: WorkbenchCostRuntime
 }
 
 export function buildSnapshot(store: KingdomStore, options: SnapshotOptions): SnapshotView {
@@ -1823,6 +1964,7 @@ export function buildSnapshot(store: KingdomStore, options: SnapshotOptions): Sn
         eventLimit: options.eventLimit,
         nowMs,
         security: options.security,
+        costRuntime: options.costRuntime,
       }),
     }
   }
@@ -1865,6 +2007,7 @@ export function buildSnapshot(store: KingdomStore, options: SnapshotOptions): Sn
       eventLimit: options.eventLimit,
       nowMs,
       security: options.security,
+      costRuntime: options.costRuntime,
     }),
   }
 }
@@ -1883,14 +2026,11 @@ export function buildTaskDetail(
   const binding = task.assigned_binding_id ? store.getBindingById(task.assigned_binding_id) : null
   const assignments = store.listTaskAssignments(taskId)
   const executions = store.listExecutions(taskId)
-  const related = store
-    .listEvents(kingdomId, 500)
-    .filter(e => e.target_id === taskId)
-    .sort((a, b) => a.seq - b.seq)
+  const taskEvents = readTaskEvents(store, kingdomId, taskId, 501)
+  const related = taskEvents.slice(0, 500).sort((a, b) => a.seq - b.seq)
 
-  const reviews = related
-    .filter(e => ['TASK_ACCEPTED', 'TASK_REWORK_REQUESTED', 'TASK_FAILED', 'TASK_HANDED_OFF'].includes(e.event_type))
-    .map(toSupervisorDecisionView)
+  const reviewEvents = readTaskReviewEvents(store, kingdomId, taskId, 501)
+  const reviews = reviewEvents.slice(0, 500).sort((a, b) => a.seq - b.seq).map(toSupervisorDecisionView)
 
   const view = toTaskView(store, task)
   return {
@@ -1903,9 +2043,13 @@ export function buildTaskDetail(
     claims: store.listWorkerResults(taskId).map(toClaimView),
     executions: executions.map(toExecutionView),
     reviews,
+    reviewsTruncated: reviewEvents.length > reviews.length,
     relatedEvents: related.map(toEventView),
+    relatedEventsTruncated: taskEvents.length > related.length,
+    humanAcceptance: 'NOT_RECORDED',
     allowedActions: view.allowedActions,
     governance: buildTaskGovernance(store, taskId),
+    additionalRoleCost: readAdditionalRoleCost(store, kingdomId, taskId),
     projection: buildTaskProjection(store, kingdomId, task, options),
   }
 }

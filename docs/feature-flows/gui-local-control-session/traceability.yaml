@@ -12,6 +12,188 @@ characteristics:
   security_sensitive: true
 
 nodes:
+  E7:
+    kind: entry
+    description: A one-sentence goal or task draft is edited in the personal workbench
+    trigger: Quick task form or task draft form input
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: mountWorkbench
+  A24:
+    kind: action
+    description: Keep goal, scope, acceptance and existing territory in an editable in-page draft
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: mountWorkbench
+      - path: src/gui/console-app.ts
+        symbol: task-create-form
+  D25:
+    kind: decision
+    description: Validate draft input and current role command availability
+    condition: Goal and existing territory are present and task.create is executable in the activated role capability
+    code:
+      - path: src/gui/console-app.ts
+        symbol: task-create-form
+      - path: src/gui/console-app.ts
+        symbol: actionState
+    tests:
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testEmbeddedSelectionPreservesTrustedDetailAndSuccessfulPostRefreshesExactlyOnce
+  A25:
+    kind: action
+    description: Send one plan through the existing protected command channel
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+      - path: src/gui/console-app.ts
+        symbol: postCommand
+  D26:
+    kind: decision
+    description: A new task is selected only from the structured successful command response
+    condition: result.ok is true and result.task.taskId is a nonempty string
+    code:
+      - path: src/gui/console-app.ts
+        symbol: createdId
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+  X34:
+    kind: outcome
+    description: Show the exact newly created task without assignment or dispatch
+    result: Browser selection points to returned task.taskId; only the unchanged submitted draft is consumed
+    code:
+      - path: src/gui/console-app.ts
+        symbol: selectTask
+      - path: src/gui/workbench-ui.ts
+        symbol: consumeSubmittedDraft
+  X35:
+    kind: outcome
+    description: Invalid input, unavailable permission or ambiguous command keeps the draft
+    result: User receives an accurate next step; no automatic mutation retry
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+  G23:
+    kind: safeguard
+    description: Drafting cannot create authority or extra workflow side effects
+    safeguard_type: authorization
+    guarantee: Browser data remains untrusted; only the existing server guard authorizes the command and the frontend does not dispatch after planning
+    protects: [A24, A25, X34]
+    failure_behavior: Retain editable input and explain rejection or unconfirmed result without resend
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+      - path: tests/v12-workbench-console.test.ts
+        symbol: draft rejection or success without task identity preserves input and never resends
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft consumption preserves edits made while the command is in flight
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testEmbeddedSelectionPreservesTrustedDetailAndSuccessfulPostRefreshesExactlyOnce
+  E8:
+    kind: entry
+    description: Snapshot polling or selected task detail refresh completes
+    trigger: Successful read-only request
+    code:
+      - path: src/gui/console-app.ts
+        symbol: renderSnapshot
+  A26:
+    kind: action
+    description: Render updated facts with stable reading and editing state
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: preserveWorkbenchView
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbenchTaskDetail
+  X36:
+    kind: outcome
+    description: Refresh retains task expansion, draft input, caret, keyboard focus and reading anchor
+    result: Facts update without discarding the current reading or editing context
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: preserveWorkbenchView
+  G24:
+    kind: safeguard
+    description: Safe content rendering and keyed UI state restoration
+    safeguard_type: integrity
+    guarantee: Host content remains textContent; dynamic replacement preserves the matching task and focus key
+    protects: [A26]
+    failure_behavior: Missing data is explained without fabricating completion, human acceptance or zero cost
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: preserveWorkbenchView
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbenchTaskDetail
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: refresh preserves task expansion, edited input, caret, focus and reading anchor
+      - path: tests/v12-workbench-console.test.ts
+        symbol: task detail separates recovering execution, claim, supervisor decision and human acceptance
+  A23:
+    kind: action
+    description: Explicit same-process governed reconciliation under the original GUI activation identity
+    code:
+      - path: src/index.ts
+        symbol: runGovernedReconcile
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+    tests:
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance
+  X33:
+    kind: outcome
+    description: Reconciliation returns a Claim or a typed recovery-required failure
+    result: Waiting, missing context and blocked Claim results have ok=false; no task is automatically accepted or dispatched again
+    tests:
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance
+  G22:
+    kind: safeguard
+    description: Current exact GUI identity and honest result mapping
+    safeguard_type: authorization
+    guarantee: Browser payload cannot supply a Principal; activation revocation or identity drift prevents recovery mutation, and uncertain results are not successes
+    protects: [A23]
+    failure_behavior: Stable authentication or RECOVERY_REQUIRED result without resend or unproven cleanup
+    code:
+      - path: src/index.ts
+        symbol: runGovernedReconcile
+      - path: src/index.ts
+        symbol: plainResult
+    tests:
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance
+  T32:
+    kind: transition
+    description: Original GUI dispatch converges on a trusted late terminal
+    entity: Dispatch and Execution
+    from: RECOVERING
+    to: TERMINAL Dispatch and known terminal Execution
+    trigger: Explicit reconcile with original port and Runtime evidence
+    code:
+      - path: src/core/governed.ts
+        symbol: recordRecoveredTerminalEvidence
+    tests:
+      - path: tests/gui-governed-vertical-flow.test.ts
+        symbol: loopback GUI reaches REVIEW and preserves ACCEPT/REWORK/FAIL governance
+  T33:
+    kind: transition
+    description: Release the original recovering Lease only with cleanup and fence proof
+    entity: Lease
+    from: RECOVERING
+    to: RELEASED
+    trigger: Original cleanup and recovery settlement confirmed
+    code:
+      - path: src/core/governed.ts
+        symbol: settleRecovery
+      - path: src/dispatch/service.ts
+        symbol: settleAndRelease
+    tests:
+      - path: tests/governed-reconcile.test.ts
+        symbol: late terminal keeps original capability, permits unrelated revision, and concurrently submits only one Claim
   E1:
     kind: entry
     description: Direct local GUI activation command
@@ -253,7 +435,7 @@ nodes:
   D8:
     kind: decision
     description: Select the GUI command branch
-    condition: plan, assign, review, execution.pause/resume/abort, or start matches the canonical session command name
+    condition: plan, assign, review, execution.pause/resume/abort, start, or reconcile matches the canonical session command name
     code:
       - path: src/index.ts
         symbol: runGuiCommand
@@ -1581,8 +1763,8 @@ nodes:
     tests:
       - path: tests/assets/capture-gui-fixture.mjs
         symbol: normalEmbedded
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceRecovery
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissing
 
   A21:
     kind: action
@@ -1622,12 +1804,8 @@ nodes:
       - path: src/gui/console-app.ts
         symbol: applyCharacterVisual
     tests:
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceFailure
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceRecovery
       - path: tests/gui-interactive-console.test.ts
-        symbol: testCharacterResourceFailureUsesOneHandlerStableSameUrlAndRecoversOnNewUrl
+        symbol: testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissing
 
   X30:
     kind: outcome
@@ -1650,12 +1828,8 @@ nodes:
     description: Browser character resource failure is rendered honestly and bounded
     result: The image is hidden, its source is cleared, bounded Chinese 角色资源不可用 text is shown, and polling does not retry the same failed URL; a changed URL may recover
     tests:
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceFailure
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceRecovery
       - path: tests/gui-interactive-console.test.ts
-        symbol: testCharacterResourceFailureUsesOneHandlerStableSameUrlAndRecoversOnNewUrl
+        symbol: testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissing
 
   G19:
     kind: safeguard
@@ -1726,7 +1900,5 @@ nodes:
       - path: src/gui/console-app.ts
         symbol: applyCharacterVisual
     tests:
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceFailure
-      - path: tests/assets/capture-gui-fixture.mjs
-        symbol: resourceRecovery
+      - path: tests/gui-interactive-console.test.ts
+        symbol: testCharacterInlineSvgUsesAllowlistStableSameAssetAndFailsClosedWhenMissing

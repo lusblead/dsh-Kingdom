@@ -25,7 +25,7 @@ through this script.
   version, and local TypeScript/test/pack tools are available.
 - Success: P2/P3 pass and a DryRun exits zero before P4.
 - Non-DryRun: P0-P3 may complete, then the script throws before P4-P8.
-- Failure: a failed local gate, mismatch, failed pack, stale target, or missing
+- Failure: a nonzero typecheck, emitted-build or test exit stops P2 even if a stale test summary says pass. A failed local gate, mismatch, failed pack, stale target, or missing
   target stops before a later stage.
 
 ## Runtime flow
@@ -41,7 +41,7 @@ flowchart TD
     D2 -->|Yes| A3["A3 P2 runs typecheck and node tests"]
     A3 --> D3{"D3 P2 commands succeed"}
     D3 -->|No| X3(["X3 Throw before P3-P8"])
-    D3 -->|Yes| A4["A4 P3 creates a GUID temp directory and runs npm pack"]
+    D3 -->|Yes| A4["A4 P3 creates a GUID temp directory; prepack builds current source before npm pack"]
     A4 --> D4{"D4 Pack is zero exit and creates the expected fresh tgz"}
     D4 -->|No| X4(["X4 Throw before P4-P8; no stale artifact substitution"])
     D4 -->|Yes| D5{"D5 DryRun requested"}

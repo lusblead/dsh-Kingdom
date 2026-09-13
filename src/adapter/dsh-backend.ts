@@ -42,6 +42,7 @@ import {
   type DshPolicyDeps,
 } from '../capability/dsh-enforcement.js'
 import { terminalOutcomeOf } from '../dispatch/evidence.js'
+import { locateDshDispatchRef, readDshSessionEvents, type DshSessionEventSource } from './dsh-session-events.js'
 
 // ── dsh 结构面（@ 00b7102f1d）───────────────────────────────────────────────
 
@@ -52,9 +53,8 @@ interface UserMessageLike {
   source: { kind: 'user' }
 }
 
-interface SessionLike {
+interface SessionLike extends DshSessionEventSource {
   header: { cwd?: string }
-  events: readonly { type: string; data?: Record<string, unknown>; [key: string]: unknown }[]
 }
 
 interface AgentLike {
@@ -198,10 +198,9 @@ export function reconstructExecutionObservation(
   sinceDispatchRef: string,
 ): ExecutionObservation {
   try {
-    const events = session.events
-    const startIndex = events.findIndex((event) =>
-      JSON.stringify(event.data ?? {}).includes(sinceDispatchRef) || event.type === 'user/message' && JSON.stringify(event).includes(sinceDispatchRef),
-    )
+    const events = readDshSessionEvents(session)
+    if (events === null) return 'UNKNOWN'
+    const startIndex = locateDshDispatchRef(events, sinceDispatchRef)
     if (startIndex === -1) return 'UNKNOWN' // 消息不在本 session 日志（可能未落库）
     const tail = events.slice(startIndex)
     const turnStarts = tail.filter(e => e.type === 'turn/start').length
@@ -251,6 +250,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       sessionPersistence: asPersistence(deps.sessionPersistence),
       presets: asPresets(deps.presets),
       policy: {
+        toolDisclosure: deps.toolDisclosure as DshPolicyDeps['toolDisclosure'],
         permission: deps.permission as DshPolicyDeps['permission'] | undefined,
         sandboxPolicy: deps.sandboxPolicy as DshPolicyDeps['sandboxPolicy'] | undefined,
         approval: deps.approval as DshPolicyDeps['approval'] | undefined,
@@ -354,7 +354,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     if (!current || current !== state.agent || current.id !== state.sessionRef || current.session !== state.session) {
       throw new Error(`trust fence session ${state.sessionRef} is no longer the exact live registry object`)
     }
-    const events = state.session.events
+    const events = readDshSessionEvents(state.session)
     if (!Array.isArray(events)) throw new Error(`trust fence session ${state.sessionRef} has no readable event projection`)
     return events as readonly RuntimeEvent[]
   }
@@ -427,7 +427,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (state.runtimeDispatchRef !== null) {
-      const dispatchIndex = events.findIndex(event => eventKey(event).includes(state.runtimeDispatchRef!))
+      const dispatchIndex = locateDshDispatchRef(events, state.runtimeDispatchRef)
       // Every user/message appended after the baseline must be the exact
       // owned dispatch message. This catches foreign ingress that arrived
       // while the Lease was active but before the owned Runtime ref existed;
@@ -457,7 +457,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     if (typeof agent.runMaintenance !== 'function') {
       throw new Error(`trust fence Runtime ingress reservation seam missing for Agent ${sessionRef}`)
     }
-    const currentEvents = agent.session?.events
+    const currentEvents = readDshSessionEvents(agent.session)
     if (!Array.isArray(currentEvents)) throw new Error(`trust fence cannot read Session events for ${sessionRef}`)
     const baselineKeys = currentEvents.map(eventKey)
     const suppliedKeys = input.baselineEvents.map(eventKey)
@@ -714,7 +714,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
 
   async observeExecution(refs: { sessionRef: string; runtimeDispatchRef?: string }, session: unknown): Promise<ExecutionObservation> {
     const live = session as SessionLike | undefined
-    if (!live || !Array.isArray(live.events) || !refs.runtimeDispatchRef) return 'UNKNOWN'
+    if (!live || !refs.runtimeDispatchRef) return 'UNKNOWN'
     return reconstructExecutionObservation(live, refs.runtimeDispatchRef)
   }
 

@@ -1,0 +1,357 @@
+version: 1
+feature_id: gui.owner-control
+title: Bounded human Owner GUI control
+status: implemented
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  T4:
+    kind: transition
+    description: Retain nonsecret exact operation references before sending a mutation
+    entity: BrowserPendingReference
+    from: NO_PENDING
+    to: PENDING
+    trigger: Explicit commit before the network request
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: rememberPending
+    tests:
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI does not send a mutation when its pending reference cannot be retained
+  T5:
+    kind: transition
+    description: Clear confirmed operation references without retrying the mutation
+    entity: BrowserPendingReference
+    from: PENDING
+    to: NO_PENDING
+    trigger: Exact matching receipt or confirmed stale preview or rolled back mutation
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: clearPending
+    tests:
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI reload recovers the exact applied operation after a lost response without another commit
+  E1:
+    kind: entry
+    description: Human activates bounded Owner GUI through canonical direct command
+    trigger: /kingdom owner.gui strict JSON
+    code:
+      - path: src/index.ts
+        symbol: owner.gui
+  D1:
+    kind: decision
+    description: Validate direct capability and exact decision scope
+    condition: Capability is canonical and all kingdom, action, resource and expiry fields are valid
+    code:
+      - path: src/core/owner-window.ts
+        symbol: activate
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Catalog and authority are fully scoped; exposed JSON/handle copies do not grant authority
+  T1:
+    kind: transition
+    description: Record an existing kingdom human control decision
+    entity: OwnerDecision
+    from: Absent
+    to: RECORDED
+    trigger: Valid direct activation
+    code:
+      - path: src/core/owner-window.ts
+        symbol: activate
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Owner GUI complete management chain records stable human actor, exact sources and durable receipts
+  A1:
+    kind: action
+    description: Redeem short single-use ticket and remove it from the browser URL
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: OwnerLocalControlManager
+  E2:
+    kind: entry
+    description: Prepare a structured management action including typed kingdom soft-budget form values
+    trigger: POST /api/owner/prepare
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: prepare
+      - path: src/gui/owner-ui.ts
+        symbol: payload
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+    tests:
+      - path: tests/v14-cost-gui.test.ts
+        symbol: Owner budget form sends typed numbers and booleans and rejects fractional or missing quota values
+  D2:
+    kind: decision
+    description: Verify independent browser transport and decision bounds
+    condition: Exact local Host, Origin and CSRF match an active decision with the requested action and resource scope
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: OwnerLocalControlManager
+      - path: src/core/owner-window.ts
+        symbol: prepare
+    tests:
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner control reads reject cross Origin, same-site metadata, duplicate cookie and wrong Host
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner mutation rejects missing CSRF, authority injection, duplicate fields, and oversized body
+  A2:
+    kind: action
+    description: Validate relevant runtime objects or current kingdom budget policy and pin normalized parameters and related state
+    code:
+      - path: src/core/owner-window.ts
+        symbol: prepare
+      - path: src/index.ts
+        symbol: validateExecutionProfile
+      - path: src/core/owner-window.ts
+        symbol: budget.policy
+      - path: src/core/budget.ts
+        symbol: normalizeBudgetPolicyParameters
+    external_call:
+      system: DSH live Session registry and model metadata only for actions requiring runtime validation
+      timeout: Default 10 seconds, at most 30 seconds and bounded by decision expiry
+      failure_behavior: Abort on timeout or revocation, reject unavailable identity or model, never dispatch
+      failure_nodes: [X2]
+      retry:
+        max_attempts: 1
+        backoff: None
+  E3:
+    kind: entry
+    description: Explicitly submit the already prepared operation
+    trigger: POST /api/owner/commit with prepareId and operationId only
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+  D3:
+    kind: decision
+    description: Identify a previously committed identical operation
+    condition: Existing receipt has the same operation ID and prepared content
+    code:
+      - path: src/core/owner-window.ts
+        symbol: receipt
+      - path: src/core/owner-window.ts
+        symbol: commit
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Concurrent identical commits, lost response and post-revoke receipt read perform exactly one mutation
+  D4:
+    kind: decision
+    description: Revalidate authorization, related facts and unresolved work before commit
+    condition: Decision is active and related facts match; topology-sensitive actions require no affected unresolved work, while budget policy updates preserve in-flight work
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Commit revalidates registry, abort and current objects after every asynchronous boundary
+      - path: tests/owner-window.test.ts
+        symbol: An older unreleased Lease blocks topology even when the newest execution is terminal
+      - path: tests/owner-window.test.ts
+        symbol: Retired previous Supervisor is a historical relationship, while its unsettled work still blocks replacement
+  T2:
+    kind: transition
+    description: Atomically apply the exact operation and append its receipt
+    entity: OwnerOperation
+    from: Prepared
+    to: APPLIED
+    trigger: Valid explicit commit, including single-use initialization bootstrap
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/db.ts
+        symbol: withImmediateTransaction
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Receipt write failure rolls back the business object and business event
+      - path: tests/owner-window.test.ts
+        symbol: Bootstrap is one-shot, atomic, concurrent-safe and does not promote to an ordinary management window
+  E4:
+    kind: entry
+    description: Revoke the current window without waiting for ordinary mutation busy
+    trigger: Explicit revoke, expiry, replacement or plugin unload
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: dispose
+      - path: src/core/owner-window.ts
+        symbol: revoke
+  T3:
+    kind: transition
+    description: Record explicit revocation of an active decision in an existing kingdom
+    entity: OwnerDecision
+    from: RECORDED
+    to: REVOKED
+    trigger: Explicit revoke of a still-active existing-kingdom decision
+    code:
+      - path: src/core/owner-window.ts
+        symbol: revoke
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Expiry, replacement and disposal invalidate writing without altering completed receipts
+  G1:
+    kind: safeguard
+    description: Human authority stays separate from Agent and browser identities
+    safeguard_type: authorization
+    guarantee: Tools and old Role cookies cannot mint or expand an OwnerDecision
+    protects: [D1, D2]
+    failure_behavior: Reject with no authority or business writes
+    code:
+      - path: src/core/owner-control.ts
+        symbol: requireOwnerControl
+      - path: src/gui/owner-control.ts
+        symbol: OwnerLocalControlManager
+    tests:
+      - path: tests/v13-owner-direct-ingress.test.ts
+        symbol: canonical command reaches independent Owner HTTP and atomic bootstrap without a role session
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner HTTP uses a separate one-time ticket and cookie with no Role/bearer upgrade
+  G2:
+    kind: safeguard
+    description: Prepared content, exact operation capability and atomic receipt prevent duplicate writes
+    safeguard_type: idempotency
+    guarantee: A successful operation applies once and records honest Owner provenance in the same transaction
+    protects: [T2]
+    failure_behavior: Roll back on failure, reject mismatched replay and query receipts after uncertain responses
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/owner-control.ts
+        symbol: issueOwnerOperationCapability
+      - path: src/gui/owner-ui.ts
+        symbol: rememberPending
+      - path: src/gui/owner-ui.ts
+        symbol: lookupReceipt
+    tests:
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI reload recovers the exact applied operation after a lost response without another commit
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI confirmed stale rejection preserves input and permits a new preview without resubmitting
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI unresolved receipts and replaced decisions retain the original reference and block new work
+      - path: tests/gui-owner-ui-recovery.test.ts
+        symbol: Owner UI does not send a mutation when its pending reference cannot be retained
+      - path: tests/owner-window.test.ts
+        symbol: One-operation Core capability requires instance identity, realm, exact action and complete parameters
+      - path: tests/owner-window.test.ts
+        symbol: Concurrent identical commits, lost response and post-revoke receipt read perform exactly one mutation
+      - path: tests/owner-window.test.ts
+        symbol: Receipt write failure rolls back the business object and business event
+  G3:
+    kind: safeguard
+    description: Recheck lifetime after asynchronous work and before synchronous transaction
+    safeguard_type: authorization
+    guarantee: Revoked or expired decisions cannot finish a new write, and revocation never releases active Leases
+    protects: [D4, A3]
+    failure_behavior: Abort validation, retain unresolved execution state and require new valid preparation
+    code:
+      - path: src/core/owner-window.ts
+        symbol: revoke
+      - path: src/core/owner-window.ts
+        symbol: commit
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Revoke interrupts validation that ignores AbortSignal and prevents writes
+      - path: tests/owner-window.test.ts
+        symbol: Bounded validation timeout never leaves an operation in progress or writes facts
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner revoke bypasses busy preparation, aborts awaiting validation, and prevents later commit
+  X1:
+    kind: outcome
+    description: Activation rejected
+    result: No browser write window
+  X2:
+    kind: outcome
+    description: Preparation or commit rejected
+    result: Preserve input and explain missing authority, changed state or unresolved work
+  X3:
+    kind: outcome
+    description: Prepared preview
+    result: Exact before and after values, affected objects and server-issued IDs
+  X4:
+    kind: outcome
+    description: Operation result
+    result: APPLIED receipt with stable Owner principal and true source channels
+  X5:
+    kind: outcome
+    description: Window no longer writable
+    result: Keep historical decisions, receipts and all active execution facts
+  A3:
+    kind: action
+    description: Invalidate in-memory authority and abort pending validation without releasing any execution lease
+    code:
+      - path: src/core/owner-window.ts
+        symbol: invalidate
+      - path: src/gui/owner-control.ts
+        symbol: invalidate
+  D5:
+    kind: decision
+    description: Only explicit revocation of an active existing-kingdom decision appends a revocation event
+    condition: wasActive is true and kingdomId and ownerId exist during revoke
+    code:
+      - path: src/core/owner-window.ts
+        symbol: revoke
+    tests:
+      - path: tests/owner-window.test.ts
+        symbol: Expiry, replacement and disposal invalidate writing without altering completed receipts
+  E5:
+    kind: entry
+    description: Query an uncertain operation using its original decision reference
+    trigger: GET /api/owner/receipts/:operationId with X-Kingdom-Decision-Id
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: handleOwnerRequest
+  D6:
+    kind: decision
+    description: Reject a replaced window or an expired read grace instead of querying another decision
+    condition: Cookie handle matches the original decisionId and receipt grace has not expired
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: receipt
+    tests:
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner receipt lookup detects a replaced window and never reports the old operation as unrecorded
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner receipt grace survives write expiry but expires server-side after five minutes
+  A4:
+    kind: action
+    description: Read only the original operation receipt without issuing a new write
+    code:
+      - path: src/core/owner-window.ts
+        symbol: receipt
+  D7:
+    kind: decision
+    description: Distinguish an applied receipt from an unresolved result
+    condition: The original prepared operation has a matching committed receipt
+    code:
+      - path: src/core/owner-window.ts
+        symbol: receipt
+      - path: src/gui/owner-ui.ts
+        symbol: "el('lookup').addEventListener"
+    tests:
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner commit pins both IDs and uses receipts for duplicate requests and response-loss lookup
+  G4:
+    kind: safeguard
+    description: Receipt reads stay bound to the original decision and never cause automatic resend
+    safeguard_type: integrity
+    guarantee: Replacing the browser cookie cannot turn another decision lookup into evidence that the old operation never applied
+    protects: [D6, A4]
+    failure_behavior: Show original decision and operation references and retain an unresolved result
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: receipt
+      - path: src/gui/owner-ui.ts
+        symbol: "el('lookup').addEventListener"
+    tests:
+      - path: tests/gui-owner-control.test.ts
+        symbol: owner receipt lookup detects a replaced window and never reports the old operation as unrecorded
+      - path: tests/gui-owner-ui.test.ts
+        symbol: owner UI keeps receipt lookup distinct from commit and never interpolates runtime values into HTML
+  X6:
+    kind: outcome
+    description: Original operation remains unconfirmed
+    result: Preserve original references and do not resend or claim no side effect

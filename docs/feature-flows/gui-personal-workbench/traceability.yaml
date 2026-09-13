@@ -1,0 +1,267 @@
+version: 1
+feature_id: gui.personal-workbench
+title: Personal workbench and task journey
+status: implemented
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: false
+  retry_or_compensation: false
+  security_sensitive: true
+nodes:
+  D4:
+    kind: decision
+    description: Snapshot and control transport are available
+    condition: Current polling reads succeed or enter explicit stale state
+    code:
+      - path: src/gui/console-app.ts
+        symbol: load
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: same revision reconnect and control changes replace stale status without retrying writes
+  A6:
+    kind: action
+    description: Reconcile current transport and control status independently of revision changes
+    code:
+      - path: src/gui/console-app.ts
+        symbol: load
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: same revision reconnect and control changes replace stale status without retrying writes
+  X6:
+    kind: outcome
+    description: Temporarily unavailable snapshot
+    result: Keep draft and read-only polling with write actions disabled
+  E1:
+    kind: entry
+    description: Open or refresh the personal workbench
+    trigger: Existing GUI snapshot request
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbench
+      - path: src/gui/snapshot.ts
+        symbol: buildSnapshot
+  A1:
+    kind: action
+    description: Read canonical governance and runtime facts
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildReadonlySnapshotProjection
+  A2:
+    kind: action
+    description: Derive current responsibility and bounded evidence summaries
+    code:
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+  A7:
+    kind: action
+    description: Read and render scoped costs, soft budget, bounded assembly observations and actual runtime mode
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildWorkbenchCost
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/gui/workbench-ui.ts
+        symbol: renderBudgetCost
+      - path: src/gui/workbench-ui.ts
+        symbol: renderAdditionalRoleCost
+      - path: src/index.ts
+        symbol: costRuntime
+    tests:
+      - path: tests/v14-cost-gui.test.ts
+        symbol: cost projection keeps Worker totals separate and does not allocate shared usage into a task
+      - path: tests/v14-cost-gui.test.ts
+        symbol: cost projection exposes actual runtime mode and bounded assembly bytes without prompt text or invented history tokens
+      - path: tests/v14-cost-gui.test.ts
+        symbol: cost page distinguishes reports, estimates, missing observations and pilot status without claiming savings
+  X1:
+    kind: outcome
+    description: Workbench is a read-only derived view
+    result: Owner decisions, internal work, recovery and partial usage remain distinct
+  E2:
+    kind: entry
+    description: Open task or role details
+    trigger: Explicit GUI selection
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbenchTaskDetail
+      - path: src/gui/workbench-ui.ts
+        symbol: openRoleInspector
+  A3:
+    kind: action
+    description: Read the exact selected task without replacing local edit state
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildTaskDetail
+      - path: src/gui/workbench-ui.ts
+        symbol: preserveWorkbenchView
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: refresh preserves task expansion, edited input, caret, focus and reading anchor
+  X2:
+    kind: outcome
+    description: Complete task reading journey
+    result: Goal, criteria, Claim, Supervisor decision, participants and bounded history are readable
+  E3:
+    kind: entry
+    description: Enter a task goal
+    trigger: Explicit GUI draft input
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: mountWorkbench
+  A4:
+    kind: action
+    description: Edit local draft with existing territory choices
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: mountWorkbench
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft consumption preserves edits made while the command is in flight
+  D1:
+    kind: decision
+    description: Existing role and input requirements allow submission
+    condition: Explicit submit has required fields and the current control projection allows task.create
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+      - path: src/gui/control-contract.ts
+        symbol: GUI_SESSION_COMMANDS
+      - path: src/core/task-service.ts
+        symbol: planTask
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+  X3:
+    kind: outcome
+    description: Draft remains local
+    result: Missing input or authorization is explained without writes or model calls
+  A5:
+    kind: action
+    description: Submit the existing plan command
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+      - path: src/gui/control-contract.ts
+        symbol: GUI_SESSION_COMMANDS
+      - path: src/core/task-service.ts
+        symbol: planTask
+  D2:
+    kind: decision
+    description: Existing server authorization and planning checks pass
+    condition: Current Chancellor principal, valid task title and existing allowed territory pass planTask checks
+    code:
+      - path: src/core/task-service.ts
+        symbol: planTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary
+  D3:
+    kind: decision
+    description: Command returned a successful exact task identity
+    condition: CommandResultView ok is true and task.taskId is present
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+      - path: tests/v12-workbench-console.test.ts
+        symbol: draft rejection or success without task identity preserves input and never resends
+  X4:
+    kind: outcome
+    description: Plan submission failed
+    result: Draft is preserved and uncertain creation is checked before any user retry
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: draft rejection or success without task identity preserves input and never resends
+  T1:
+    kind: transition
+    description: Existing plan transaction creates the task
+    entity: Task
+    from: Absent
+    to: CREATED
+    trigger: Explicit authorized plan submission
+    code:
+      - path: src/core/task-service.ts
+        symbol: planTask
+    tests:
+      - path: tests/gui-v1-vertical-flow.test.ts
+        symbol: v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary
+  X5:
+    kind: outcome
+    description: Open the exact new task
+    result: Created task is selected without automatic assignment or dispatch
+    code:
+      - path: src/gui/console-app.ts
+        symbol: submit
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft consumption preserves edits made while the command is in flight
+  G1:
+    kind: safeguard
+    description: Evidence and human responsibility remain separate
+    safeguard_type: validation
+    guarantee: REVIEW is internal and human acceptance is never inferred
+    protects: [A2]
+    failure_behavior: Show unconfirmed evidence or not recorded acceptance
+    code:
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+    tests:
+      - path: tests/gui-personal-workbench.test.ts
+        symbol: review remains internal and accepted delivery never becomes human acceptance
+      - path: tests/v12-workbench-console.test.ts
+        symbol: task detail separates recovering execution, claim, supervisor decision and human acceptance
+  G2:
+    kind: safeguard
+    description: GUI draft creates no new authority
+    safeguard_type: authorization
+    guarantee: Existing authenticated role and scope checks guard all commands
+    protects: [D1, A5]
+    failure_behavior: Existing stable command rejection with no governance mutation
+    code:
+      - path: src/gui/control-contract.ts
+        symbol: GUI_SESSION_COMMANDS
+      - path: src/core/task-service.ts
+        symbol: planTask
+    tests:
+      - path: tests/gui-v1-command-surface.test.ts
+        symbol: v1 GUI command surface is session-bound, state-safe, replay-safe, and direct-Slash fenced
+      - path: tests/v12-workbench-console.test.ts
+        symbol: successful draft submission selects only the returned canonical task and never dispatches
+  G3:
+    kind: safeguard
+    description: Projection coverage is explicit
+    safeguard_type: observability
+    guarantee: Missing reports and truncated rows never imply complete or zero-cost totals; shared costs are not allocated and assembly bytes do not imply Token savings
+    protects: [A2, A7]
+    failure_behavior: Return coverage counts, unknowns and truncation with partial summaries; keep current runtime mode distinct from historic observations
+    code:
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+    tests:
+      - path: tests/gui-personal-workbench.test.ts
+        symbol: usage totals only complete matching reports and exposes uncovered executions
+      - path: tests/gui-personal-workbench.test.ts
+        symbol: organization display truncation never creates a false owner appointment request
+      - path: tests/v14-cost-gui.test.ts
+        symbol: cost projection keeps Worker totals separate and does not allocate shared usage into a task
+      - path: tests/v14-cost-gui.test.ts
+        symbol: cost projection exposes actual runtime mode and bounded assembly bytes without prompt text or invented history tokens
+  G4:
+    kind: safeguard
+    description: Browsing is read only
+    safeguard_type: audit
+    guarantee: Projection reads leave revision and canonical rows unchanged
+    protects: [A1]
+    failure_behavior: No automatic command or model execution from a page read
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildReadonlySnapshotProjection
+    tests:
+      - path: tests/gui-personal-workbench.test.ts
+        symbol: workbench projection is read only and task history is scoped before its bound

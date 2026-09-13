@@ -18,7 +18,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, RoleBindingRow } from './db.js'
-import { isOwnerControlCapability, requireOwnerControl, type OwnerControlCapability } from './owner-control.js'
+import { requireOwnerControl, type OwnerControlCapability, type OwnerEventSource, type OwnerOperationMatch } from './owner-control.js'
 
 export const ROLE_TYPES = ['OWNER', 'CHANCELLOR', 'SUPERVISOR', 'WORKER'] as const
 export type RoleType = (typeof ROLE_TYPES)[number]
@@ -49,7 +49,7 @@ export interface SessionIdentity {
  * ExecutorFactory 解析执行时**禁止读取** binding.model_name。
  */
 export interface ExecutionProfileV1 {
-  /** subagent provider 名（spawn/fork）。缺省 → 回退全局 workerProvider（global-fallback 证据）。 */
+  /** Requested provider; governed runtime interprets this as an LLM provider. */
   provider?: string
   /** requested model（传给子 agent 的 agentOptions.model）。缺省 → 继承父 Agent（parent-inherited 证据）。 */
   model?: string
@@ -91,7 +91,7 @@ export function parseExecutionProfile(json: string | null): ExecutionProfileV1 |
  * （治理身份 Session 与执行能力 Profile 不混用）。
  */
 export function setExecutionProfile(store: KingdomStore, input: SetExecutionProfileInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'execution-profile', input })
   if (!admin.ok) return admin.message
   const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
   if (binding === null) {
@@ -107,7 +107,7 @@ export function setExecutionProfile(store: KingdomStore, input: SetExecutionProf
     event_id: randomUUID(),
     kingdom_id: input.kingdomId,
     event_type: 'EXECUTION_PROFILE_UPDATED',
-    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
@@ -117,7 +117,7 @@ export function setExecutionProfile(store: KingdomStore, input: SetExecutionProf
       provider: input.profile?.provider ?? null,
       model: input.profile?.model ?? null,
       cleared: input.profile === null,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),
   })
@@ -187,22 +187,25 @@ export function requireAdmin(
   store: KingdomStore,
   kingdomId: string,
   auth?: AdminAuth,
+  operation?: OwnerOperationMatch,
 ): {
   ok: true
   owner: RoleBindingRow | null
   ownerPrincipalId: string | null
   ownerControl: boolean
+  eventSource: OwnerEventSource
 } | { ok: false; message: string } {
   // Owner Control is the only write-capable authentication face. It deliberately
   // does not inspect OWNER.session_id or any runtime caller attribution.
-  if (auth?.ownerControl && isOwnerControlCapability(auth.ownerControl)) {
-    const checked = requireOwnerControl(store, kingdomId, auth.ownerControl)
+  if (auth?.ownerControl) {
+    const checked = requireOwnerControl(store, kingdomId, auth.ownerControl, operation)
     if (!checked.ok) return checked
     return {
       ok: true,
       owner: checked.owner,
       ownerPrincipalId: checked.ownerId,
       ownerControl: true,
+      eventSource: checked.eventSource,
     }
   }
   // Compatibility AdminAuth values are intentionally not interpreted here.
@@ -215,7 +218,7 @@ export function requireAdmin(
 }
 
 export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'role.bind', input })
   if (!admin.ok) return admin.message
   const roleType = input.roleType.trim().toUpperCase()
   if (!ROLE_TYPES.includes(roleType as RoleType)) {
@@ -239,8 +242,9 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
   }
 
   const now = new Date().toISOString()
+  const bindingId = randomUUID()
   store.insertBinding({
-    binding_id: randomUUID(),
+    binding_id: bindingId,
     kingdom_id: input.kingdomId,
     role_type: roleType,
     role_name: roleName,
@@ -263,10 +267,10 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
     event_type: 'ROLE_BOUND',
     // v0.5.2 审计修正：actor = 实际操作者（session-bound 下为可信 OWNER）；
     // declarative 演示模式无可信 principal，保留被操作角色作兼容标注。
-    actor_role: admin.owner ? 'OWNER' : roleType,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
-    target_id: null,
+    target_id: bindingId,
     payload_json: JSON.stringify({
       role_name: roleName,
       role_type: roleType,
@@ -274,7 +278,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
       model_name: modelName,
       agent_name: agentName,
       session_meta: sessionMeta ? JSON.parse(sessionMeta) : null,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: now,
   })
@@ -293,7 +297,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
  *   事件 actor/领地主理）永远可解析；治理操作因缺 ACTIVE 绑定明确报错。
  */
 export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'role.unbind', input })
   if (!admin.ok) return admin.message
   const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
   if (binding === null) {
@@ -317,7 +321,7 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
     kingdom_id: input.kingdomId,
     event_type: 'ROLE_UNBOUND',
     // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被退任的绑定。
-    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
@@ -327,7 +331,7 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
       session_id: binding.session_id,
       reason,
       status: 'RETIRED',
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),
   })
@@ -341,7 +345,7 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
  * - 这是「角色真正属于某一个独立会话」的写入通道。
  */
 export function rebindSession(store: KingdomStore, input: RebindSessionInput, auth?: AdminAuth): string {
-  const admin = requireAdmin(store, input.kingdomId, auth)
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'role.session', input })
   if (!admin.ok) return admin.message
   const binding = resolveBinding(store, input.kingdomId, input.roleType, input.bindingId)
   if (binding === null) {
@@ -384,7 +388,7 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
     kingdom_id: input.kingdomId,
     event_type: 'BINDING_PROFILE_UPDATED',
     // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被改绑的绑定。
-    actor_role: admin.owner ? 'OWNER' : binding.role_type,
+    actor_role: 'OWNER',
     actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
     target_type: 'binding',
     target_id: binding.binding_id,
@@ -395,7 +399,7 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
       model_name: after?.model_name ?? null,
       agent_name: after?.agent_name ?? null,
       session_meta: after?.session_meta ? JSON.parse(after.session_meta) : null,
-      ...(admin.ownerControl ? { source_channel: 'LOCAL_DIRECT_SLASH' } : {}),
+      ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),
   })

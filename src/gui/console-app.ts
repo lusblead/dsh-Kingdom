@@ -1,4 +1,7 @@
 import { readFileSync } from 'node:fs'
+import { CONSOLE_DESIGN_CSS } from './visual-system.js'
+import { WORKBENCH_CSS, WORKBENCH_HTML, WORKBENCH_SCRIPT } from './workbench-ui.js'
+import { KINGDOM_BRAND_SVG, GUI_ICONS, GOVERNANCE_FLOW_HTML, EMPTY_STATE_SVG } from './visual-assets.js'
 
 /**
  * v1.0 interactive Console presentation.
@@ -110,6 +113,7 @@ export const CONSOLE_APP_DEFAULT_COMMANDS = {
   taskCreate: 'plan',
   assign: 'assign',
   start: 'start',
+  reconcile: 'reconcile',
   review: 'review',
   executionPause: 'execution.pause',
   executionResume: 'execution.resume',
@@ -173,7 +177,7 @@ export interface ConsoleCommandEnvelope {
   payload: Record<string, unknown>
 }
 
-export type ConsoleSection = 'overview' | 'organization' | 'tasks' | 'executions' | 'activity' | 'management' | 'ledger'
+export type ConsoleSection = 'today' | 'inbox' | 'map' | 'usage' | 'settings' | 'overview' | 'organization' | 'tasks' | 'executions' | 'activity' | 'management' | 'ledger'
 
 export const CONSOLE_APP_THEMES = [
   { id: 'parchment', label: '羊皮纸王国志', shortLabel: '羊皮' },
@@ -202,6 +206,7 @@ const ACTION_ALIASES: Record<string, string[]> = {
   'task.create': ['task.create', 'plan'],
   assign: ['assign'],
   start: ['start', 'governed-start', 'governed.start'],
+  reconcile: ['reconcile'],
   'review:accept': ['review:accept', 'review'],
   'review:rework': ['review:rework', 'review'],
   'review:fail': ['review:fail', 'review'],
@@ -401,8 +406,8 @@ export function resolveConsoleResourceActionState(
 /** Parse the single-page fragment without rewriting unknown locations. */
 export function parseConsoleFragment(hash: string): ConsoleFragmentState {
   const fragment = hash.replace(/^#/u, '')
-  if (fragment === '' || fragment === 'overview') {
-    return { known: true, section: 'overview', taskId: null }
+  if (fragment === '' || fragment === 'today') {
+    return { known: true, section: 'today', taskId: null }
   }
   if (fragment.startsWith('task=')) {
     try {
@@ -414,7 +419,7 @@ export function parseConsoleFragment(hash: string): ConsoleFragmentState {
       return { known: false, section: 'overview', taskId: null }
     }
   }
-  if (['organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) {
+  if (['today', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) {
     return { known: true, section: fragment as ConsoleSection, taskId: null }
   }
   return { known: false, section: 'overview', taskId: null }
@@ -1401,18 +1406,17 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       .task-territory-chip { grid-column: 1 / -1; max-width: 100%; justify-self: start; }
       .task-composer-shell input { min-width: 0; }
     }
+    __CONSOLE_DESIGN_CSS__
+    __WORKBENCH_CSS__
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#overview">跳到王国总览</a>
+  <a class="skip-link" href="#today">跳到今日工作台</a>
   <div id="console-app" class="console-shell" data-console-app>
     <aside class="realm-sidebar" aria-label="王国侧栏">
       <header class="realm-brand">
         <div class="realm-seal" aria-hidden="true">
-          <svg class="realm-seal-icon" viewBox="0 0 48 52" focusable="false">
-            <path d="M24 2 44 10v16c0 12-8 19-20 24C12 45 4 38 4 26V10z" fill="none" stroke="currentColor" stroke-width="2.5"/>
-            <path d="M15 19h18M18 19v15m12-15v15M13 34h22M20 13h8v8h-8z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          __KINGDOM_BRAND__
         </div>
         <div>
           <h1>Agent Kingdom</h1>
@@ -1420,9 +1424,12 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </div>
       </header>
       <nav id="main-navigation" class="main-nav" aria-label="主导航">
-        <a href="#overview" data-nav-section="overview" aria-current="page">王国地图</a>
-        <a href="#management" data-nav-section="management">管理中心</a>
-        <a href="#ledger" data-nav-section="ledger">王国账本</a>
+        <a href="#today" data-nav-section="today" aria-current="page">__ICON_MANAGEMENT__<span>今日工作台</span></a>
+        <a href="#tasks" data-nav-section="tasks">__ICON_LEDGER__<span>任务</span></a>
+        <a href="#inbox" data-nav-section="inbox">__ICON_MANAGEMENT__<span>待我处理</span></a>
+        <a href="#map" data-nav-section="map">__ICON_MAP__<span>王国地图</span></a>
+        <a href="#usage" data-nav-section="usage">__ICON_LEDGER__<span>用量</span></a>
+        <a href="#settings" data-nav-section="settings">__ICON_MANAGEMENT__<span>设置</span></a>
       </nav>
       <div class="theme-picker" role="group" aria-label="界面风格">
         <span class="theme-picker-label">界面风格</span>
@@ -1458,6 +1465,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </div>
       </header>
 
+      <div class="feedback-stack">
       <div class="status-bar" role="status" aria-live="polite">
         <span id="status-line" class="status-text" data-level="unknown">正在等待宿主能力与王国投影。</span>
       </div>
@@ -1465,6 +1473,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         <summary>技术详情</summary>
         <code id="status-technical-code">UNKNOWN</code>
       </details>
+      </div>
 
       <details class="status-glossary" data-console-page="ledger" hidden>
         <summary>首次查看状态词说明</summary>
@@ -1478,11 +1487,12 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       </details>
 
       <section class="zones" aria-label="王国议政工作区">
-        <section id="overview" data-console-section="overview" data-console-page="overview" class="zone zone-wide council-zone map-page" aria-labelledby="overview-title">
+        __WORKBENCH_HTML__
+        <section id="overview" data-console-section="overview" data-console-page="overview" class="zone zone-wide council-zone map-page" hidden aria-labelledby="overview-title">
           <div class="zone-head sr-only"><div><p class="section-kicker">治理档案 · 组织总览</p><h2 id="overview-title">王国组织谱</h2></div><p id="overview-revision" class="meta"><span>投影版本尚未确认</span> <code class="code-badge">UNKNOWN</code></p></div>
           <div class="council-grid">
             <section class="realm-map" aria-labelledby="realm-map-title">
-              <header class="map-heading"><p class="section-kicker">你的 Agent 王国</p><h2 id="realm-map-title"><span class="map-summary-icon" aria-hidden="true">✦</span>王国地图</h2><p class="map-intro">宰相统筹全局，领地主管承接任务，骑士完成使命。</p></header>
+              <header class="map-heading"><p class="section-kicker">你的 Agent 王国</p><h2 id="realm-map-title"><span class="map-summary-icon" aria-hidden="true">__ICON_MAP__</span>王国地图</h2><p class="map-intro">宰相统筹全局，领地主管承接任务，骑士完成使命。</p></header>
               <nav class="realm-path" aria-label="组织谱详情">
                 <a class="realm-node" href="#organization" data-realm-node="owner"><span>王国所有者</span><strong id="realm-owner-name">人类所有者 · 尚未确认</strong><small>最终治理裁决</small><code class="code-badge">OWNER</code></a>
                 <a class="realm-node" href="#organization" data-realm-node="chancellor"><span>执政官</span><strong id="realm-chancellor-name">尚未投影</strong><small id="realm-chancellor-meta">绑定数量尚未确认 <code class="code-badge">UNKNOWN</code></small><code class="code-badge">CHANCELLOR</code></a>
@@ -1514,7 +1524,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </section>
 
         <section id="ledger" data-console-section="ledger" data-console-page="ledger" class="developer-details ledger-page" hidden aria-labelledby="ledger-title">
-          <header class="page-heading"><p class="section-kicker">独立页面</p><h2 id="ledger-title">王国账本</h2><p>任务、执行、裁决与证据都在这里，需要时再深入查看。</p></header>
+          <header class="page-heading"><p class="section-kicker">治理记录</p><h2 id="ledger-title">__ICON_LEDGER__王国账本</h2><p>任务、执行、裁决与证据都在这里，需要时再深入查看。</p></header>
           <div class="developer-panel">
             <nav class="developer-nav" aria-label="二级详情导航">
               <a href="#organization" data-nav-section="ledger">领地名册</a>
@@ -1570,7 +1580,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       </section>
 
       <section id="management" data-console-section="management" data-console-page="management" class="management-hub management-page" hidden aria-labelledby="management-title">
-        <header class="page-heading"><p class="section-kicker">独立页面</p><h2 id="management-title">管理中心</h2><p>创建任务、主管派发、执行与复核都从这里进入。</p></header>
+        <header class="page-heading"><p class="section-kicker">任务协作</p><h2 id="management-title">__ICON_MANAGEMENT__管理中心</h2><p>创建任务、主管派发、执行与复核都从这里进入。</p></header>
         <div class="management-content">
           <aside class="owner-management" data-owner-onboarding="true" aria-labelledby="owner-management-title">
             <h3 id="owner-management-title">王国根基设置</h3>
@@ -1604,26 +1614,28 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
             </div>
           </div>
         </section>
-        <div class="delegation-guide" aria-label="常用任务流转">
-          <div class="delegation-step"><strong>1 · 交给宰相统筹</strong><span>由宰相会话创建任务、明确目标并选择领地。</span></div>
-          <span class="delegation-arrow" aria-hidden="true">➜</span>
-          <div class="delegation-step"><strong>2 · 领地主管承接</strong><span>对应主管会话接手本领地任务，再决定派给哪位执行者。</span></div>
-        </div>
         <div class="forms" aria-label="操作抽屉">
       <section class="task-composer-card" aria-labelledby="task-composer-title">
-        <div class="task-composer-heading"><div><p class="section-kicker">最常用入口</p><h3 id="task-composer-title">交给宰相规划</h3></div><span>创建后由所属领地主管继续派发</span></div>
+        <div class="task-composer-heading"><div><p class="section-kicker">任务草稿</p><h3 id="task-composer-title">明确目标与验收</h3></div><span>提交后由所属领地主管继续分派</span></div>
         <form id="task-create-form" novalidate>
           <label class="sr-only" for="task-title">任务名称</label>
           <div id="task-composer-shell" class="task-composer-shell">
             <span id="task-territory-chip" class="task-territory-chip" hidden></span>
             <input id="task-title" name="title" required autocomplete="off" aria-autocomplete="list" aria-controls="territory-command-menu" aria-expanded="false" placeholder="写下任务，按 / 选择领地">
-            <select id="task-territory" name="territory_id" hidden aria-hidden="true" tabindex="-1"><option value="">由宿主选择</option></select>
-            <button class="primary task-composer-submit" data-gated-action="task.create" type="submit" disabled>交给宰相</button>
             <div id="territory-command-menu" class="territory-command-menu" role="listbox" aria-label="选择任务所属领地" hidden></div>
           </div>
+          <div class="draft-fields">
+            <div class="field"><label for="task-description">范围与要求</label><textarea id="task-description" name="description" placeholder="写清需要完成的内容、约束及不包含的工作"></textarea></div>
+            <div class="field"><label for="task-acceptance">验收条件</label><textarea id="task-acceptance" name="acceptance_criteria" placeholder="什么结果可以确认完成？需要哪些产物或验证？"></textarea></div>
+            <div class="field"><label for="task-territory">所属领地</label><select id="task-territory" name="territory_id" required><option value="">选择已有领地</option></select><span class="hint">所属领地的主管负责后续分派；浏览器不指定或替代治理身份。</span></div>
+          </div>
+          <p class="hint">草稿保留在本页，不调用模型、不自动派发，也不代表 Owner 授权。提交仍需要合法宰相角色许可。</p>
+          <div class="form-actions"><button class="primary task-composer-submit" data-gated-action="task.create" type="submit" disabled>提交任务草稿</button></div>
           <div class="task-composer-meta"><span id="task-composer-hint">输入任务名称；按 <kbd>/</kbd> 唤出领地。</span><span class="button-reason" data-reason-for="task.create">暂时无法确认（UNKNOWN）</span></div>
         </form>
       </section>
+
+      __GOVERNANCE_FLOW__
 
       <details class="form-card">
         <summary>领地主管接手并派发</summary>
@@ -1646,6 +1658,15 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
             <div class="field field-wide"><label for="start-grant">监督者授予内容 <code>grant_json</code></label><textarea id="start-grant" name="grant_json">{"tool:pwsh":true}</textarea><span class="hint">仅作为宿主输入；宿主会单独核验授予范围与持久执行能力。</span></div>
           </div>
           <div class="form-actions"><button class="primary" data-gated-action="start" data-resource-action="task" type="submit" disabled>开始执行</button><span class="button-reason" data-reason-for="start">暂时无法确认（UNKNOWN）</span></div>
+        </form>
+      </details>
+
+      <details class="form-card">
+        <summary>核对迟到的执行结果</summary>
+        <form id="reconcile-form" novalidate>
+          <div class="field"><label for="reconcile-task">任务</label><select id="reconcile-task" name="task_id" data-task-selector required><option value="">选择任务</option></select></div>
+          <p>执行超出观察时间后，可核对原任务的结果。只保留原运行上下文时才能恢复；不会重新派发任务。</p>
+          <div class="form-actions"><button class="primary" data-gated-action="reconcile" data-resource-action="task" type="submit" disabled>核对执行结果</button><span class="button-reason" data-reason-for="reconcile">暂时无法确认（UNKNOWN）</span></div>
         </form>
       </details>
 
@@ -1697,7 +1718,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     const CHARACTER_SVGS = __CONSOLE_CHARACTER_SVGS__;
     const THEME_CHOICES = __CONSOLE_THEMES__;
     const THEME_STORAGE_KEY = 'dsh-kingdom.console.theme';
-    const state = { capabilities: null, snapshot: null, detail: null, detailTaskId: '', detailEpoch: 0, selectedTaskId: '', selectedExecutionId: '', activeSection: 'overview', navigationHash: null, lastRevision: null, lastLoadedAt: 0, loading: false, commandBusy: false, commandRefreshPending: false, stale: false, requestCounter: 0, territoryChoices: [], selectedTerritoryId: '', territoryCommandIndex: 0, connectorFrame: 0 };
+    const state = { capabilities: null, snapshot: null, detail: null, detailTaskId: '', detailEpoch: 0, selectedTaskId: '', selectedExecutionId: '', activeSection: 'today', taskReturnSection: 'today', selectedRoleId: '', navigationHash: null, lastRevision: null, lastLoadedAt: 0, loading: false, commandBusy: false, commandRefreshPending: false, stale: false, requestCounter: 0, territoryChoices: [], selectedTerritoryId: '', territoryCommandIndex: 0, connectorFrame: 0 };
     const unavailableCharacterAssets = new Set();
     const byId = id => document.getElementById(id);
     const text = value => value === null || value === undefined || value === '' ? 'UNKNOWN' : String(value);
@@ -1732,7 +1753,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         UNKNOWN: '尚未确认', NOT_RUN: '尚未运行', REVIEW: '待审', RECOVERING: '恢复核对中', LEGACY_COMPAT: '兼容执行路径',
         ACTIVE: '可用', INACTIVE: '未启用', EXPIRED: '已过期', REVOKED: '已关闭', FAILED: '已失败',
         OK: '安定', HEALTHY: '安定', STABLE: '安定', ATTENTION: '需要留意', DEGRADED: '需要留意', CRITICAL: '有要务待处置',
-        PLANNED: '已立项', ASSIGNED: '已指派', RUNNING: '进行中', FROZEN: '冻结', DONE: '已完成', ABORTED: '已终止',
+        CREATED: '已建待派发', PLANNED: '已立项', ASSIGNED: '已分派待启动', RUNNING: '进行中', FROZEN: '冻结', DONE: '已完成', ABORTED: '已终止',
         STARTING: '正在启动', PAUSED: '已暂停', COMPLETED: '平台执行已结束', ACCEPT: '接受呈报', REWORK: '要求返工',
         FAIL: '判定失败', HANDOFF: '移交', NONE: '无', GOVERNED_PERSISTENT: '持久治理执行',
         WARNING: '需要留意', INFO: '提示', HIGH: '高', MEDIUM: '中', LOW: '低', PENDING: '待处理'
@@ -1741,6 +1762,8 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     };
     const statusTone = value => {
       const code = text(authoritativeStateValue(value)).trim().toUpperCase();
+      if (code === 'CREATED') return { tone: 'idle', label: '已建待派发', icon: '○', code, priority: 10 };
+      if (code === 'ASSIGNED') return { tone: 'idle', label: '已分派待启动', icon: '○', code, priority: 10 };
       if (['FAILED', 'FAIL', 'ABORTED', 'CRITICAL', 'BLOCKED', 'CONFUSED'].includes(code)) return { tone: 'blocked', label: '异常或阻塞', icon: '!' , code, priority: 60 };
       if (['UNKNOWN', 'NOT_RUN', 'RECOVERING', 'INDETERMINATE', 'ATTENTION', 'DEGRADED'].includes(code)) return { tone: 'unknown', label: '尚未确认', icon: '?', code, priority: 50 };
       if (['REVIEW', 'REWORK', 'REVIEWING', 'PLANNING', 'HANDOFF'].includes(code)) return { tone: 'review', label: '待复核', icon: '◆', code, priority: 40 };
@@ -1770,7 +1793,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       return (labels[code] || '宿主拒绝此动作') + '（' + code + '）';
     };
     const actionDisplay = value => ({
-      'task.create': '新建任务', plan: '新建任务', assign: '指派执行者', start: '开始执行',
+      'task.create': '新建任务', plan: '新建任务', assign: '指派执行者', start: '开始执行', reconcile: '核对执行结果',
       'review:accept': '接受呈报', 'review:rework': '要求返工', 'review:fail': '判定失败', 'review:handoff': '移交', review: '裁决呈报',
       'execution:pause': '暂停', 'execution.pause': '暂停', 'execution:resume': '继续', 'execution.resume': '继续',
       'execution:abort': '终止', 'execution.abort': '终止', 'control.revoke': '关闭本地控制通道'
@@ -1785,6 +1808,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       'task.create': ['task.create', 'plan'],
       assign: ['assign'],
       start: ['start', 'governed-start', 'governed.start'],
+      reconcile: ['reconcile'],
       'review:accept': ['review:accept', 'review'],
       'review:rework': ['review:rework', 'review'],
       'review:fail': ['review:fail', 'review'],
@@ -1946,12 +1970,12 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     const resourceActionsFor = scope => scope === 'task' ? taskResourceActions() : scope === 'execution' ? executionResourceActions() : {};
     const parseFragment = hash => {
       const fragment = String(hash || '').replace(/^#/, '');
-      if (!fragment || fragment === 'overview') return { known: true, section: 'overview', taskId: null };
+      if (!fragment || fragment === 'today') return { known: true, section: 'today', taskId: null };
       if (fragment.indexOf('task=') === 0) { try { const taskId = decodeURIComponent(fragment.slice(5)); return taskId ? { known: true, section: 'tasks', taskId } : { known: false, section: 'overview', taskId: null }; } catch (_) { return { known: false, section: 'overview', taskId: null }; } }
-      if (['organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) return { known: true, section: fragment, taskId: null };
+      if (['today', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) return { known: true, section: fragment, taskId: null };
       return { known: false, section: 'overview', taskId: null };
     };
-    const pageForSection = section => ['organization', 'tasks', 'executions', 'activity', 'ledger'].includes(section) ? 'ledger' : section === 'management' ? 'management' : 'overview';
+    const pageForSection = section => ['organization', 'executions', 'activity', 'ledger'].includes(section) ? 'ledger' : section === 'management' ? 'tasks' : section === 'map' ? 'overview' : section;
     const renderNavigation = () => {
       const activePage = pageForSection(state.activeSection);
       document.querySelectorAll('[data-nav-section]').forEach(link => { if (pageForSection(link.getAttribute('data-nav-section')) === activePage) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
@@ -1962,7 +1986,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     const renderTaskNavigator = () => {
       const parent = clear('task-navigation-list'); if (!parent) return; const tasks = taskItems();
       if (!tasks.length) { addEmpty(parent, '尚无任务；可从“新建任务”开始。'); return; }
-      tasks.slice(0, 200).forEach(task => { const link = document.createElement('a'); const presentation = statusTone(task.status); link.className = 'task-link'; link.href = '#task=' + encodeURIComponent(text(task.taskId)); link.dataset.statusTone = presentation.tone; link.setAttribute('data-task-link', 'true'); link.setAttribute('data-task-id', text(task.taskId)); append(link, 'strong', task.title); const statusNode = append(link, 'span', presentation.label, 'task-status'); statusNode.dataset.statusIcon = presentation.icon; if (text(task.taskId) === state.selectedTaskId) link.setAttribute('aria-current', 'page'); parent.append(link); });
+      tasks.slice(0, 200).forEach(task => { const link = document.createElement('a'); const presentation = statusTone(task.status); link.className = 'task-link'; link.href = '#task=' + encodeURIComponent(text(task.taskId)); link.dataset.statusTone = presentation.tone; link.setAttribute('data-task-link', 'true'); link.setAttribute('data-task-id', text(task.taskId)); link.setAttribute('data-focus-key', 'task-nav:' + task.taskId); append(link, 'strong', task.title); const statusNode = append(link, 'span', presentation.label, 'task-status'); statusNode.dataset.statusIcon = presentation.icon; if (text(task.taskId) === state.selectedTaskId) link.setAttribute('aria-current', 'page'); parent.append(link); });
     };
     const reconcileSelections = () => {
       const previousTaskId = state.selectedTaskId; const parsed = parseFragment(location.hash); const tasks = taskItems();
@@ -2147,6 +2171,11 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         svg.setAttribute('width', '100%');
         svg.setAttribute('height', '100%');
       }
+      // Rebuilt role cards share the page clock, so polling does not restart a gesture.
+      if (svg.style && typeof svg.style.setProperty === 'function') {
+        const motionTime = document.timeline && document.timeline.currentTime;
+        svg.style.setProperty('--kingdom-motion-offset', Number.isFinite(motionTime) ? String(-motionTime / 1000) + 's' : '0s');
+      }
       if (typeof renderRoot.replaceChildren === 'function') renderRoot.replaceChildren(svg);
       image.hidden = false;
       image.dataset.resourceState = 'inline';
@@ -2158,6 +2187,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       const owner = roles.find(item => isActiveRole(item) && String(item.roleType || item.role_type || '').toUpperCase() === 'OWNER');
       return owner ? text(owner.roleName || owner.role_name || owner.name) : (snapshot.kingdom || organizationData.kingdomName ? '人类所有者' : '人类所有者 · 尚未确认');
     };
+    __WORKBENCH_SCRIPT__
     const renderOrgNode = (parent, role, kind, emptyText, snapshot, relatedTasks) => {
       if (!role || !isActiveRole(role)) { append(parent, 'div', emptyText, 'org-empty'); return; }
       const visual = visualFor(snapshot, role, kind);
@@ -2169,7 +2199,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       append(copy, 'strong', work.task ? '当前任务 · ' + text(record(work.task).title) : '当前无已分配任务', 'node-task');
       const statusNode = append(copy, 'span', presentation.label, 'status-pill'); statusNode.dataset.statusIcon = presentation.icon;
       node.append(copy);
-      const details = document.createElement('details'); details.className = 'node-details'; append(details, 'summary', '查看更多'); append(details, 'p', visual.label); const binding = roleBindingRef(role); if (binding) append(details, 'code', '成员绑定 · ' + binding); node.append(details); parent.append(node);
+      const details = document.createElement('details'); details.className = 'node-details'; const binding = roleBindingRef(role); details.setAttribute('data-read-key', 'role-details:' + binding); append(details, 'summary', '查看更多'); append(details, 'p', visual.label); if (binding) append(details, 'code', '成员绑定 · ' + binding); node.append(details); addRoleInspectorButton(copy, binding); parent.append(node);
     };
     const createConnectorPath = (svg, source, target) => {
       if (!svg || typeof document.createElementNS !== 'function') return; const bend = Math.max(18, Math.abs(target.y - source.y) * .44); const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', 'M ' + source.x + ' ' + source.y + ' C ' + source.x + ' ' + (source.y + bend) + ', ' + target.x + ' ' + (target.y - bend) + ', ' + target.x + ' ' + target.y); svg.append(path);
@@ -2196,7 +2226,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
        const chancellor = rolesOf('CHANCELLOR')[0]; const chancellorName = firstRoleName('CHANCELLOR'); const chancellorStatus = stateMeaning(chancellor && (chancellor.status || chancellor.state) || 'UNKNOWN'); const chancellorVisual = chancellor ? visualFor(snapshot, chancellor, 'CHANCELLOR') : { evidence: 'absent', state: 'absent', visualState: null, asset: null, label: '尚未投影', actor: null }; const chancellorWork = taskStatusPresentation(tasks, chancellorVisual.state);
        const query = typeof document.querySelector === 'function' ? selector => document.querySelector(selector) : () => null;
        const chancellorImage = query('.chancellor-card .pixel-sprite'); if (chancellorImage) applyCharacterVisual(chancellorImage, 'CHANCELLOR', chancellorVisual);
-       const chancellorCard = query('.chancellor-card'); if (chancellorCard) { chancellorCard.dataset.stageEvidence = chancellorVisual.evidence; chancellorCard.dataset.animationState = chancellorVisual.visualState || 'absent'; chancellorCard.dataset.statusTone = chancellorWork.presentation.tone; }
+       const chancellorCard = query('.chancellor-card'); if (chancellorCard) { chancellorCard.dataset.stageEvidence = chancellorVisual.evidence; chancellorCard.dataset.animationState = chancellorVisual.visualState || 'absent'; chancellorCard.dataset.statusTone = chancellorWork.presentation.tone; const oldButton = chancellorCard.querySelector('.role-inspect-button'); if (oldButton) oldButton.remove(); addRoleInspectorButton(chancellorCard, roleBindingRef(chancellor)); }
        const chancellorTone = byId('organogram-chancellor-tone'); if (chancellorTone) chancellorTone.dataset.statusIcon = chancellorWork.presentation.icon;
        setText('realm-owner-name', ownerRoleName(snapshot, organizationData)); setText('realm-chancellor-name', chancellorName); setText('organogram-chancellor-name', chancellorName); setText('organogram-chancellor-meta', chancellor ? '中央协调 · ' + chancellorVisual.label : '中央治理连接尚未确认'); setText('organogram-chancellor-task', chancellorWork.task ? '重点任务 · ' + text(record(chancellorWork.task).title) : '当前无治理任务'); setText('organogram-chancellor-tone', chancellorWork.presentation.label); setText('organogram-chancellor-state', chancellor && chancellorVisual.evidence === 'exact' ? stageMeaning(chancellorVisual.state).code : 'UNKNOWN'); setText('realm-chancellor-meta', chancellor ? '在册 · ' + chancellorStatus.label + ' · ' + chancellorVisual.label : '成员状态尚未确认');
       const supervisors = rolesOf('SUPERVISOR'); setText('realm-supervisor-name', supervisors[0] ? text(supervisors[0].roleName || supervisors[0].role_name || supervisors[0].name) : '尚未投影'); setText('realm-supervisor-meta', territories.length ? '领地数量 ' + territories.length : '领地数量尚未确认');
@@ -2259,15 +2289,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       roles.slice(0, 12).forEach(role => { const sessionText = role.sessionBound === true ? '角色会话已绑定' : role.sessionBound === false ? '角色会话未绑定' : '角色会话尚未确认'; addDataRow(parent, roleTitle(role.roleType || role.role_type), text(role.roleName || role.role_name) + ' · ' + sessionText); });
       if (data.rolesTruncated === true || data.territoriesTruncated === true) addEmpty(parent, '组织投影已截断；这里只显示有界摘要。');
     };
-    const renderTaskDetail = (snapshot, detail) => {
-      const parent = clear('task-detail-content'); if (!parent) return; const task = selectedTask(); if (!task) { addEmpty(parent, state.selectedTaskId ? '所选任务暂不可用，状态尚未确认。' : '选择一个任务查看进度；技术证据会保持折叠。'); setLabelWithCode('task-detail-revision', '当前选择尚未确认', 'UNKNOWN'); return; }
-      const trustedDetail = detail && state.detailTaskId === state.selectedTaskId && text(record(detail.task).taskId) === state.selectedTaskId ? detail : null; const sourceTask = trustedDetail ? trustedDetail.task : task; const projectionData = record(record(record(trustedDetail || task).projection).data); const claim = record(projectionData.claim); const execution = record(projectionData.execution);
-      const presentation = statusTone(sourceTask.status || record(projectionData.status).value); const latestClaim = record(sourceTask.latestClaim); const claimSummary = latestClaim.claimedOutcome || claim.outcome || '尚无执行者呈报';
-      const summary = document.createElement('article'); summary.className = 'task-summary-card'; summary.dataset.statusTone = presentation.tone; append(summary, 'h3', sourceTask.title); const statusNode = append(summary, 'span', presentation.label, 'status-pill'); statusNode.dataset.statusIcon = presentation.icon; append(summary, 'p', sourceTask.description || ('当前进展 · ' + text(claimSummary))); parent.append(summary);
-      const technical = document.createElement('details'); technical.className = 'task-technical'; append(technical, 'summary', '展开治理与技术详情'); const technicalBody = document.createElement('div'); technicalBody.className = 'task-technical-body'; addDataRow(technicalBody, '任务编号', sourceTask.taskId); addStateRow(technicalBody, '治理状态 · 治理事实', sourceTask.status || record(projectionData.status).value); addDataRow(technicalBody, '执行者呈报 · 自述证据', claimSummary); addStateRow(technicalBody, '执行状态 · 运行观察', sourceTask.latestExecution ? sourceTask.latestExecution.state : execution.state || 'NONE'); addDataRow(technicalBody, '尝试次数', sourceTask.attemptCount);
-      const actions = normalizeAllowedActions(taskResourceActions()); const actionNames = Object.keys(actions); addDataRow(technicalBody, '宿主动作许可', actionNames.length ? actionNames.map(name => actionDisplay(name) + '：' + (actions[name].executable ? '可以执行' : reasonDisplay(actions[name].disabledReason))).join(' · ') : '尚未确认（UNKNOWN）');
-      const reviews = trustedDetail && Array.isArray(trustedDetail.reviews) ? trustedDetail.reviews : []; if (reviews.length) reviews.slice(-3).forEach(review => addDataRow(technicalBody, '监督者裁决 · 治理事实', stateDisplay(review.decision) + ' · ' + text(review.reason))); else addDataRow(technicalBody, '裁决', '等待执行者呈报；进入待审（REVIEW）后由监督者（SUPERVISOR）决定'); technical.append(technicalBody); parent.append(technical); if (snapshot.revision === undefined || snapshot.revision === null || snapshot.revision === '') setLabelWithCode('task-detail-revision', '最近更新尚未确认', 'UNKNOWN'); else setText('task-detail-revision', '最近更新 · 版本 ' + text(snapshot.revision));
-    };
+    const renderTaskDetail = (snapshot, detail) => renderWorkbenchTaskDetail(snapshot, detail);
      const renderExecutions = snapshot => {
       const parent = clear('execution-content'); if (!parent) return; const executions = executionItems();
       if (!executions.length) { addEmpty(parent, '执行信息尚未确认或尚未运行。'); return; }
@@ -2296,7 +2318,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       if (!items.length) { addEmpty(parent, '当前没有待裁决事项。'); return; }
       items.slice(0, 100).forEach(item => { const row = document.createElement('article'); row.className = 'attention-item'; row.dataset.severity = text(item.severity); const presentation = statusTone(item.severity); const badge = append(row, 'span', presentation.label, 'status-pill'); badge.dataset.statusIcon = presentation.icon; append(row, 'p', text(item.summary)); const technical = document.createElement('details'); technical.className = 'attention-technical'; append(technical, 'summary', '查看证据注脚'); append(technical, 'code', text(record(item.reason).code), 'code-badge'); append(technical, 'div', '实体引用 ' + entityRefText(item.entityRef), 'entity-ref'); append(technical, 'div', sourceRefs(item.sourceRefs), 'source-ref'); row.append(technical); parent.append(row); });
     };
-     const renderSnapshot = snapshot => { state.snapshot = snapshot || {}; reconcileSelections(); renderSelectors(); renderTaskNavigator(); renderNavigation(); renderOverview(state.snapshot); renderOrganization(state.snapshot); renderTaskDetail(state.snapshot, state.detail); renderExecutions(state.snapshot); renderTimeline(state.snapshot); renderAttention(state.snapshot); renderGates(); };
+     const renderSnapshot = snapshot => preserveWorkbenchView(() => { state.snapshot = snapshot || {}; reconcileSelections(); renderSelectors(); renderTaskNavigator(); renderNavigation(); renderOverview(state.snapshot); renderOrganization(state.snapshot); renderTaskDetail(state.snapshot, state.detail); renderExecutions(state.snapshot); renderTimeline(state.snapshot); renderAttention(state.snapshot); renderWorkbench(state.snapshot); renderGates(); });
      const loadDetail = async taskId => {
        const requestedTaskId = String(taskId || ''); const requestEpoch = ++state.detailEpoch;
        if (!requestedTaskId) { state.detail = null; state.detailTaskId = ''; return false; }
@@ -2326,12 +2348,12 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
      const load = async (silent, commandRefresh = false) => {
        if (state.loading) { if (commandRefresh) state.commandRefreshPending = true; return; }
        if (state.commandBusy && !commandRefresh) return; state.loading = true; if (!silent) status('正在读取宿主能力与王国投影。', 'neutral');
-       let controlError = null;
+       const wasStale = state.stale; const previousControlState = state.capabilities && state.capabilities.state; let controlError = null;
        try {
          try { renderCapabilities(await requestJson(CONFIG.endpoints.control)); } catch (error) { controlError = error; renderCapabilities(controlFailureView(error)); }
          const snapshot = await requestJson(CONFIG.endpoints.snapshot); state.snapshot = snapshot || {}; reconcileSelections();
          await loadDetail(state.selectedTaskId);
-         const revision = snapshot.revision === undefined ? null : snapshot.revision; const changed = state.lastRevision === null || revision !== state.lastRevision; state.lastRevision = revision; state.lastLoadedAt = Date.now(); state.stale = false; renderSnapshot(snapshot); const expiresAt = state.capabilities && state.capabilities.expiresAt; setText('capability-expiry', '有效期：' + (expiresAt ? text(expiresAt) : '尚未确认') + ' · 投影版本：' + (revision === null || revision === '' ? '尚未确认' : text(revision))); if (controlError) status('操作通道暂不可用，写动作已禁用；王国投影已刷新。', 'error', text(controlError && (controlError.code || controlError.message))); else if (changed || !silent) status('王国投影已刷新 · ' + new Date(state.lastLoadedAt).toLocaleTimeString(), 'success');
+         const revision = snapshot.revision === undefined ? null : snapshot.revision; const changed = state.lastRevision === null || revision !== state.lastRevision; state.lastRevision = revision; state.lastLoadedAt = Date.now(); state.stale = false; renderSnapshot(snapshot); const expiresAt = state.capabilities && state.capabilities.expiresAt; setText('capability-expiry', '有效期：' + (expiresAt ? text(expiresAt) : '尚未确认') + ' · 投影版本：' + (revision === null || revision === '' ? '尚未确认' : text(revision))); if (controlError) status('操作通道暂不可用，写动作已禁用；王国投影已刷新。', 'error', text(controlError && (controlError.code || controlError.message))); else if (changed || !silent || wasStale || previousControlState !== state.capabilities.state) { if (state.capabilities.state !== 'ACTIVE') status(reasonDisplay(state.capabilities.state) + '；写动作已禁用，王国投影已刷新。', 'error'); else status('王国投影已刷新 · ' + new Date(state.lastLoadedAt).toLocaleTimeString(), 'success'); }
          if (!parseFragment(location.hash).known) status('导航位置未识别，已显示总览；未执行任何写操作。', 'unknown', 'UNKNOWN_NAVIGATION');
        } catch (error) { state.stale = true; const code = text(error && (error.code || error.message)); status('王国投影暂不可用，正在继续读取。', code === 'UNKNOWN' ? 'unknown' : 'error', code + ' · 读取轮询继续；写操作绝不自动重试。'); }
        finally { state.loading = false; renderGates(); if (state.commandRefreshPending && !state.commandBusy) { state.commandRefreshPending = false; void load(false, true); } }
@@ -2340,7 +2362,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
        let gate = actionState(action, ownerOnly, resourceScope); if (gate.executable && action.indexOf('review:') === 0) { const decision = action.slice('review:'.length).toUpperCase(); const decisions = state.capabilities && Array.isArray(state.capabilities.reviewDecisions) ? state.capabilities.reviewDecisions.map(value => String(value).toUpperCase()) : []; if (!decisions.includes(decision)) gate = { executable: false, reason: 'DECISION_NOT_AVAILABLE' }; }
        if (!gate.executable) { status(actionDisplay(action) + '不可执行：' + reasonDisplay(gate.reason), gate.reason === 'UNKNOWN' ? 'unknown' : 'error'); renderGates(); return; }
        state.commandBusy = true; status('正在提交“' + actionDisplay(action) + '”；宿主将重新核验。', 'neutral'); renderGates();
-       try { const result = await postCommand(commandName, payload); if (result && result.ok === false) { status('宿主拒绝“' + actionDisplay(action) + '”（' + text(result.errorCode || 'UNKNOWN') + '）；不会自动重试。', result.errorCode === 'UNKNOWN' ? 'unknown' : 'error'); return; } status('宿主已接收“' + actionDisplay(action) + '”；正在刷新证据。', 'success'); await load(false, true); }
+       try { const result = await postCommand(commandName, payload); if (result && result.ok === false) { status('宿主拒绝“' + actionDisplay(action) + '”（' + text(result.errorCode || 'UNKNOWN') + '）；不会自动重试。', result.errorCode === 'UNKNOWN' ? 'unknown' : 'error'); return; } if (!result || result.ok !== true) { status('宿主未返回明确成功结果；保留输入，不会自动重试。', 'unknown'); return; } status('宿主已接收“' + actionDisplay(action) + '”；正在刷新证据。', 'success'); await load(false, true); if (action === 'task.create') { const createdId = record(result.task).taskId; if (typeof createdId === 'string' && createdId) { selectTask(createdId, true); const consumed = consumeSubmittedDraft(payload); const draft = byId('task-draft-panel'); if (draft && consumed) { draft.open = false; readerDetails.set(draft.id, false); } status(consumed ? '任务草稿已提交；正在查看新任务，尚未派发执行。' : '任务已创建；已保留提交期间修改的草稿。', 'success'); } else status('宿主返回成功但缺少新任务编号；保留草稿，请核对任务列表，勿重复提交。', 'unknown'); } }
        catch (error) { status('“' + actionDisplay(action) + '”结果未确认（' + text(error && (error.code || error.message)) + '）；不会自动重试。', error && error.code === 'UNKNOWN' ? 'unknown' : 'error'); }
        finally { state.commandBusy = false; renderGates(); if (state.commandRefreshPending && !state.loading) { state.commandRefreshPending = false; void load(false, true); } }
      };
@@ -2360,10 +2382,11 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       }
       byId('refresh-button').addEventListener('click', () => { void load(false); });
       byId('revoke-button').addEventListener('click', () => { void revokeControl(); });
-     byId('task-create-form').addEventListener('submit', event => { event.preventDefault(); const form = event.currentTarget; const title = composerTaskTitle(); if (!title) { status('请先写下任务名称（INVALID_INPUT）。', 'error'); return; } closeTerritoryCommandMenu(); void submit(CONFIG.commands.taskCreate, { title, territory_id: formValue(form, 'territory_id') }, 'task.create', false); });
+     byId('task-create-form').addEventListener('submit', event => { event.preventDefault(); const form = event.currentTarget; const title = composerTaskTitle(); const territory = formValue(form, 'territory_id'); if (!title || !territory || !state.territoryChoices.some(item => item.value === territory)) { status('请填写目标并选择一个已有领地，再提交草稿。', 'error'); return; } closeTerritoryCommandMenu(); void submit(CONFIG.commands.taskCreate, { title, description: formValue(form, 'description'), acceptance_criteria: formValue(form, 'acceptance_criteria'), territory_id: territory }, 'task.create', false); });
     byId('assign-form').addEventListener('submit', event => { event.preventDefault(); const form = event.currentTarget; void submit(CONFIG.commands.assign, { task_id: formValue(form, 'task_id'), worker_binding_id: formValue(form, 'worker_binding_id') }, 'assign', false, 'task'); });
     byId('start-form').addEventListener('submit', event => { event.preventDefault(); const form = event.currentTarget; const grant = formValue(form, 'grant_json'); try { JSON.parse(grant); } catch (_) { status('监督者授予内容无法解析（INVALID_INPUT）。', 'error'); return; } void submit(CONFIG.commands.start, { task_id: formValue(form, 'task_id'), grant_json: grant, sandbox_mode: formValue(form, 'sandbox_mode') }, 'start', false, 'task'); });
     byId('review-form').addEventListener('submit', event => { event.preventDefault(); });
+    byId('reconcile-form').addEventListener('submit', event => { event.preventDefault(); void submit(CONFIG.commands.reconcile, { task_id: formValue(event.currentTarget, 'task_id') }, 'reconcile', false, 'task'); });
     document.querySelectorAll('[data-review-decision]').forEach(button => { button.addEventListener('click', () => { const form = byId('review-form'); const decision = String(button.getAttribute('data-review-decision') || '').toUpperCase(); const target = formValue(form, 'to_binding_id'); if (decision === 'HANDOFF' && !target) { status('移交前必须选择目标执行者绑定（INVALID_INPUT · to_binding_id）。', 'error'); return; } const payload = { task_id: formValue(form, 'task_id'), decision, reason: formValue(form, 'reason') }; if (decision === 'HANDOFF') payload.to_binding_id = target; void submit(CONFIG.commands.review, payload, 'review:' + decision.toLowerCase(), false, 'task'); }); });
     document.querySelectorAll('[data-task-selector]').forEach(select => { select.addEventListener('change', event => { selectTask(event.currentTarget.value, true); }); });
     byId('execution-control-id').addEventListener('change', event => { state.selectedExecutionId = event.currentTarget.value; renderExecutions(state.snapshot || {}); renderGates(); });
@@ -2374,7 +2397,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
      if (typeof globalThis.ResizeObserver === 'function') { const organogram = byId('kingdom-organogram'); if (organogram) { const connectorObserver = new globalThis.ResizeObserver(scheduleOrganogramConnectors); connectorObserver.observe(organogram); } }
      setInterval(() => { if (state.lastLoadedAt && Date.now() - state.lastLoadedAt > CONFIG.endpoints.staleAfterMs) { state.stale = true; status('投影可能已过时 · 最近可信版本 ' + text(state.lastRevision) + ' · 请重新读取以核对。', 'stale', 'STALE'); renderGates(); } }, 1000);
     setInterval(() => { void load(true); }, CONFIG.endpoints.pollIntervalMs);
-    initializeTheme(); applyNavigationFromLocation(false); void load(false);
+    mountWorkbench(); initializeTheme(); applyNavigationFromLocation(false); void load(false);
   })();
   </script>
 </body>
@@ -2388,7 +2411,21 @@ export function renderConsoleApp(options: ConsoleCommandOptions = {}): string {
   const characterAssets = JSON.stringify(GUI_CHARACTER_ASSETS).replace(/</gu, '\\u003c')
   const characterSvgs = JSON.stringify(GUI_CHARACTER_ASSET_SVGS).replace(/</gu, '\\u003c')
   const themes = JSON.stringify(CONSOLE_APP_THEMES).replace(/</gu, '\\u003c')
+  // These SVGs are compiled, static presentation assets. No snapshot or Host
+  // content enters CSS/HTML here; business text keeps its textContent boundary.
+  const svgMask = (svg: string) => `url("data:image/svg+xml,${encodeURIComponent(svg)}")`
+  const iconTokens = Object.entries(GUI_ICONS).map(([name, svg]) => `--icon-${name}:${svgMask(svg)};`).join('')
+  const designCss = `${CONSOLE_DESIGN_CSS}\n:root{${iconTokens}--empty-illustration-bg:${svgMask(EMPTY_STATE_SVG)};}`
   return CONSOLE_APP_TEMPLATE
+    .replace('__CONSOLE_DESIGN_CSS__', designCss)
+    .replace('__WORKBENCH_CSS__', WORKBENCH_CSS)
+    .replace('__WORKBENCH_HTML__', WORKBENCH_HTML)
+    .replace('__WORKBENCH_SCRIPT__', WORKBENCH_SCRIPT)
+    .replace('__KINGDOM_BRAND__', KINGDOM_BRAND_SVG)
+    .replaceAll('__ICON_MAP__', GUI_ICONS.map)
+    .replaceAll('__ICON_MANAGEMENT__', GUI_ICONS.management)
+    .replaceAll('__ICON_LEDGER__', GUI_ICONS.ledger)
+    .replace('__GOVERNANCE_FLOW__', GOVERNANCE_FLOW_HTML)
     .replace('__CONSOLE_CONFIG__', config)
     .replace('__CONSOLE_CHARACTER_ASSETS__', characterAssets)
     .replace('__CONSOLE_CHARACTER_SVGS__', characterSvgs)

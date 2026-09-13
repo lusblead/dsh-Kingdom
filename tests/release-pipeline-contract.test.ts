@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join, resolve, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
@@ -7,6 +10,48 @@ const sourcePath = fileURLToPath(new URL('../scripts/release.ps1', import.meta.u
 
 async function releaseSource(): Promise<string> {
   return readFile(sourcePath, 'utf8')
+}
+
+for (const failedStep of ['build', 'test'] as const) {
+  test(`release rejects a failed ${failedStep} process before packing even with a passing summary`, { skip: process.platform !== 'win32' }, async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'kingdom-release-gate-'))
+    try {
+      await mkdir(join(fixture, 'scripts'))
+      await writeFile(join(fixture, 'scripts', 'release.ps1'), await releaseSource())
+      await writeFile(join(fixture, 'package.json'), '{"version":"2.0.0"}')
+      await writeFile(join(fixture, 'check.ps1'), `
+$ErrorActionPreference = 'Stop'
+$global:compileCalls = 0
+function global:git { $global:LASTEXITCODE = 0 }
+function global:npx {
+  $global:compileCalls++
+  $global:LASTEXITCODE = $(if ('${failedStep}' -eq 'build' -and $global:compileCalls -eq 2) { 1 } else { 0 })
+}
+function global:node {
+  Write-Output 'ℹ pass 1'
+  Write-Output 'ℹ fail 0'
+  $global:LASTEXITCODE = $(if ('${failedStep}' -eq 'test') { 1 } else { 0 })
+}
+function global:npm { throw 'UNEXPECTED_PACK' }
+try {
+  & (Join-Path $PSScriptRoot 'scripts/release.ps1') -Version '2.0.0' -DryRun
+  throw 'UNEXPECTED_RELEASE_SUCCESS'
+} catch {
+  if ($_.Exception.Message -notlike 'release aborted at: P2*') { Write-Error $_; exit 2 }
+  Write-Output 'EXPECTED_P2_REJECTION'
+  exit 0
+}
+`)
+      const child = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-File', join(fixture, 'check.ps1')], { encoding: 'utf8', windowsHide: true, timeout: 15_000 })
+      assert.equal(child.status, 0, child.stdout + child.stderr)
+      assert.match(child.stdout, /EXPECTED_P2_REJECTION/u)
+      assert.doesNotMatch(child.stdout + child.stderr, /UNEXPECTED_PACK|UNEXPECTED_RELEASE_SUCCESS/u)
+    } finally {
+      const owned = relative(resolve(tmpdir()), resolve(fixture))
+      assert.ok(owned.startsWith('kingdom-release-gate-') && !owned.includes('..'))
+      await rm(fixture, { recursive: true, force: true })
+    }
+  })
 }
 
 function fromMarker(source: string, marker: string): string {

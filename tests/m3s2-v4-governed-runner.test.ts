@@ -7,6 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { KingdomStore } from '../lib/core/db.js'
 import { runGovernedTask } from '../lib/worker/governed-executor.js'
 import { resolveGovernedWorkerRuntime } from '../lib/worker/executor-factory.js'
@@ -14,6 +15,71 @@ import { DshRuntimeAdapter } from '../lib/adapter/dsh-backend.js'
 import type { CleanupReceipt } from '../lib/dispatch/service.js'
 
 const NOW = () => new Date().toISOString()
+
+test('governed start authority changes during preflight or materialization never reach dispatch', async () => {
+  for (const phase of ['preflight', 'materialize'] as const) {
+    const { store, kingdomId, worker, sup, terrA, taskId } = makeEnv()
+    try {
+      store.setKingdomCapabilityCeiling(kingdomId, REQ)
+      const trace = makeAdapterWithAutoTerminal(), original = trace.adapter[phase].bind(trace.adapter)
+      let authorized = true
+      trace.adapter[phase] = async (request, context) => { const result = await original(request, context); authorized = false; return result }
+      const result = await runGovernedTask({ store, adapter: trace.adapter, kingdomId, workerBindingId: worker, territoryId: terrA,
+        cwd: 'C:/terr-a', taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'read-only',
+        stillAuthorized: () => authorized, pollIntervalMs: 1, maxPolls: 1 })
+      assert.equal(result.ok, false); if (!result.ok) assert.match(result.reason, /AUTHORITY_CHANGED/)
+      assert.equal(trace.dispatchCalls(), 0); assert.equal(store.listExecutions(taskId).length, 0)
+      assert.equal(store.listLeases(kingdomId)[0]?.state, 'RELEASED')
+      if (phase === 'materialize') assert.equal(trace.cleanupRequests().length, 1)
+      else assert.equal(trace.materializeRequests().length, 0)
+    } finally { store.close() }
+  }
+})
+
+test('1.1 governed payload: real SHA-256 distinguishes equal-length prompts', async () => {
+  const samples: { text: string; hash: string }[] = []
+  for (const title of ['甲', '乙']) {
+    const { store, kingdomId, worker, sup, terrA, taskId } = makeEnv()
+    store.db.prepare('UPDATE tasks SET title = ? WHERE task_id = ?').run(title, taskId)
+    store.setKingdomCapabilityCeiling(kingdomId, REQ)
+    const { adapter } = makeAdapterWithAutoTerminal()
+    let text = ''
+    const dispatch = adapter.dispatch.bind(adapter)
+    adapter.dispatch = input => { text = input.text; return dispatch(input) }
+    const result = await runGovernedTask({ store, adapter, kingdomId, workerBindingId: worker, territoryId: terrA,
+      cwd: 'C:/terr-a', taskId, attemptNo: 1, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'read-only' })
+    assert.equal(result.ok, true)
+    if (!result.ok) continue
+    const hash = store.getDispatch(result.dispatchId)!.dispatch_payload_hash
+    assert.equal(hash, `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`)
+    assert.match(hash, /^sha256:[a-f0-9]{64}$/)
+    samples.push({ text, hash })
+  }
+  assert.equal(samples[0].text.length, samples[1].text.length)
+  assert.notEqual(samples[0].hash, samples[1].hash)
+})
+
+test('1.1 governed REWORK dispatch uses exact previous Claim and review despite unrelated recent events', async () => {
+  const { store, kingdomId, worker, sup, terrA, taskId } = makeEnv()
+  store.setKingdomCapabilityCeiling(kingdomId, REQ)
+  store.insertWorkerResult({ result_id: 'claim-one', task_id: taskId, attempt_no: 1, worker_binding_id: worker,
+    session_id: null, outcome: 'COMPLETED', result_json: JSON.stringify({ summary: '前次 Claim 仍缺验收证据' }), created_at: NOW() })
+  const event = { kingdom_id: kingdomId, event_type: 'TASK_REWORK_REQUESTED', actor_role: 'SUPERVISOR', actor_id: sup,
+    target_type: 'task', target_id: taskId, created_at: NOW() }
+  store.appendEvent({ ...event, event_id: 'review-one', payload_json: JSON.stringify({ reviewed_attempt_no: 1, reason: '补上导出功能的实际验证' }) })
+  for (let i = 0; i < 210; i++) store.appendEvent({ ...event, event_id: `unrelated-${i}`, target_id: 'other-task', payload_json: '{}' })
+  store.appendEvent({ ...event, event_id: 'wrong-attempt', payload_json: JSON.stringify({ reviewed_attempt_no: 9, reason: '不可借用的理由' }) })
+  const { adapter } = makeAdapterWithAutoTerminal()
+  let text = ''
+  const dispatch = adapter.dispatch.bind(adapter)
+  adapter.dispatch = input => { text = input.text; return dispatch(input) }
+  const result = await runGovernedTask({ store, adapter, kingdomId, workerBindingId: worker, territoryId: terrA,
+    cwd: 'C:/terr-a', taskId, attemptNo: 2, supervisorBindingId: sup, grant: GRANT, requirementJson: REQ, sandboxMode: 'read-only' })
+  assert.equal(result.ok, true)
+  assert.match(text, /前次 Claim 仍缺验收证据/)
+  assert.match(text, /补上导出功能的实际验证/)
+  assert.doesNotMatch(text, /不可借用的理由/)
+})
 
 /** Worker 执行配置（Owner CLOSURE A 的权威来源；缺省给合法 model 使 happy path 可用）。 */
 const WORKER_PROFILE = JSON.stringify({ provider: 'spawn', model: 'deepseek-v4-pro' })

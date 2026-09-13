@@ -5,9 +5,9 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
-[![DSH](https://img.shields.io/badge/DSH-0.1.0--rc.5-orange)](#1-前置要求)
+[![DSH](https://img.shields.io/badge/DSH-0.1.5--rc-orange)](#1-前置要求)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#1-前置要求)
 
 </div>
@@ -15,6 +15,8 @@
 ---
 
 ## 这是什么？
+
+2.0 提供围绕任务和交付的个人工作台、独立人类管理窗口、按需小团队协作、用量与软预算。查看 [2.0 使用指南](docs/V2.0-USER-GUIDE.md) 和 [版本说明及验证范围](docs/V2.0-RELEASE-NOTES.md)。默认单执行者；工具按需展示关闭，协作须明确采纳。
 
 **dsh-Kingdom 是一个 DeepSeek Harness（DSH）插件**：产品目标是在不另行部署外部服务、独立数据库或单独 GUI 前端的前提下，在 DSH 中**创建并运行一个属于自己的最小王国**——
 
@@ -59,24 +61,24 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 1. 前置要求
 
-- **DeepSeek Harness（dsh）** ≥ `0.1.0-rc.5`
+- **DeepSeek Harness（dsh）** `0.1.5-rc` 系列；本版验证 CLI `0.1.5-rc.1` 和主要组件 `0.1.5-rc.2`，旧宿主请继续使用对应旧版插件
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
-### 2. 安装 v1.0.0
+### 2. 安装 v2.0.0
 
 **方式 A：npm**
 
 ```bash
-dsh plugin --profile web add dsh-kingdom
+dsh plugin --profile web add dsh-kingdom@2.0.0 --registry=https://registry.npmjs.org
 ```
 
 **方式 B：从 GitHub Releases 下载 tgz**
 
-从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-1.0.0.tgz`，然后：
+从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-2.0.0.tgz`，然后：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-1.0.0.tgz
+dsh plugin --profile web add ./dsh-kingdom-2.0.0.tgz
 ```
 
 内置 GUI 随 `lib/**` 包含在 tgz 中，不需要额外 GUI zip：
@@ -86,16 +88,16 @@ dsh plugin --profile web add ./dsh-kingdom-1.0.0.tgz
 /kingdom status    # 也可以从 DSH 会话查看王国真实状态
 ```
 
-Owner 是本机人类操作者，不是 Agent 或 Session。Owner 专属写入必须由用户直接键入
-exact `/kingdom` Slash；`OWNER.session_id` 永远保持 `null`。Chancellor、Supervisor、
+Owner 是本机人类操作者，不是 Agent 或 Session。管理操作可由用户直接键入
+exact `/kingdom` Slash，或从 `/kingdom owner.gui` 准确激活的独立短时管理窗口完成；`OWNER.session_id` 永远保持 `null`。Chancellor、Supervisor、
 Worker 才使用真实 DSH caller session 的会话绑定（`session-bound`）角色平面；历史
 `declarative / local-demo` 语义不能解锁产品写入。
 
 ### 3. 用 GUI 完成最小治理闭环
 
-1. 先由人类 Owner direct `/kingdom` Slash 完成初始化、能力上限、领地、角色/会话与 Worker 执行方案配置。
+1. 先由人类通过 direct `/kingdom` Slash 或准确激活的人类管理窗口完成初始化、能力上限、领地、角色/会话与 Worker 执行方案配置；具体步骤见 [首次使用](docs/V2.0-USER-GUIDE.md#第一次使用)。
 2. 在本地 DSH 会话直接键入 exact `/kingdom gui`；若本机浏览器完成带 ticket 的导航，一次性入口兑换后会重定向到干净的 `/console`。若本机打开请求失败，控制会话虽已激活，但命令只显示不含 ticket 的干净 `/console` 参考地址；该地址不能完成一次性兑换，不要手工拼接或复用启动值，直接重新执行 `/kingdom gui`。
-3. GUI 只用于会话绑定的日常操作与只读观察：Chancellor 会话规划任务；任务领地的 Supervisor 会话负责指派、选择 Host 提供的沙箱模式、启动与审查。切换职权时要从对应真实 DSH 会话重新激活，不能由浏览器自报身份。
+3. 日常工作台用于会话绑定操作与只读观察：Chancellor 会话规划任务；任务领地的 Supervisor 会话负责指派、选择 Host 提供的沙箱模式、启动与审查。设置页可进入独立人类管理页面。切换角色职权时要从对应真实 DSH 会话重新激活，不能由浏览器自报身份。
 4. Worker 输出只会进入待审状态 `REVIEW`。Supervisor 选择接受 `ACCEPT` 后才进入 `DONE`；返工 `REWORK` 回到 `RUNNING` 并保留同一 Assignment，判定失败 `FAIL` 进入 `FAILED`。不用时执行 `/kingdom gui stop` 撤销控制会话并关闭本地 server。
 
 Owner 专属 JSON Slash 命令只接受单个 object envelope；未知字段、额外 token、重复字段和
@@ -198,7 +200,8 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 0.5.x | **领地删除**（拒绝优先 + force 级联 + 事件留痕）、GUI 删除控制、市场收录 | ✅ 已发布 |
 | 0.8.0 | Persistent Governed Worker、Capability/Lease/Dispatch/Recovery | ✅ 已发布 |
 | 0.9.0-alpha.1 | 内置可操作 GUI 最小闭环 | 本地源码阶段，尚未发布 |
-| 1.0.0 | 王国地图、管理中心、王国账本、移交、沙箱与诚实的执行控制投影 | ✅ 当前版本 |
+| 1.0.0 | 王国地图、管理中心、王国账本、移交、沙箱与诚实的执行控制投影 | ✅ 已发布 |
+| 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 当前版本；收益测量见版本说明 |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 
@@ -206,19 +209,23 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 
 ## 📖 文档
 
-- [v1.0 GUI 快速开始](docs/v1.0/GUI_QUICK_START.md) — 王国地图、管理中心、王国账本、任务→执行→审查、Authority 与恢复
+- [2.0 使用指南](docs/V2.0-USER-GUIDE.md) — 安装、首次配置、日常任务、协作与恢复
+- [2.0 版本说明](docs/V2.0-RELEASE-NOTES.md) — 新功能、修复及实际验证范围
+- [v1.0 GUI 快速开始](docs/v1.0/GUI_QUICK_START.md) — 历史版本参考
 - [LICENSE](LICENSE) — AGPL-3.0-or-later
 
 ## 🤝 参与贡献
 
-欢迎提交 Issue / PR。开发环境需要 DSH checkout：
+欢迎提交 Issue / PR。克隆源码后安装锁定依赖并构建；单元测试使用隔离夹具，不读取个人数据库或调用付费模型：
 
 ```bash
-DSH_CHECKOUT=<checkout> bash scripts/build.sh   # 或手动 tsc
-node scripts/p2-smoke.mjs                        # Phase 2 自测（81 断言）
-node scripts/p3-smoke.mjs                        # Phase 3 自测（113 断言）
-node scripts/hotplug-audit.mjs                   # 热插拔审计（27 断言）
-npm pack                                         # 产出可分发 tgz
+npm ci --registry=https://registry.npmjs.org
+npm run typecheck
+npm test
+node scripts/p2-smoke.mjs        # 当前治理与恢复测试
+node scripts/p3-smoke.mjs        # 当前 GUI 与人类管理窗口测试
+node scripts/hotplug-audit.mjs   # 服务释放、撤销与恢复测试
+npm pack                       # 从当前源码重新构建并打包
 ```
 
 ## 📜 许可证

@@ -32,7 +32,14 @@ import { hostname } from 'node:os'
 import { KingdomManager } from './core/kingdom.js'
 import { DshRuntimeAdapter } from './adapter/dsh-backend.js'
 import { runGovernedTask } from './worker/governed-executor.js'
-import { settleAndRelease } from './dispatch/service.js'
+import { advanceCollaboration, type AdvanceCollaborationInput } from './worker/collaboration.js'
+import { proposeCollaborationPlan, type ProposeCollaborationPlanInput } from './core/collaboration.js'
+import { settleAndRelease, reconcileGovernedDispatch, discardGovernedRecoveryContexts } from './dispatch/service.js'
+import { submitGovernedClaim } from './core/governed-claim.js'
+import { recordDispatchUsage } from './core/usage.js'
+import { observeDshDispatchUsage } from './adapter/dsh-usage.js'
+import { ToolDisclosureRuntime, DISCOVERY_TOOL_NAME, type ToolDisclosureConfig } from './capability/tool-disclosure.js'
+import { installRuntimeCostObservers, type RuntimeCostHost } from './runtime-cost-observer.js'
 import { setCapabilityCeiling } from './capability/admin.js'
 import {
   bindRole,
@@ -86,6 +93,8 @@ import {
   parseStrictJsonObject,
 } from './gui/control-contract.js'
 import { LOCAL_CONTROL_LAUNCH_PATH, LocalControlManager } from './gui/local-control.js'
+import { OwnerLocalControlManager } from './gui/owner-control.js'
+import { OwnerDecisionController, type OwnerDecisionInput } from './core/owner-window.js'
 import type { SubagentsLike } from './worker/dsh-subagent.js'
 import { resolveWorkerExecution } from './worker/executor-factory.js'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
@@ -107,6 +116,7 @@ export const name = 'dsh-kingdom'
 export const inject = ['tools', 'commands']
 
 export interface Config {
+  toolDisclosure?: ToolDisclosureConfig
   kingdomName: string
   ownerName: string
   workerProvider: string
@@ -124,6 +134,7 @@ export interface Config {
  * functions are not Config, HTTP, GUI payload, or persisted-state inputs.
  */
 export interface ApplyDependencies {
+  governedPolling?: { intervalMs: number; maxPolls: number }
   openLocalConsole?: (url: string) => boolean
   loadS4Policy?: () => Promise<{
     sandboxPolicy: { setSandboxMode(session: unknown, mode: string): void } | null
@@ -316,6 +327,13 @@ export function validateLiveDirectSession(
 }
 
 export const Config = z.object({
+  toolDisclosure: z.object({
+    mode: z.union(['off', 'pilot'] as const).default('off'),
+    residentTools: z.array(z.string()).default([]),
+    phaseTools: z.array(z.string()).default([]),
+    maxResults: z.number().default(3),
+    maxResultBytes: z.number().default(12000),
+  }).default({ mode: 'off', residentTools: [], phaseTools: [], maxResults: 3, maxResultBytes: 12000 }),
   kingdomName: z.string().default('My Kingdom'),
   ownerName: z.string().default(''),
   /** Worker 执行用的 subagent provider（dsh base bundle 默认注册 spawn / fork）。 */
@@ -325,7 +343,7 @@ export const Config = z.object({
    * 设为非零值即启用，只绑定 127.0.0.1。
    */
   guiPort: z.number().default(0),
-  /** 可选 bearer token；设置后 GUI 所有请求都要带 Authorization 头。 */
+  /** Role GUI 可选 bearer；独立 Owner 路由使用其直接激活的短期凭据，不升级 Role 权限。 */
   guiToken: z.string().default(''),
   /** CORS 允许的 Origin 列表；默认放开（服务只绑本机回环）。 */
   guiAllowOrigins: z.array(z.string()).default(['*']),
@@ -528,6 +546,20 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   // 卸载/重载时关闭 SQLite 连接（disposer 由 fiber 自动收集执行）
   ctx.effect(() => () => manager.close())
   const store = manager.storeHandle
+  const disclosure = new ToolDisclosureRuntime(config.toolDisclosure ?? { mode: 'off' })
+  ctx.effect(() => () => disclosure.dispose())
+  const costObserver = installRuntimeCostObservers(ctx as unknown as RuntimeCostHost, store, {
+    runtimeInstanceRef: `dsh-${hostname()}`, mode: disclosure.config.mode, disclosureMeta: assembly => disclosure.metadata(assembly),
+  })
+  ctx.effect(() => () => costObserver.dispose())
+  const costRuntime = { toolDisclosureMode: disclosure.config.mode, observerAvailable: costObserver.available }
+  if (disclosure.config.mode === 'pilot') ctx.effect(() => ctx.tools.register(defineTool({
+    name: DISCOVERY_TOOL_NAME,
+    description: 'Find currently granted tools by a short name or purpose query. Matching native schemas become visible on the next step; discovery grants no permission.',
+    parameters: { query: { type: 'string', required: true, description: 'A short exact tool name or purpose; at most 160 characters.' } },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }] },
+    async execute(args: { query: string }, exec: { agent?: unknown; signal?: AbortSignal }) { return JSON.stringify(disclosure.find(args, exec)) },
+  })), 'dsh-kingdom: authorized tool discovery pilot')
 
   const requireKingdom = (): string | null => {
     const kingdom = store.getDefaultKingdom()
@@ -666,7 +698,17 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
    */
   type GovernedStartCaller =
     | { kind: 'tool'; execution: KingdomToolExecutionLike }
-    | { kind: 'gui'; principal: Principal; agent: unknown }
+    | { kind: 'gui'; principal: Principal; agent: unknown; signal?: { readonly aborted: boolean } }
+
+  const collectDispatchUsage = async (dispatchId: string, authorized: () => boolean = () => true): Promise<void> => {
+    const dispatch = store.getDispatch(dispatchId)
+    if (!dispatch?.runtime_dispatch_ref) return
+    // Resolve the persisted exact reference against Runtime-owned agents; do not mint a branded SessionId.
+    const agent = ctx.get('agents')?.list().find(candidate => candidate.id === dispatch.session_ref)
+    const observed = await observeDshDispatchUsage(agent?.session, dispatch.runtime_dispatch_ref)
+    if (!authorized()) return
+    recordDispatchUsage(store, dispatchId, observed)
+  }
 
   const runGovernedStart = async (
     args: { taskId: string; grantJson: string; sandboxMode?: string },
@@ -726,6 +768,22 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     if (!territory) return '错误：任务领地缺失。'
     const worker = loadedTask.assigned_binding_id
     if (!worker) return '错误：任务未指派 Worker。'
+    const initialCeiling = store.getKingdomCapabilityCeiling(kingdomId)
+    const initialProfile = store.getBindingById(worker)?.execution_profile_json
+    const stillAuthorized = (): boolean => {
+      if (caller.kind === 'gui' && caller.signal?.aborted) return false
+      const currentPrincipal = caller.kind === 'tool' ? trustedToolPrincipal(caller.execution) : caller.principal
+      if (!currentPrincipal || currentPrincipal.sessionId !== principal.sessionId) return false
+      const checked = resolveGovernedStartSupervisor(store, governedStartCommandContext(kingdomId, currentPrincipal), args.taskId)
+      return checked.ok && checked.binding.binding_id === supervisor.binding.binding_id
+        && checked.task.assigned_binding_id === worker && checked.task.territory_id === loadedTask.territory_id
+        && checked.task.title === loadedTask.title && checked.task.description === loadedTask.description
+        && checked.task.acceptance_criteria === loadedTask.acceptance_criteria
+        && checked.task.capability_requirement_json === loadedTask.capability_requirement_json
+        && store.getTerritoryById(loadedTask.territory_id)?.workspace_path === territory.workspace_path
+        && store.getKingdomCapabilityCeiling(kingdomId) === initialCeiling
+        && store.getBindingById(worker)?.execution_profile_json === initialProfile
+    }
 
     const agents = ctx.get('agents')
     if (!agents) {
@@ -752,8 +810,10 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         return { sandboxPolicy: null, approval: null }
       }
     })()
+    if (!stillAuthorized()) return 'AUTHZ_DENIED [AUTHORITY_CHANGED]: 准备期间身份、任务范围或执行配置变化；未访问 Worker Session。'
     const adapter = new DshRuntimeAdapter({
       runtimeInstanceRef: `dsh-${hostname()}`,
+      ...(disclosure.config.mode === 'pilot' ? { toolDisclosure: { install: disclosure.install.bind(disclosure) } } : {}),
       provider: config.workerProvider || 'spawn',
       model: null,
       agents,
@@ -781,10 +841,11 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         // Worker 的 provider/model 权威来源 = execution_profile_json（runGovernedTask 内部解析，
         // model 缺失 → fail closed configuration error，不创建 Session、不 dispatch）。
         globalProvider: config.workerProvider || 'spawn',
+        stillAuthorized,
         // 真实模型 turn 轮询窗口（正式入口 E2E 实证：默认 100ms×40=4s 太短，turn 未及 terminal）：
         // 1s × 60 = 60s；超窗 → fail-closed 返回（进 RECOVERING，由 reconcile 处理）。
-        pollIntervalMs: 1000,
-        maxPolls: 60,
+        pollIntervalMs: dependencies.governedPolling?.intervalMs ?? 1000,
+        maxPolls: dependencies.governedPolling?.maxPolls ?? 60,
       })
     } catch (error: unknown) {
       const detail = (error instanceof Error ? error.message : String(error)).slice(0, 256)
@@ -799,7 +860,12 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       return `GOVERNED_EXECUTION_DENIED [DISPATCH_EXCEPTION]: ${detail}`
     }
     if (!result.ok) {
+      const observedDispatch = store.listDispatchesForTaskAttempt(loadedTask.task_id, attemptNo)[0]
+      if (observedDispatch) await collectDispatchUsage(observedDispatch.dispatch_id)
       const prefix = result.reason.startsWith('Capability DENIED') ? 'CAPABILITY_DENIED' : 'GOVERNED_EXECUTION_DENIED'
+      if (observedDispatch && store.getDispatch(observedDispatch.dispatch_id)?.state === 'RECOVERING') {
+        return `${prefix}: ${result.reason}\n（任务保持 ${loadedTask.status}；请由当前 Supervisor 使用 kingdom_reconcile_task 对账原 Dispatch ${observedDispatch.dispatch_id}。对账完成前不得再次启动任务；不会自动降级为 LEGACY_COMPAT。）`
+      }
       return `${prefix}: ${result.reason}\n（任务保持 ${loadedTask.status}；请检查 Capability/Runtime 配置后，在同一 governed persistent 入口重试。不会自动降级为 LEGACY_COMPAT。）`
     }
 
@@ -853,35 +919,10 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     // Owner V0.8 FINAL RELEASE BLOCKER：Claim outcome 按已验证 terminalOutcome 收敛
     // （COMPLETED/FAILED/ABORTED）——禁止 hardcode COMPLETED；FAILED 不得生成 COMPLETED Claim；
     // summary 仅来自真实 assistant 文本，无文本 → 诚实回退占位（不伪造"任务完成"类摘要）。
-    const running = task.status === 'ASSIGNED' ? store.transitionTask(task, 'RUNNING') : task
     const outcome = result.terminalOutcome
     const summary = result.summary
-    store.insertWorkerResult({
-      result_id: randomUUID(),
-      task_id: task.task_id,
-      attempt_no: attemptNo,
-      worker_binding_id: worker,
-      session_id: result.sessionRef,
-      outcome,
-      result_json: JSON.stringify({ outcome, summary }),
-      created_at: new Date().toISOString(),
-    })
-    store.transitionTask(running, 'REVIEW', { result_summary: summary })
-    const nowIso = new Date().toISOString()
-    store.appendEvent({
-      event_id: randomUUID(), kingdom_id: kingdomId, event_type: 'WORKER_RESULT_SUBMITTED',
-      actor_role: 'WORKER', actor_id: worker, target_type: 'task', target_id: task.task_id,
-      payload_json: JSON.stringify({ attempt_no: attemptNo, claimed_outcome: outcome, session_id: result.sessionRef, executor: 'dsh-governed:persistent' }),
-      created_at: nowIso,
-    })
-    if (settledLease?.state === 'RELEASED') {
-      store.appendEvent({
-        event_id: randomUUID(), kingdom_id: kingdomId, event_type: 'SESSION_STOPPED',
-        actor_role: 'WORKER', actor_id: worker, target_type: 'execution', target_id: result.executionId,
-        payload_json: JSON.stringify({ task_id: task.task_id, attempt_no: attemptNo, reason: outcome === 'COMPLETED' ? 'completed' : outcome.toLowerCase() }),
-        created_at: nowIso,
-      })
-    }
+    submitGovernedClaim(store, result.dispatchId, summary)
+    await collectDispatchUsage(result.dispatchId)
     const recoveryNotice = settledLease?.state === 'RECOVERING'
       ? result.cleanupReceipt.status === 'CONFIRMED'
         ? `\n注意：terminal settlement 未能安全释放（${settledLease.release_reason ?? 'integrity recovery'}），Lease=RECOVERING；不得复用该 Session 或发起新 Dispatch，须先完成 reconcile/恢复。`
@@ -943,6 +984,48 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     }
   }
 
+
+  ctx.effect(() => () => discardGovernedRecoveryContexts(store))
+
+  const runGovernedReconcile = async (args: { taskId: string; dispatchId?: string }, caller: GovernedStartCaller): Promise<string> => {
+    const kingdomId = requireKingdom()
+    if (!kingdomId) return '尚未初始化王国。'
+    const resolveCaller = (): Principal | undefined => {
+      if (caller.kind === 'tool') return trustedToolPrincipal(caller.execution)
+      if (caller.signal?.aborted) return undefined
+      if (!caller.principal.sessionId) return undefined
+      // GUI has a broker-owned activation, not an active Tool/current-initiator scope.
+      const live = validateLiveDirectSession(caller.principal.sessionId, dshRegistrySeam())
+      return live.ok && live.agent === caller.agent ? caller.principal : undefined
+    }
+    const initialPrincipal = resolveCaller()
+    if (!initialPrincipal) return 'AUTHZ_DENIED [UNAUTHORIZED_PRINCIPAL]: 无法证明当前 DSH Session。'
+    const authorized = resolveGovernedStartSupervisor(store, governedStartCommandContext(kingdomId, initialPrincipal), args.taskId)
+    if (!authorized.ok) return `AUTHZ_DENIED [${authorized.code}]: ${authorized.message}`
+    const execution = store.latestExecution(args.taskId)
+    const dispatch = args.dispatchId ? store.getDispatch(args.dispatchId) : execution && store.listDispatchesForTaskAttempt(args.taskId, execution.attempt_no)
+      .find(row => row.execution_id === execution.execution_id)
+    if (!dispatch || dispatch.task_id !== args.taskId || dispatch.kingdom_id !== kingdomId) return 'RECOVERY_REQUIRED [DISPATCH_MISSING]: 未找到该任务的执行凭据。'
+    const stillAuthorized = (): boolean => {
+      const principal = resolveCaller()
+      if (!principal || principal.sessionId !== initialPrincipal.sessionId) return false
+      const current = resolveGovernedStartSupervisor(store, governedStartCommandContext(kingdomId, principal), args.taskId)
+      return current.ok && current.binding.binding_id === authorized.binding.binding_id
+    }
+    const reconciled = await reconcileGovernedDispatch(store, dispatch.dispatch_id, stillAuthorized)
+    if (!stillAuthorized()) return 'AUTHZ_DENIED [AUTHORITY_REVOKED]: 对账期间授权已失效，请重新确认当前任务。'
+    await collectDispatchUsage(dispatch.dispatch_id, stillAuthorized)
+    if (!stillAuthorized()) return 'AUTHZ_DENIED [AUTHORITY_REVOKED]: 对账期间授权已失效。'
+    if (reconciled.status !== 'TERMINAL') return `RECOVERY_REQUIRED [${reconciled.status}]: ${reconciled.reason}；未重新派发任务，未释放 Lease。`
+    try {
+      const claim = submitGovernedClaim(store, dispatch.dispatch_id, reconciled.summary ?? '(终态证据已确认；最终消息文本当前不可恢复)')
+      const lease = store.getLease(dispatch.lease_id)
+      const task = store.getTask(args.taskId)
+      return `${claim.created ? '对账已补齐' : '已存在'}第 ${dispatch.attempt_no} 次 Claim（${claim.outcome}）。\n摘要：${claim.summary}\n任务状态 ${task?.status ?? 'UNKNOWN'}；Lease=${lease?.state ?? 'UNKNOWN'}。${lease?.state === 'RECOVERING' ? '清理或结算证据不足，不重试清理、不复用 Session。' : ''}任务完成仍由 Supervisor 审查裁定。`
+    } catch (error: unknown) {
+      return `RECOVERY_REQUIRED [CLAIM_BLOCKED]: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
 
   // ── 工具注册（全部挂 ctx.effect）────────────────────────────
 
@@ -1247,6 +1330,55 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   })), 'dsh-kingdom: plan-task tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_propose_collaboration',
+    description: '宰相提议一层协作计划：含主整合者最多3位Worker，先由人类按准确版本采纳。小任务仍默认单执行者。',
+    parameters: { plan_json: { type: 'string', required: true, description: 'JSON: parentTaskId,expectedVersion?,mode(EXPERT|TEAM),reason,integratorBindingId,budgetTokens,reserveTokens,items(1..2)。每项key/title/description/acceptanceCriteria/territoryId/workerBindingId/access(READ_ONLY|WRITE)/dependsOn/expectedArtifact；EXPERT只读。' } },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }] },
+    async execute(args: { plan_json: string }, exec: KingdomToolExecutionLike) {
+      const kingdomId = requireKingdom(), principal = trustedToolPrincipal(exec)
+      if (!kingdomId || !principal) return 'AUTHZ_DENIED: 需要当前王国的真实宰相 Session。'
+      try {
+        if (typeof args.plan_json !== 'string' || args.plan_json.length > 24000) return 'INPUT_DENIED: 计划过长。'
+        return JSON.stringify(proposeCollaborationPlan(store, governedStartCommandContext(kingdomId, principal),
+          parseStrictJsonObject(args.plan_json) as unknown as ProposeCollaborationPlanInput))
+      } catch (error) { return `PLAN_REJECTED: ${error instanceof Error ? error.message : String(error)}` }
+    },
+  })), 'dsh-kingdom: propose-collaboration tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_advance_collaboration',
+    description: '当前主管推进已获人类采纳的准确计划；串行单项或并行至多两个独立项，自动完成正常指派，沿原Gate/执行/Claim链，仍须主管审查，不自动ACCEPT。',
+    parameters: { plan_id: { type: 'string', required: true, description: '已采纳计划ID' },
+      version: { type: 'number', required: true, description: '准确版本' }, digest: { type: 'string', required: true, description: '完整计划摘要' },
+      strategy: { type: 'string', required: true, description: 'SERIAL单项等待已有结算 / PARALLEL独立子项至多两个' },
+      items_json: { type: 'string', required: true, description: 'JSON数组，每项{taskId,grant:{能力名:boolean}}；不携带身份，不自动扩大权限。' } },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }] },
+    async execute(args: { plan_id: string; version: number; digest: string; strategy: string; items_json: string }, exec: KingdomToolExecutionLike) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。'
+      try {
+        if (typeof args.items_json !== 'string' || args.items_json.length > 20000) return 'INPUT_DENIED: 批次过长。'
+        const items = parseStrictJsonObject(`{"items":${args.items_json}}`).items as AdvanceCollaborationInput['items']
+        const result = await advanceCollaboration(store, () => {
+          const principal = trustedToolPrincipal(exec)
+          return principal ? governedStartCommandContext(kingdomId, principal) : null
+        }, { planId: args.plan_id, version: args.version, digest: args.digest, strategy: args.strategy as AdvanceCollaborationInput['strategy'], items }, async input => {
+          const previous = store.latestWorkerResult(input.taskId)?.result_id
+          const message = await runGovernedStart(input, { kind: 'tool', execution: exec })
+          const task = store.getTask(input.taskId), claim = store.latestWorkerResult(input.taskId), execution = store.latestExecution(input.taskId)
+          const dispatch = execution ? store.listDispatchesForTaskAttempt(input.taskId, execution.attempt_no).find(row => row.execution_id === execution.execution_id) : null
+          const lease = dispatch ? store.getLease(dispatch.lease_id) : null
+          const ok = task?.status === 'REVIEW' && !!claim && claim.result_id !== previous && claim.outcome === 'COMPLETED'
+            && execution?.state === 'COMPLETED' && execution.attempt_no === claim.attempt_no && execution.worker_binding_id === claim.worker_binding_id
+            && dispatch?.state === 'TERMINAL' && dispatch.session_ref === claim.session_id && lease?.state === 'RELEASED'
+          return { ok, message }
+        })
+        return JSON.stringify(result)
+      } catch (error) { return `ADVANCE_REJECTED: ${error instanceof Error ? error.message : String(error)}` }
+    },
+  })), 'dsh-kingdom: advance-collaboration tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_assign_task',
     description: '把任务派给 Worker 绑定（Supervisor 职权），CREATED → ASSIGNED',
     parameters: {
@@ -1334,6 +1466,19 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   })), 'dsh-kingdom: governed start-task tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_reconcile_task',
+    description: '对账已有任务的 governed Dispatch：仅原进程保留的可信上下文可补齐迟到 Claim；缺凭据或清理证据保持 RECOVERING。不会重发任务或自动 ACCEPT。',
+    parameters: {
+      task_id: { type: 'string', required: true, description: '当前 Supervisor 管辖的任务 id' },
+      dispatch_id: { type: 'string', description: '可选；默认选任务最新 Execution 的原 Dispatch' },
+    },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }] },
+    async execute(args: { task_id: string; dispatch_id?: string }, exec: KingdomToolExecutionLike) {
+      return runGovernedReconcile({ taskId: args.task_id, dispatchId: args.dispatch_id }, { kind: 'tool', execution: exec })
+    },
+  })), 'dsh-kingdom: governed reconcile-task tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_review_task',
     description: '审查 Worker 提交的结果并裁定（Supervisor 职权，须在任务领地的主理范围内）。这是任务能变成 DONE 的唯一路径：ACCEPT（→DONE）/ REWORK（→RUNNING 同 Worker）/ FAIL（→FAILED）/ HANDOFF（→RUNNING 转交新 Worker，需 to_binding_id + reason）',
     parameters: {
@@ -1410,7 +1555,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     () => {
       const kingdomId = requireKingdom()
       if (!kingdomId) return { error: 'KINGDOM_NOT_INITIALIZED', message: '尚未初始化王国。请先 /kingdom init。' }
-      return buildSnapshot(store, { auth: authView })
+      return buildSnapshot(store, { auth: authView, costRuntime })
     },
   ), 'dsh-kingdom: snapshot tool')
 
@@ -1458,6 +1603,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   interface GuiRuntime {
     readonly address: GuiServerAddress
     readonly control: LocalControlManager
+    readonly ownerControl: OwnerLocalControlManager
     readonly close: () => void
   }
 
@@ -1495,6 +1641,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
 
   const closeGuiRuntime = (runtime: GuiRuntime): void => {
     runtime.control.revokeAllSessions()
+    runtime.ownerControl.dispose()
     try { runtime.close() } catch { /* server may already be unavailable */ }
     if (guiRuntime === runtime) guiRuntime = null
   }
@@ -1514,6 +1661,32 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         // In particular, port=0 can never activate against a guessed origin.
         expectedOrigin: () => listeningAddress?.origin ?? '',
       })
+      const ownerController = new OwnerDecisionController(store, {
+        validateTargetSession: async ({ sessionId, signal }) => {
+          if (signal.aborted) return { ok: false, code: 'OWNER_VALIDATION_ABORTED', message: '管理窗口已撤销或校验超时。' }
+          const checked = validateLiveDirectSession(sessionId, dshRegistrySeam())
+          return checked.ok ? { ok: true } : { ok: false, code: 'OWNER_SESSION_UNAVAILABLE', message: '目标会话不是当前唯一、有效的 DSH 会话；请刷新后重新选择。' }
+        },
+        listTargetSessions: async ({ sessionIds, signal }) => {
+          const seam = dshRegistrySeam()
+          return signal.aborted ? [] : sessionIds.filter(id => validateLiveDirectSession(id, seam).ok)
+            .map(id => ({ id, label: `DSH 会话 ${id}` }))
+        },
+        validateExecutionProfile: async ({ profile, signal }) => {
+          const provider = profile?.provider?.trim() || config.workerProvider
+          const model = profile?.model?.trim()
+          if (!model) return { ok: false, code: 'OWNER_MODEL_REQUIRED', message: '请明确选择模型；保存配置不会证明模型已运行成功。' }
+          const llm = ctx.get('llm') as { resolveModelInfo?: (provider: string, model: string, signal?: AbortSignal) => Promise<unknown> } | undefined
+          if (!llm || typeof llm.resolveModelInfo !== 'function') return { ok: false, code: 'OWNER_MODEL_VALIDATION_UNAVAILABLE', message: '当前宿主无法核对模型配置，未写入变更。' }
+          try {
+            await llm.resolveModelInfo(provider, model, signal)
+            return signal.aborted ? { ok: false, code: 'OWNER_VALIDATION_ABORTED', message: '管理窗口已撤销或校验超时。' } : { ok: true }
+          } catch {
+            return { ok: false, code: 'OWNER_MODEL_UNAVAILABLE', message: '宿主未能确认该提供方与模型路由，请核对现有模型配置。' }
+          }
+        },
+      })
+      const ownerControl = new OwnerLocalControlManager({ controller: ownerController, expectedOrigin: () => listeningAddress?.origin ?? '' })
       const safeClose = (): void => {
         try { closeServer?.() } catch { /* startup failure is already reported */ }
       }
@@ -1529,10 +1702,12 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         const runtime: GuiRuntime = {
           address,
           control,
+          ownerControl,
           close: safeClose,
         }
         if (guiStopRequested) {
           control.revokeAllSessions()
+          ownerControl.dispose()
           safeClose()
           settled = true
           reject(new Error('GUI_STOPPED_DURING_START'))
@@ -1546,11 +1721,13 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         if (settled) return
         settled = true
         control.dispose()
+        ownerControl.dispose()
         reject(error)
       }
       serverClose = startGuiServer({
         snapshot: (readContext) => buildSnapshot(store, {
           auth: authView,
+          costRuntime,
           security: projectionSecurityFor(readContext),
         }),
         taskDetail: (taskId, readContext) => {
@@ -1576,6 +1753,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         ...config.guiToken ? { token: config.guiToken } : {},
         allowOrigins: config.guiAllowOrigins,
         control,
+        ownerControl,
         onListening,
         onUnavailable,
         logger: ctx.logger,
@@ -1624,10 +1802,11 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
 
   /** 把 Phase-1 风格（返回字符串）的领地/角色操作包装成 CommandResultView（M2：GUI 写层）。 */
   const plainResult = (text: string, kId: string): CommandResultView => {
-    const failed = /^(?:错误：|OWNER_CONTROL_REQUIRED|CONFIG_DENIED|UNKNOWN\/|INPUT_DENIED|AUTHZ_DENIED|CAPABILITY_DENIED|GOVERNED_EXECUTION_DENIED)/u.test(text)
+    const failed = /^(?:错误：|OWNER_CONTROL_REQUIRED|CONFIG_DENIED|UNKNOWN\/|INPUT_DENIED|AUTHZ_DENIED|CAPABILITY_DENIED|GOVERNED_EXECUTION_DENIED|GOVERNED_SETTLEMENT_BLOCKED|RECOVERY_REQUIRED)/u.test(text)
     const errorCode: CommandResultView['errorCode'] = !failed
       ? null
-      : text.startsWith('AUTHZ_DENIED') ? 'SESSION_AUTH_REQUIRED'
+      : text.startsWith('RECOVERY_REQUIRED') || text.startsWith('GOVERNED_SETTLEMENT_BLOCKED') ? 'RECOVERY_REQUIRED'
+        : text.startsWith('AUTHZ_DENIED') ? 'SESSION_AUTH_REQUIRED'
         : text.startsWith('INPUT_DENIED') || text.startsWith('错误：') ? 'INVALID_INPUT'
           : text.startsWith('OWNER_CONTROL_REQUIRED') || text.startsWith('CONFIG_DENIED') ? 'SESSION_AUTH_REQUIRED'
             : 'WORKER_EXECUTION_FAILED'
@@ -1741,6 +1920,14 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         return resumeExecution(store, cmd, { executionId: str('execution_id'), reason: opt('reason') })
       case 'execution.abort':
         return abortExecution(store, cmd, { executionId: str('execution_id'), reason: opt('reason') })
+      case 'reconcile': {
+        if (control.signal.aborted) return guiFailure('UNAUTHORIZED_PRINCIPAL', '本地控制已关闭。')
+        const reconciled = await runGovernedReconcile({ taskId: str('task_id') }, {
+          kind: 'gui', principal: { sessionId: control.principalSessionId }, agent: (control as GuiControlContextWithAgent).agent,
+          signal: control.signal,
+        })
+        return plainResult(reconciled, kingdomId)
+      }
       case 'start':
         if (!control.principalSessionId.trim()) {
           return guiFailure('UNAUTHORIZED_PRINCIPAL', '激活时没有 exact agent.session.id；governed start 拒绝执行。')
@@ -1832,11 +2019,28 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   ctx.effect(() => ctx.commands.register({
     name: 'kingdom',
     description: 'direct Owner Control：初始化、状态、内置 GUI 与精确 JSON 配置；独立 Agent Tool/HTTP payload 不得代行 Owner 写入',
-    input: { hint: 'gui [start|stop] | init | status | ceiling <json> | territory.* <json> | role.* <json> | execution-profile <json> | help' },
+    input: { hint: 'gui [start|stop] | owner.gui <json> | init | status | ceiling <json> | territory.* <json> | role.* <json> | execution-profile <json> | help' },
     handler: async (invocation): Promise<CommandResult> => {
       const { sub, rest } = directCommandParts(invocation.rawInput)
       const auth = ownerAuth()
       switch (sub) {
+        case 'owner.gui': {
+          const parsed = parseJsonEnvelope(rest, ['kingdomId', 'actions', 'scope', 'ttlMs'])
+          if (!parsed.ok) return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${parsed.message}` }
+          try {
+            const runtime = await ensureGuiServer()
+            const activation = runtime.ownerControl.activate(issueOwnerControlCapability(), parsed.value as unknown as OwnerDecisionInput)
+            const opened = openLocalConsole(`${runtime.address.origin}${activation.launchPath}?ticket=${encodeURIComponent(activation.launchTicket)}`)
+            return {
+              kind: opened ? 'success' : 'error',
+              text: opened
+                ? `人类管理窗口已激活：${runtime.address.origin}/owner；有效期至 ${activation.expiresAt}。网页仅可操作本次授权范围。`
+                : '管理窗口已建立，但浏览器未能打开；未输出一次性票据，请重新直接激活。',
+            }
+          } catch {
+            return { kind: 'error', text: 'OWNER_GUI_ACTIVATION_DENIED: 管理窗口未能激活。请核对严格 JSON 中的王国、动作、具体范围及期限；没有输出控制凭据。' }
+          }
+        }
         case 'gui': {
           const action = rest.trim().toLowerCase()
           if (action === 'stop') {
@@ -2001,6 +2205,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
               'dsh-Kingdom Owner Control Plane（Owner ≠ Agent ≠ Session）',
               '/kingdom init    原子初始化/接入；OWNER.session_id 永远为 null',
               '/kingdom status  查看真实状态（只读）',
+              '/kingdom owner.gui <严格 JSON>  激活具体动作/资源范围的短期人类管理窗口；/owner 页面提供激活格式说明',
               '/kingdom ceiling {"ceiling":{"tool:pwsh":true}} | {"clear":true}',
               '/kingdom territory.create {"name":"研发领","workspace_path":"C:/work"}',
               '/kingdom territory.delete {"territory_id":"...","force":false}',

@@ -9,6 +9,8 @@
  * legacy 路径继续 `LEGACY_COMPAT`（§34）。
  */
 import type { KingdomStore } from '../core/db.js'
+import { createHash } from 'node:crypto'
+import { readDshDispatchSummary } from '../adapter/dsh-session-events.js'
 import type { EnforcementRequest, RuntimeAdapter, RuntimeTrustFence, RuntimeTrustFenceExpectation, SessionHandle } from '../adapter/contract.js'
 import { ensureWorkerSession, type EnsureWorkerSessionResult } from '../adapter/session-store.js'
 import { runCapabilityGate } from '../capability/service.js'
@@ -17,8 +19,13 @@ import { MAX_CLEANUP_EVIDENCE_LENGTH, runGovernedDispatch, type CleanupReceipt }
 import { buildWorkerPrompt, type WorkerContext } from './executor.js'
 import type { GrantMap } from '../capability/resolver.js'
 import { resolveGovernedWorkerRuntime } from './executor-factory.js'
+import { reserveBudgetAdmission, cancelBudgetAdmissionIfSafe, finishBudgetAdmissionInvocation, BudgetError, type BudgetAdmissionHandle } from '../core/budget.js'
+import { reserveWorkspaceAdmission, cancelWorkspaceAdmissionIfSafe, finishWorkspaceAdmissionInvocation, WorkspaceAdmissionError, type WorkspaceAdmissionHandle } from '../core/workspace-admission.js'
+import { readCollaborationReadiness, readCollaborationPlan, readPlanBudgetView } from '../core/collaboration.js'
 
 export interface GovernedTaskInput {
+  /** Internal current-principal check; never supplied by a model or browser. */
+  stillAuthorized?: () => boolean
   store: KingdomStore
   adapter: RuntimeAdapter
   kingdomId: string
@@ -215,24 +222,6 @@ function guardBeforeWorkerSessionSideEffect(
   return { ok: true }
 }
 
-/** 提取 Worker 最终消息文本（真实 DSH `assistant/message` shape：message.content[{type:'text',text}]）。 */
-function lastAssistantMessage(session: unknown): string {
-  const events = (session as { events?: readonly { type: string; data?: Record<string, unknown> }[] }).events ?? []
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event.type !== 'assistant/message') continue
-    const data = event.data as { message?: { content?: unknown[]; text?: unknown }; text?: unknown } | undefined
-    const content = Array.isArray(data?.message?.content) ? data.message.content : []
-    for (const part of content) {
-      const p = part as { type?: string; text?: unknown }
-      if (p.type === 'text' && typeof p.text === 'string' && p.text.trim().length > 0) return p.text
-    }
-    if (typeof data?.message?.text === 'string' && data.message.text.trim().length > 0) return data.message.text
-    if (typeof data?.text === 'string' && data.text.trim().length > 0) return data.text
-  }
-  return ''
-}
-
 /**
  * 一次受治理 Worker 任务执行。
  * DENIED（能力不足/无法 enforce）→ 返回 {ok:false, reason}，**zero execution**（无 Execution/Dispatch 落库）。
@@ -242,6 +231,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   if (!store.isSchemaV4) {
     return { ok: false, reason: 'Schema v4 未迁移：governed 执行不可用（正式 DB 迁移须经 Formal DB Migration Gate）' }
   }
+  if (input.stillAuthorized && !input.stillAuthorized()) return { ok: false, reason: 'AUTHORITY_CHANGED: 当前调用者或任务范围已变化。' }
 
   // 0. Worker provider/model 解析（Owner CLOSURE A）——fail closed：缺失 model → configuration error，
   //    不创建 Session、不 acquire Lease、不 dispatch（zero execution）。
@@ -259,6 +249,34 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   //    create 之前，否则 live registry 丢失时会先产生 Runtime side effect 再被拒绝。
   const sessionGuard = guardBeforeWorkerSessionSideEffect(store, adapter, { kingdomId, workerBindingId })
   if (!sessionGuard.ok) return { ok: false, reason: sessionGuard.reason }
+  let budgetAdmission: BudgetAdmissionHandle | undefined
+  let workspaceAdmission: WorkspaceAdmissionHandle | undefined
+  let collaboration = readCollaborationReadiness(store, kingdomId, taskId)
+  try {
+    store.withImmediateTransaction(() => {
+      collaboration = readCollaborationReadiness(store, kingdomId, taskId)
+      if (collaboration && readCollaborationPlan(store, kingdomId, collaboration.planId)?.state !== 'ADOPTED') collaboration = null
+      if (collaboration) {
+        if (!collaboration.ready || collaboration.workerBindingId !== workerBindingId
+          || collaboration.access === 'READ_ONLY' && sandboxMode !== 'read-only') {
+          throw new WorkspaceAdmissionError('PLAN_NOT_READY', collaboration.reasonCode || '计划角色、依赖或只读约束不满足。')
+        }
+        const planBudget = readPlanBudgetView(store, kingdomId, collaboration.planId)
+        if (!planBudget || ['BLOCK_LIMIT', 'BLOCK_UNKNOWN'].includes(planBudget.state)) {
+          throw new WorkspaceAdmissionError('PLAN_BUDGET_BLOCKED', '计划费用或缺口超出本次接纳条件。')
+        }
+      }
+      workspaceAdmission = reserveWorkspaceAdmission(store, { kingdomId, taskId, attemptNo, workerBindingId,
+        workspacePath: cwd, access: sandboxMode === 'read-only' ? 'READ_ONLY' : 'WRITE' })
+      budgetAdmission = reserveBudgetAdmission(store, { kingdomId, taskId, attemptNo, workerBindingId })
+    })
+  } catch (error) {
+    if (workspaceAdmission) finishWorkspaceAdmissionInvocation(workspaceAdmission)
+    if (budgetAdmission) finishBudgetAdmissionInvocation(budgetAdmission)
+    if (error instanceof BudgetError || error instanceof WorkspaceAdmissionError) return { ok: false, reason: error.message }
+    throw error
+  }
+  try {
   let session: EnsureWorkerSessionResult
   try {
     session = await ensureWorkerSession(store, adapter, {
@@ -270,6 +288,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   } catch (error) {
     return { ok: false, reason: `Worker Session 建立失败: ${error instanceof Error ? error.message : String(error)}` }
   }
+  if (input.stillAuthorized && !input.stillAuthorized()) return { ok: false, reason: 'AUTHORITY_CHANGED: Session 准备期间调用者或范围变化，未创建 Lease 或派发。' }
 
   const context: DshEnforcementContext = {
     sessionRef: session.handle.refs.sessionRef,
@@ -290,6 +309,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     store, adapter, kingdomId, taskId, attemptNo, workerBindingId, supervisorBindingId,
     leaseId: acquired.lease_id, requirementJson, ceilingJson: store.getKingdomCapabilityCeiling(kingdomId),
     grant, sandboxMode, context,
+    stillAuthorized: input.stillAuthorized,
   })
   if (!gate.materialized) {
     return { ok: false, reason: `Capability DENIED（${gate.decision.enforcement_status}）: ${gate.decision.reason_code ?? ''}`, deniedDecisionId: gate.decision.decision_id, sessionRef: session.handle.refs.sessionRef }
@@ -297,9 +317,30 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
 
   // 3. Governed Dispatch（TX-3..TX-4）
   const workerContext: WorkerContext = {
-    task: store.getTask(taskId)!,
-    acceptanceCriteria: store.getTask(taskId)!.acceptance_criteria,
+    task: taskRow,
+    acceptanceCriteria: taskRow.acceptance_criteria,
     attemptNo,
+    collaboration: collaboration ?? undefined,
+  }
+  if (attemptNo > 1) {
+    const previous = store.listWorkerResults(taskId).find(row => row.attempt_no === attemptNo - 1)
+    if (previous) {
+      try {
+        const claim: unknown = JSON.parse(previous.result_json)
+        if (claim && typeof claim === 'object' && typeof (claim as { summary?: unknown }).summary === 'string') {
+          workerContext.prevResultSummary = (claim as { summary: string }).summary
+        }
+      } catch { /* Missing/corrupt prior Claim stays explicit in the prompt. */ }
+    }
+    const review = store.latestTaskReworkEvent(kingdomId, taskId, attemptNo - 1)
+    if (review) {
+      try {
+        const payload: unknown = JSON.parse(review.payload_json)
+        if (payload && typeof payload === 'object' && typeof (payload as { reason?: unknown }).reason === 'string') {
+          workerContext.reworkReason = (payload as { reason: string }).reason
+        }
+      } catch { /* Unreadable review reason is not guessed from another attempt. */ }
+    }
   }
   const text = buildWorkerPrompt(workerContext)
   const run = await runGovernedDispatch({
@@ -308,8 +349,12 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     sessionHandle: session.handle as SessionHandle,
     text,
     requestSnapshot: JSON.stringify({ type: 'req/v1', task: taskId, attempt: attemptNo }),
-    inputRefJson: JSON.stringify({ task: taskId, prompt: text.slice(0, 200) }),
-    payloadHash: `sha256:${text.length}`,
+    inputRefJson: JSON.stringify({ task: taskId, attempt: attemptNo, previousAttempt: attemptNo > 1 ? attemptNo - 1 : null }),
+    payloadHash: `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`,
+    budgetAdmission,
+    workspaceAdmission,
+    collaboration,
+    stillAuthorized: input.stillAuthorized,
     pollIntervalMs: input.pollIntervalMs,
     maxPolls: input.maxPolls,
     cleanup: (fence, expectation) => cleanupAfterTrustedTerminal(adapter, gate.enforcementRequest, context, fence, expectation),
@@ -327,7 +372,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     evidenceJson: null,
     reason: 'governed dispatch returned no cleanup receipt',
   }
-  const summary = lastAssistantMessage(session.handle.session) || '(无最终消息文本；以 terminal 证据为准)'
+  const summary = readDshDispatchSummary(session.handle.session, run.receipt.refs.runtimeDispatchRef ?? '') || '(无最终消息文本；以 terminal 证据为准)'
   //    terminalOutcome = 已由 terminal 证据验证的终态（execution 终态由 recordTerminalEvidence 落账）。
   const terminalOutcome = run.terminal.execution.state as 'COMPLETED' | 'FAILED' | 'ABORTED'
   return {
@@ -341,5 +386,17 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     cleanupReceipt,
     trustFence: run.trustFence,
     terminalOutcome,
+  }
+  } finally {
+    // This is accounting compensation only. Unknown/active Lease or any
+    // Dispatch prevents cancellation; existing Runtime cleanup owns release.
+    if (budgetAdmission) {
+      try { cancelBudgetAdmissionIfSafe(store, budgetAdmission) } catch { /* Store or proof unavailable: preserve reservation. */ }
+      finishBudgetAdmissionInvocation(budgetAdmission)
+    }
+    if (workspaceAdmission) {
+      try { cancelWorkspaceAdmissionIfSafe(store, workspaceAdmission) } catch { /* Preserve unresolved resource ownership. */ }
+      finishWorkspaceAdmissionInvocation(workspaceAdmission)
+    }
   }
 }

@@ -6,6 +6,69 @@ status: "implemented"
 
 # Local GUI Control Session
 
+## 1.2 personal workbench interaction update
+
+The default browser entry is Today, with six main destinations: Today, Tasks,
+Owner attention, Map, Usage, and Settings. Legacy fragment addresses remain
+readable. The personal workbench projection is governed by its own feature flow;
+this contract preserves the existing authenticated command transport and adds the
+draft-to-plan and refresh behavior below.
+
+A one-sentence goal opens an editable in-page draft. Scope and acceptance remain
+explicit user input; an existing territory is required before submit. Drafting
+does not call a model, grant authority, assign a Worker, or start execution.
+Only `ok=true` plus the canonical returned `task.taskId` selects a newly created
+Task. Rejection, missing identity, or ambiguous response retains the draft and
+does not resend. After canonical success only the unchanged submitted draft is
+consumed; edits made while the command was in flight remain available. Task
+detail separates Task and Execution state, Worker claims,
+Supervisor decisions, and unrecorded human acceptance. Settings points Owner-only
+changes to their existing direct-Slash entry.
+
+```mermaid
+flowchart TD
+    E7(["E7 Browser goal or draft editing"]) --> A24["A24 Keep editable title, scope, acceptance and existing territory in page"]
+    A24 --> D25{"D25 Existing territory, goal and current role capability permit submit"}
+    D25 -->|No| X35(["X35 Keep input and explain the missing input or permission"])
+    D25 -->|Yes| A25["A25 Submit one plan through the existing protected command channel"]
+    A25 --> D26{"D26 Structured success has the exact new task ID"}
+    D26 -->|Yes| X34(["X34 Select returned task; do not assign or dispatch"])
+    D26 -->|No| X35
+    G23[["G23 Draft is data, not authority; ambiguous writes are never retried"]] -.-> A24
+    G23 -.-> A25
+    G23 -.-> X34
+    E8(["E8 Snapshot or selected detail refresh"]) --> A26["A26 Rerender facts while retaining expansion, draft, focus and reading anchor"]
+    A26 --> X36(["X36 Updated facts remain readable at the same task and editing position"])
+    G24[["G24 Untrusted content uses textContent; dynamic IDs preserve browser state"]] -.-> A26
+```
+
+```mermaid
+sequenceDiagram
+    actor Reader
+    participant Browser
+    participant LocalHost
+    participant Core
+    Reader->>Browser: Edit goal, scope, acceptance and territory
+    Note over Browser: In-page draft only, no model or governance side effect
+    Reader->>Browser: Submit draft under activated role
+    Browser->>LocalHost: One existing protected plan command
+    LocalHost->>Core: Revalidate role and accepted fields
+    alt accepted with canonical Task ID
+        Core-->>LocalHost: CommandResult task.taskId
+        LocalHost-->>Browser: Structured success
+        Browser->>LocalHost: Read fresh snapshot and exact task detail
+        Browser-->>Reader: Show new task, no automatic dispatch
+    else rejected or ambiguous
+        LocalHost-->>Browser: Rejection or missing outcome
+        Browser-->>Reader: Retain input and explain; no write retry
+    end
+    loop read refresh only
+        Browser->>LocalHost: Read snapshot and selected detail
+        LocalHost-->>Browser: Bounded facts
+        Browser-->>Reader: Preserve expanded content, caret, focus and reading anchor
+    end
+```
+
 ## Purpose and boundary
 
 This flow turns a direct `/kingdom gui` command into a short-lived, loopback-only
@@ -13,7 +76,11 @@ browser control session. The direct DSH `CommandInvocation.agent` is captured at
 activation time; the browser is only an untrusted transport client. The flow
 covers activation, task planning/assignment, governed start
 with an explicit existing sandbox mode, Claim review including atomic HANDOFF,
-and fail-closed execution pause/resume/abort controls. It also records the
+and fail-closed execution pause/resume/abort controls. The explicit `reconcile`
+command uses the activation's exact current live Agent and current Supervisor scope;
+it can consume retained original process evidence through [governed-reconcile](../governed-reconcile/flow.md).
+Missing context, WAIT and blocked Claim submission return `ok=false / RECOVERY_REQUIRED`.
+It also records the
 shared persistent recovery behavior reached by GUI governed start and startup
 orphan reclaim. Owner-only actions are
 advertised as discoverable but remain non-executable direct-Slash operations;
@@ -112,6 +179,9 @@ flowchart TD
     D8 -->|review| D12{"D12 REVIEW state, scope, decision, reason, and HANDOFF target are valid"}
     D8 -->|execution control| D13{"D13 current LEGACY_COMPAT control semantics and Supervisor scope admit the request"}
     D8 -->|start| D14{"D14 sandbox_mode is workspace-write or read-only"}
+    D8 -->|reconcile| A23["A23 reconcile the original dispatch under current exact activation identity and scope"]
+    A23 --> X33(["X33 original Claim or recovery-required result; no redispatch or inferred cleanup"])
+    G22[["G22 recheck activation signal and exact live registry identity after awaits; missing evidence cannot be returned as success"]] -.-> A23
     A10 -->|transaction commits| X11(["X11 Task is planned with optional capability requirement"])
     A10 -->|Task or event write fails| X28(["X28 transaction rolls back; no partial Task or requirement"])
     A11 --> X12(["X12 assignment result; projection can refresh live allowedActions"])
@@ -282,6 +352,15 @@ sequenceDiagram
                     else LEGACY_COMPAT
                         Store-->>Host: pause/resume/abort; RUNNING pausePending set/clear may remain RUNNING
                     end
+                else reconcile
+                    Host->>Host: validate captured exact live Agent and current Supervisor scope
+                    Host->>Runtime: observe retained original fence and dispatch; no new prompt
+                    alt original context and trusted terminal remain valid
+                        Runtime-->>Host: original one-shot cleanup and terminal evidence
+                        Host->>Store: original port recovery and idempotent Claim/REVIEW
+                    else waiting, lost context, indeterminate evidence or revoked authority
+                        Host-->>Server: ok=false with RECOVERY_REQUIRED or authentication error
+                    end
                 else start
                     Host->>Host: validate exact sandbox_mode allowlist
                     Host->>Store: read nonterminal GOVERNED_PERSISTENT Executions for Task
@@ -361,6 +440,8 @@ stateDiagram-v2
     INTENT_COMMITTED --> RECEIVED: T27 runtime_receipt / Dispatch INTENDED to DISPATCHED to RECEIVED
     RECEIVED --> CORRELATED: T31 turn_observed / bind Runtime turn and mark Execution RUNNING
     CORRELATED --> DISPATCH_TERMINAL: T28 trusted_terminal_evidence / settle Dispatch, Execution, and Lease
+    DISPATCH_RECOVERING --> DISPATCH_TERMINAL: T32 explicit_reconcile [original context and trusted terminal] / atomic Dispatch and Execution terminal
+    LEASE_RECOVERING --> LEASE_RELEASED: T33 recovery_settlement [original cleanup and fence confirmed] / release original Lease
 ```
 
 ## Safeguards

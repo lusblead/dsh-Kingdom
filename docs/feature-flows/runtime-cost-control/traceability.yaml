@@ -1,0 +1,390 @@
+version: 1
+feature_id: runtime.cost-control
+title: Runtime cost observation and soft budget admission
+status: implemented
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: true
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  E1:
+    kind: entry
+    description: Exact Owner budget policy
+    trigger: budget.policy prepare and commit
+    code:
+      - path: src/core/owner-window.ts
+        symbol: OwnerDecisionController
+  D1:
+    kind: decision
+    description: Exact policy authorization
+    condition: Active exact action and kingdomWide scope
+    code:
+      - path: src/core/owner-window.ts
+        symbol: context
+    tests:
+      - path: tests/budget.test.ts
+        symbol: Owner budget policy
+  T1:
+    kind: transition
+    description: Save policy without resetting accounting
+    entity: BudgetPolicy
+    from: PreviousOrAbsent
+    to: POLICY
+    trigger: Exact Owner commit
+    code:
+      - path: src/core/budget.ts
+        symbol: setBudgetPolicy
+    tests:
+      - path: tests/budget.test.ts
+        symbol: Owner budget policy
+      - path: tests/budget.test.ts
+        symbol: observations freeze incomplete pre-policy role sources
+  E2:
+    kind: entry
+    description: Authorized governed start
+    trigger: GovernedTaskInput after existing model and active Lease guards
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+  D2:
+    kind: decision
+    description: Latest budget and unique invocation
+    condition: Default off or affordable observed and estimated exposure with accepted coverage
+    code:
+      - path: src/core/budget.ts
+        symbol: reserveBudgetAdmission
+    tests:
+      - path: tests/budget.test.ts
+        symbol: last budget slot
+      - path: tests/budget.test.ts
+        symbol: budget rejection precedes Session
+  T2:
+    kind: transition
+    description: Atomically reserve invocation
+    entity: BudgetAdmission
+    from: Absent
+    to: RESERVED
+    trigger: Successful IMMEDIATE admission
+    code:
+      - path: src/core/budget.ts
+        symbol: reserveBudgetAdmission
+    tests:
+      - path: tests/budget.test.ts
+        symbol: last budget slot
+  A1:
+    kind: action
+    description: Existing Session and Capability preparation
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+  D3:
+    kind: decision
+    description: Preparation result
+    condition: Session and Capability Gate preparation succeeded
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: gate.materialized
+    tests:
+      - path: tests/budget.test.ts
+        symbol: safe preparation
+  C1:
+    kind: compensation
+    description: Cancel only proven unused accounting
+    restores_or_resolves: No unused estimate after proven safe rejection
+    failure_behavior: Preserve unconfirmed exposure and all Lease facts
+    code:
+      - path: src/core/budget.ts
+        symbol: cancelBudgetAdmissionIfSafe
+    tests:
+      - path: tests/budget.test.ts
+        symbol: safe preparation
+  D4:
+    kind: decision
+    description: Canonical no-side-effect proof
+    condition: Still RESERVED without Dispatch active Lease or unsettled execution
+    code:
+      - path: src/core/budget.ts
+        symbol: cancelBudgetAdmissionIfSafe
+    tests:
+      - path: tests/budget.test.ts
+        symbol: safe preparation
+  T3:
+    kind: transition
+    description: Bind exact invocation in TX-3
+    entity: BudgetAdmission
+    from: RESERVED
+    to: BOUND
+    trigger: Existing governed dispatch commit point
+    code:
+      - path: src/core/budget.ts
+        symbol: bindBudgetAdmissionInTransaction
+    tests:
+      - path: tests/budget.test.ts
+        symbol: TX-3
+  T4:
+    kind: transition
+    description: Cancel accounting only
+    entity: BudgetAdmission
+    from: RESERVED
+    to: CANCELLED
+    trigger: Proven safe pre-dispatch failure
+    code:
+      - path: src/core/budget.ts
+        symbol: cancelBudgetAdmissionIfSafe
+    tests:
+      - path: tests/budget.test.ts
+        symbol: safe preparation
+  A2:
+    kind: action
+    description: Existing fenced dispatch and reconciliation
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    external_call:
+      system: DSH Runtime
+      timeout: Existing configured bounded polling window
+      failure_behavior: Existing reconciliation retains unconfirmed effects and Lease
+      failure_nodes: [X4]
+  A3:
+    kind: action
+    description: Fold latest observations and unresolved risk
+    code:
+      - path: src/core/budget.ts
+        symbol: readBudgetView
+    tests:
+      - path: tests/budget.test.ts
+        symbol: observations
+      - path: tests/budget.test.ts
+        symbol: unfinished invocation remains
+  G1:
+    kind: safeguard
+    description: Exact Owner policy authority
+    safeguard_type: authorization
+    guarantee: Role or payload identity cannot configure budgets
+    protects: [T1]
+    failure_behavior: Reject before policy write
+    code:
+      - path: src/core/budget.ts
+        symbol: setBudgetPolicy
+    tests:
+      - path: tests/budget.test.ts
+        symbol: Owner budget policy
+  G2:
+    kind: safeguard
+    description: Atomic admission identity
+    safeguard_type: idempotency
+    guarantee: Competing or replayed attempts cannot consume a reservation twice
+    protects: [T2, T3]
+    failure_behavior: Reject duplicate or invalid handle before dispatch
+    code:
+      - path: src/core/budget.ts
+        symbol: reserveBudgetAdmission
+    tests:
+      - path: tests/budget.test.ts
+        symbol: last budget slot
+  G3:
+    kind: safeguard
+    description: Accounting cannot alter runtime authority
+    safeguard_type: validation
+    guarantee: Budget cannot release Lease or manufacture terminal evidence
+    protects: [C1, A2]
+    failure_behavior: Retain unconfirmed exposure for reconciliation
+    code:
+      - path: src/core/budget.ts
+        symbol: cancelBudgetAdmissionIfSafe
+    tests:
+      - path: tests/budget.test.ts
+        symbol: safe preparation
+  G4:
+    kind: safeguard
+    description: Evidence-backed cost fold
+    safeguard_type: validation
+    guarantee: Missing and repeated measurements are not zero or new cost
+    protects: [A3]
+    failure_behavior: Preserve unconfirmed coverage and estimates
+    code:
+      - path: src/core/budget.ts
+        symbol: readBudgetView
+    tests:
+      - path: tests/budget.test.ts
+        symbol: observations
+  X1:
+    kind: outcome
+    description: Unauthorized policy
+    result: No policy write
+  X2:
+    kind: outcome
+    description: Policy saved
+    result: Future admissions use policy and accepted work stays in flight
+  X3:
+    kind: outcome
+    description: Admission denied
+    result: No Session Lease or Task side effect
+  X4:
+    kind: outcome
+    description: unconfirmed work
+    result: Reservation and runtime facts retained
+  X5:
+    kind: outcome
+    description: Safe preparation failure
+    result: Unused accounting cancelled without Lease update
+  X6:
+    kind: outcome
+    description: Honest budget projection
+    result: Separate observed reserved pending and unconfirmed
+  E3:
+    kind: "entry"
+    description: "Runtime role event"
+    trigger: "session/event"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+  D5:
+    kind: "decision"
+    description: "Exact runtime role"
+    condition: "Same registry object and one Core non-Worker binding"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "runtime observer refuses Worker affinity"
+  T5:
+    kind: "transition"
+    description: "Capture pending turn"
+    entity: "RoleUsage"
+    from: "Absent"
+    to: "IN_PROGRESS"
+    trigger: "Exact turn start"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "disposing an in-progress observer"
+  A4:
+    kind: "action"
+    description: "Record exact identity gap"
+    code:
+      - path: src/core/cost.ts
+        symbol: recordUsageCoverageGap
+  A5:
+    kind: "action"
+    description: "Read official turn and retry evidence"
+    code:
+      - path: src/adapter/dsh-cost.ts
+        symbol: observeDshTurnCost
+  D6:
+    kind: "decision"
+    description: "Complete source evidence"
+    condition: "Continuous exact turn all request slots reported"
+    code:
+      - path: src/adapter/dsh-cost.ts
+        symbol: extractDshTurnCost
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "turn cost delegates only the exact complete turn"
+  D7:
+    kind: "decision"
+    description: "Live turn"
+    condition: "Exact turn has no end event"
+    code:
+      - path: src/adapter/dsh-cost.ts
+        symbol: extractDshTurnCost
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "turn cost preserves"
+  T6:
+    kind: "transition"
+    description: "Freeze complete source"
+    entity: "RoleUsage"
+    from: "IN_PROGRESS or UNAVAILABLE"
+    to: "COMPLETE"
+    trigger: "Complete exact provider report"
+    code:
+      - path: src/core/cost.ts
+        symbol: recordRoleUsage
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "role observations resample monotonically"
+  T7:
+    kind: "transition"
+    description: "Retain lost or incomplete observation"
+    entity: "RoleUsage"
+    from: "IN_PROGRESS"
+    to: "UNAVAILABLE"
+    trigger: "Missing closed or restarted observation"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "observer installation closes only interrupted observations"
+  E4:
+    kind: "entry"
+    description: "Observer continuity change"
+    trigger: "dispose or installRuntimeCostObservers"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+  E5:
+    kind: "entry"
+    description: "Prompt byte observation"
+    trigger: "system-prompt/assemble"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+  T8:
+    kind: "transition"
+    description: "Anonymous immutable counts"
+    entity: "PromptCost"
+    from: "Absent"
+    to: "RECORDED"
+    trigger: "Awaited exact scope assembly"
+    code:
+      - path: src/core/cost.ts
+        symbol: recordPromptCost
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "assembly observation removes arbitrary secret names"
+  G5:
+    kind: "safeguard"
+    description: "Source integrity and turn cleanup"
+    safeguard_type: "validation"
+    guarantee: "Complete sources freeze and an old callback cannot delete a new turn"
+    protects: [T5, T6, T7]
+    failure_behavior: "Keep unconfirmed coverage without execution changes"
+    code:
+      - path: src/runtime-cost-observer.ts
+        symbol: installRuntimeCostObservers
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "a late completed collect cannot remove the next turn"
+  G6:
+    kind: "safeguard"
+    description: "Anonymous prompt observation"
+    safeguard_type: "validation"
+    guarantee: "Raw text and arbitrary names never enter prompt cost events"
+    protects: [T8]
+    failure_behavior: "Skip invalid byte observation"
+    code:
+      - path: src/core/cost.ts
+        symbol: safePromptPartName
+    tests:
+      - path: tests/v14-cost-observation.test.ts
+        symbol: "assembly observation removes arbitrary secret names"
+  X7:
+    kind: "outcome"
+    description: "No extra cost source"
+    result: "Worker stays in Dispatch observations"
+  X8:
+    kind: "outcome"
+    description: "Live estimated risk"
+    result: "Pending without invented zero usage"
+  X9:
+    kind: "outcome"
+    description: "Cost view"
+    result: "Verified estimates and missing coverage remain distinct"

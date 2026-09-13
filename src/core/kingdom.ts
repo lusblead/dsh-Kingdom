@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
 import { KingdomStore, SCHEMA_VERSION } from './db.js'
 import { kingdomDbPath } from '../paths.js'
+import { ownerEventPayload, type OwnerEventSource } from './owner-control.js'
 
 export interface InitResult {
   action: 'initialized' | 'attached'
@@ -78,62 +79,7 @@ export class KingdomManager {
       const kingdom = this.store.getDefaultKingdom()
 
       if (!kingdom) {
-        const now = new Date().toISOString()
-        const kingdomId = randomUUID()
-        const ownerId = randomUUID()
-        const created: KingdomRowInput = {
-          kingdom_id: kingdomId,
-          name: this.opts.kingdomName,
-          created_at: now,
-          owner_id: ownerId,
-          owner_name: this.opts.ownerName,
-          schema_version: SCHEMA_VERSION,
-        }
-        this.store.insertKingdom(created)
-        this.store.insertBinding({
-          binding_id: randomUUID(),
-          kingdom_id: kingdomId,
-          role_type: 'OWNER',
-          role_name: `Owner-${this.opts.ownerName}`,
-          runtime_type: 'dsh',
-          session_id: null,
-          model_name: null,
-          agent_name: null,
-          session_meta: null,
-          execution_profile_json: null,
-          status: 'ACTIVE',
-          retired_at: null,
-          retired_reason: null,
-          principal_id: ownerId,
-          created_at: now,
-          updated_at: now,
-        })
-        this.store.appendEvent({
-          event_id: randomUUID(),
-          kingdom_id: kingdomId,
-          event_type: 'KINGDOM_CREATED',
-          actor_role: 'OWNER',
-          actor_id: ownerId,
-          target_type: 'kingdom',
-          target_id: kingdomId,
-          payload_json: JSON.stringify({
-            operation: 'init',
-            name: this.opts.kingdomName,
-            owner: this.opts.ownerName,
-            source_channel: 'LOCAL_DIRECT_SLASH',
-          }),
-          created_at: now,
-        })
-        return {
-          action: 'initialized' as const,
-          kingdomId,
-          kingdomName: this.opts.kingdomName,
-          ownerId,
-          ownerName: this.opts.ownerName,
-          territoryCount: 0,
-          bindingCount: 1,
-          detail: `已初始化王国「${this.opts.kingdomName}」，Owner = ${this.opts.ownerName}（id=${ownerId}）。`,
-        }
+        return initializeKingdomFacts(this.store, this.opts.kingdomName, this.opts.ownerName)
       }
 
       const territories = this.store.listTerritories(kingdom.kingdom_id)
@@ -170,4 +116,63 @@ interface KingdomRowInput {
   owner_id: string
   owner_name: string
   schema_version: number
+}
+
+/** Synchronous fact writer shared by direct init and the Owner receipt transaction. */
+export function initializeKingdomFacts(
+  store: KingdomStore, kingdomName: string, ownerName: string,
+  source: OwnerEventSource = { source_channel: 'LOCAL_DIRECT_SLASH' },
+): InitResult {
+  if (store.getDefaultKingdom()) throw new Error('KINGDOM_ALREADY_INITIALIZED')
+  const now = new Date().toISOString()
+  const kingdomId = randomUUID()
+  const ownerId = randomUUID()
+  const created: KingdomRowInput = {
+    kingdom_id: kingdomId,
+    name: kingdomName,
+    created_at: now,
+    owner_id: ownerId,
+    owner_name: ownerName,
+    schema_version: SCHEMA_VERSION,
+  }
+  store.insertKingdom(created)
+  store.insertBinding({
+    binding_id: randomUUID(),
+    kingdom_id: kingdomId,
+    role_type: 'OWNER',
+    role_name: `Owner-${ownerName}`,
+    runtime_type: 'dsh',
+    session_id: null,
+    model_name: null,
+    agent_name: null,
+    session_meta: null,
+    execution_profile_json: null,
+    status: 'ACTIVE',
+    retired_at: null,
+    retired_reason: null,
+    principal_id: ownerId,
+    created_at: now,
+    updated_at: now,
+  })
+  store.appendEvent({
+    event_id: randomUUID(),
+    kingdom_id: kingdomId,
+    event_type: 'KINGDOM_CREATED',
+    actor_role: 'OWNER',
+    actor_id: ownerId,
+    target_type: 'kingdom',
+    target_id: kingdomId,
+    payload_json: JSON.stringify(ownerEventPayload('init', { name: kingdomName, owner: ownerName }, source)),
+    created_at: now,
+  })
+  return {
+    action: 'initialized' as const,
+    kingdomId,
+    kingdomName: kingdomName,
+    ownerId,
+    ownerName: ownerName,
+    territoryCount: 0,
+    bindingCount: 1,
+    detail: `已初始化王国「${kingdomName}」，Owner = ${ownerName}（id=${ownerId}）。`,
+  }
 }
