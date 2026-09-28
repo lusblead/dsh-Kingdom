@@ -480,6 +480,11 @@ export class KingdomStore {
   readonly existed: boolean
   /** 库的 schema 版本（经 kingdoms.schema_version 收敛；v4 判定用）。 */
   readonly schemaVersion: number
+  /**
+   * withImmediateTransaction 的重入深度。
+   * 0 = 无事务在跑；>0 = 已有外层事务，内层调用只加入、不再 BEGIN/COMMIT/ROLLBACK。
+   */
+  private transactionDepth = 0
 
   constructor(dbPath: string, options: { allowSchemaV4?: boolean } = {}) {
     mkdirSync(dirname(dbPath), { recursive: true })
@@ -1655,9 +1660,35 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
   /**
    * v0.7.0（M2）：外层事务包装——HANDOFF 等**原子治理操作**（多步写 + 事件）整体提交/回滚。
    * appendEvent 的内层 BEGIN 在事务中会抛错，由 appendEvent 的嵌套容忍逻辑接管（见下）。
+   *
+   * v3.2.0：**支持真正的嵌套**。直接 Slash 的 ownerWrite 与 Owner GUI 窗口的 apply 各自已经开了
+   * 一层事务，而领域函数（如「建主管席位 + 设领地主理」）还要求自己的原子边界：
+   * - 外层：`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`；
+   * - 内层：`SAVEPOINT` / `RELEASE` / `ROLLBACK TO`——**内层失败只回滚内层写入**，
+   *   异常照常向上抛（若无人接管，最外层仍会整体 ROLLBACK）。
+   * 这一点是必须的：如果内层只是"加入外层"，那么内层捕获异常并返回错误文案时，
+   * 它已经写下的行会留在外层事务里被 COMMIT，原子性就名存实亡。
+   * 用自持深度计数（而非"BEGIN 失败即视为嵌套"）避免把真正的加锁失败误判成嵌套。
    */
   withImmediateTransaction<T>(fn: () => T): T {
+    if (this.transactionDepth > 0) {
+      const savepoint = `kingdom_nested_${this.transactionDepth}`
+      this.db.exec(`SAVEPOINT ${savepoint}`)
+      this.transactionDepth += 1
+      try {
+        const result = fn()
+        this.db.exec(`RELEASE ${savepoint}`)
+        return result
+      } catch (error: unknown) {
+        this.db.exec(`ROLLBACK TO ${savepoint}`)
+        this.db.exec(`RELEASE ${savepoint}`)
+        throw error
+      } finally {
+        this.transactionDepth -= 1
+      }
+    }
     this.db.exec('BEGIN IMMEDIATE')
+    this.transactionDepth += 1
     try {
       const result = fn()
       this.db.exec('COMMIT')
@@ -1665,6 +1696,8 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
     } catch (error: unknown) {
       this.db.exec('ROLLBACK')
       throw error
+    } finally {
+      this.transactionDepth -= 1
     }
   }
 

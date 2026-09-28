@@ -296,6 +296,7 @@ test('v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner
     role_type: 'SUPERVISOR',
     role_name: setupFixture.supervisor_name,
     session_id: ACTIVATION_SESSION,
+    territory_id: store.listTerritories(kingdom.kingdom_id)[0]!.territory_id,
   })}`)
   await directOwner(`role.bind ${JSON.stringify({
     role_type: 'CHANCELLOR',

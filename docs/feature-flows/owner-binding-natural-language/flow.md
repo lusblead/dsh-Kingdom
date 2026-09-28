@@ -190,7 +190,7 @@ sequenceDiagram
                     Draft-->>Caller: exact role.session Draft + confirmation code
                 else new role and resolved context
                     Draft-->>Caller: role.bind Draft + canonical Slash + confirmation code
-                    Draft-->>Caller: Supervisor adds territory.supervisor dependent step
+                    Draft-->>Caller: Supervisor 的 role.bind 自带 territory_id（单步原子写入）
                 end
             end
         end
@@ -224,16 +224,20 @@ Draft construction has no persisted state transition. `DRAFT_READY` and
 the user confirms the canonical Slash, the separate direct Owner ingress persists
 the resulting binding/session/Territory fact and audit event in one transaction.
 Supervisor 的唯一 Territory 会保留为 Draft target。没有现有 Supervisor
-binding 时，Draft 明确列出 `role.bind` 后接依赖其结果的
-`territory.supervisor`；已有 Territory `supervisor_binding_id` 时只列出对
-该 exact binding 的 `role.session`。本模块不生成 binding ID；两步中任一步
-失败都停止交给 Owner 控制面处理，Agent 不自动重试或补偿。
+binding 时，Draft 只列出一条 `role.bind`，并**在该命令里带上 `territory_id`**
+（3.2.0 起主管的席位与领地主理在同一事务里一次写入，不再有第二步）；
+已有 Territory `supervisor_binding_id` 时只列出对该 exact binding 的
+`role.session`。本模块不生成 binding ID；命令失败即停止，交给 Owner
+控制面处理，Agent 不自动重试或补偿。
 
 ## Persisted Owner write lifecycle
 
 Draft 状态本身不进入下图；下图只描述 direct canonical Slash 通过 Owner
-transaction boundary 后产生的持久化 RoleBinding/Territory 事实。两步 Supervisor
-计划允许第一步提交后第二步尚未提交，不能由 Agent 自动回滚或补偿。
+transaction boundary 后产生的持久化 RoleBinding/Territory 事实。主管的席位与
+领地主理自 3.2.0 起由**同一条** `role.bind` 在同一事务里写入（此前的两步
+`role.bind` -> `territory.supervisor` 已取消：第一步在新语法下会被拒绝）；
+改派或解除既有主理仍走 `territory.supervisor`。任一步失败都停止，不能由 Agent
+自动回滚或补偿。
 Product `kingdom_bind_role`/`kingdom_bind_session` Tools 在结构化
 zero-write handoff 处停止；helper-only Territory resolver 只消费 bounded
 snapshots，不能成为另一个 Product Tool 或写入路径。因此唯一写链保持为

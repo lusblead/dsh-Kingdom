@@ -105,18 +105,23 @@ export function updateTerritory(
 }
 
 /**
- * v0.7.0（M2）：设置 Territory 主理 Supervisor（Topology Administration Plane）。
- * - 仅 direct Owner Control capability 可执行（requireAdmin → requireOwnerControl）；
+ * v0.7.0（M2）语义 + 3.2.0 边界：**授权无关**的主理写入。校验不变量后更新领地并写事件。
+ *
  * - supervisorBindingId=null → 未指派 → fail-closed（TERRITORY_SUPERVISOR_MISSING，无 Supervisor 可治理）；
- * - 指派必须是当前王国的 ACTIVE SUPERVISOR 绑定。
+ * - 指派必须是当前王国的 ACTIVE SUPERVISOR 绑定；
+ * - 不变量（Owner 2026-09-28 口径 + 2026-09-29 裁定：领地和主管完全绑定）：
+ *   ① 一个领地至多一个主理——目标领地已有**在任 ACTIVE** 主理时拒绝（**先解除再指派**，不静默覆盖）；
+ *      引用指向已退任席位的悬挂引用属于修复，可直接改派；
+ *   ② 一个主管席位至多主理一个领地——席位已隶属其它未删除领地时拒绝，须先解除原领地的主理。
+ *   DELETED 领地不参与治理，其历史指针不锁住席位。
+ *
+ * 授权由调用方负责：`setTerritorySupervisor` = requireAdmin + 委托本函数。
  */
-export function setTerritorySupervisor(
+export function applyTerritorySupervisor(
   store: KingdomStore,
   input: { kingdomId: string; territoryId: string; supervisorBindingId: string | null },
-  auth?: AdminAuth,
+  actor: { actorId: string | null; eventSource: object },
 ): string {
-  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.supervisor', input })
-  if (!admin.ok) return admin.message
   const territory = store.getTerritoryById(input.territoryId)
   if (!territory || territory.kingdom_id !== input.kingdomId) {
     return `错误：领地不存在（id=${input.territoryId}）。`
@@ -132,6 +137,27 @@ export function setTerritorySupervisor(
     if (supervisor.role_type !== 'SUPERVISOR' || supervisor.status !== 'ACTIVE') {
       return `错误：绑定 ${supervisor.role_name} 不是 ACTIVE 的 SUPERVISOR，不能作为领地主理。`
     }
+    if (territory.supervisor_binding_id !== null && territory.supervisor_binding_id !== supervisor.binding_id) {
+      const current = store.getBindingById(territory.supervisor_binding_id)
+      // 只有「当前主理仍是在任 ACTIVE 席位」才算真冲突：此时拒绝，要求先解除再指派（不静默替换）。
+      // 若引用指向已退任/已不存在的席位，那只是历史悬挂引用，直接改派属于修复而不是替换；
+      // 旧主管的未决工作仍由 unsettled-execution 守卫拦截（该守卫不看 ACTIVE/RETIRED）。
+      if (current && current.status === 'ACTIVE') {
+        return `错误：领地「${territory.name}」已有主理（${current.role_name}）。` +
+          `请先解除现有主理（territory.supervisor 传 supervisor_binding_id=null），再指派新的。`
+      }
+    }
+    // 一个领地至多一个主理：目标领地已有**在任 ACTIVE** 主理时必须先解除（见上）。
+    // 反向 1:1（Owner 2026-09-29 裁定）：一个主管席位只能主理**一个**领地。
+    // 席位已隶属其它未删除领地 → 拒绝并提示先解除原领地；排除本次目标领地（同一领地重复指派同一席位
+    // 不算跨领地抢占）。DELETED 领地不参与治理，其历史指针不锁住席位。
+    const attached = store.listTerritories(input.kingdomId)
+      .find(item => item.status !== 'DELETED' && item.territory_id !== territory.territory_id
+        && item.supervisor_binding_id === supervisor.binding_id) ?? null
+    if (attached) {
+      return `错误：主管 ${supervisor.role_name} 已隶属领地「${attached.name}」；一个主管席位只能主理一个领地，` +
+        `请先解除原领地的主理（territory.supervisor 传 supervisor_binding_id=null），再指派到这里。`
+    }
   }
   store.updateTerritorySupervisor(territory.territory_id, input.supervisorBindingId)
   store.appendEvent({
@@ -139,20 +165,33 @@ export function setTerritorySupervisor(
     kingdom_id: input.kingdomId,
     event_type: 'TERRITORY_SUPERVISOR_UPDATED',
     actor_role: 'OWNER',
-    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
+    actor_id: actor.actorId,
     target_type: 'territory',
     target_id: territory.territory_id,
     payload_json: JSON.stringify({
       name: territory.name,
       supervisor_binding_id: input.supervisorBindingId,
       unassigned: input.supervisorBindingId === null,
-      ...admin.eventSource,
+      ...actor.eventSource,
     }),
     created_at: new Date().toISOString(),
   })
   return input.supervisorBindingId === null
     ? `领地「${territory.name}」已解除主理（未指派 Supervisor → fail-closed：无 Supervisor 可治理该领地）。`
     : `领地「${territory.name}」主理 Supervisor 已设为 ${store.getBindingById(input.supervisorBindingId)!.role_name}。`
+}
+
+export function setTerritorySupervisor(
+  store: KingdomStore,
+  input: { kingdomId: string; territoryId: string; supervisorBindingId: string | null },
+  auth?: AdminAuth,
+): string {
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'territory.supervisor', input })
+  if (!admin.ok) return admin.message
+  return applyTerritorySupervisor(store, input, {
+    actorId: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
+    eventSource: admin.eventSource,
+  })
 }
 
 /**

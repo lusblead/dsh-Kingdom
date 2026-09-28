@@ -195,6 +195,28 @@ test('workbench projection is read only and task history is scoped before its bo
   } finally { store.close() }
 })
 
+test('supervisor seats project their governed territories; an unattached legacy seat stays visible without fabricating an owner request', () => {
+  const store = setup()
+  try {
+    const before = projected(store)
+    const seated = before.roles.items.find(item => item.bindingId === 'sup-a')!
+    // v3.2.0：席位投影带上它实际主理的领地（来自同一份领地投影）。
+    assert.deepEqual(seated.territories, [{ territoryId: 'territory-a', name: '领地a' }])
+    // 非主管角色不隶属领地（不适用，而不是"缺失"）。
+    assert.deepEqual(before.roles.items.find(item => item.bindingId === 'ch')!.territories, [])
+
+    // 遗留未隶属席位（3.2.0 之前可能留下的状态）：投影显式给出空列表供界面标注「未隶属领地」。
+    store.updateTerritorySupervisor('territory-a', null)
+    const after = projected(store)
+    assert.deepEqual(after.roles.items.find(item => item.bindingId === 'sup-a')!.territories, [])
+    assert.deepEqual(after.roles.items.find(item => item.bindingId === 'sup-b')!.territories,
+      [{ territoryId: 'territory-b', name: '领地b' }], 'unrelated seats are unaffected')
+    // 可执行的待办仍只在**领地侧**出现一次；不为每个遗留席位各生成一条待办（避免线性膨胀）。
+    assert.equal(after.ownerActions.items.filter(item => item.kind === 'TERRITORY_SUPERVISOR_CONFIGURATION_REQUIRED').length, 1)
+    assert.equal(after.ownerActions.items.some(item => item.kind === 'SUPERVISOR_TERRITORY_CONFIGURATION_REQUIRED'), false)
+  } finally { store.close() }
+})
+
 test('organization display truncation never creates a false owner appointment request', () => {
   const store = setup()
   try {

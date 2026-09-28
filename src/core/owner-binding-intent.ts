@@ -177,6 +177,11 @@ export interface RoleBindDraftOperation {
     role_type: IntentRoleType
     role_name: string
     session_id: string
+    /**
+     * v3.2.0：主管的任命必须同时给出领地，且席位与主理在同一事务里一次写完。
+     * 因此主管 Draft 是**单步** `role.bind`（带 territory_id），不再有第二步 territory.supervisor。
+     */
+    territory_id?: string
   }
 }
 
@@ -611,28 +616,13 @@ function roleSessionStep(operation: RoleSessionDraftOperation): RoleSessionDraft
   }
 }
 
-/** Pure materializer for the second direct Slash once role.bind returned its ID. */
+/**
+ * 旧两步流程的材料化（v3.2.0 之前：先 role.bind，再拿返回的 binding_id 执行第二步）。
+ * 3.2.0 起主管任命是单步原子命令，本函数只为仍然引用它的调用方保留，不再是 Draft 的步骤。
+ */
 export function canonicalTerritorySupervisorSlash(territoryId: string, supervisorBindingId: string): string | null {
   if (!isExactToken(territoryId) || !isExactToken(supervisorBindingId)) return null
   return `/kingdom territory.supervisor ${stableJson({ territory_id: territoryId, supervisor_binding_id: supervisorBindingId })}`
-}
-
-function territorySupervisorStep(territoryId: string): TerritorySupervisorDraftStep {
-  const bindingIdReference = 'ROLE_BIND.result.binding_id' as const
-  const template = `/kingdom territory.supervisor ${stableJson({
-    territory_id: territoryId,
-    supervisor_binding_id: '${ROLE_BIND.result.binding_id}',
-  })}`
-  return {
-    step_id: 'TERRITORY_SUPERVISOR',
-    kind: 'territory.supervisor',
-    args: { territory_id: territoryId, supervisor_binding_id_ref: bindingIdReference },
-    canonical_direct_slash: null,
-    canonical_direct_slash_template: template,
-    depends_on: ['ROLE_BIND'],
-    confirmation: DIRECT_SLASH_CONFIRM_REQUIRED,
-    policy: { failure: 'STOP_NO_AGENT_RETRY_OR_COMPENSATION' },
-  }
 }
 
 function territorySupervisorExactStep(territoryId: string, supervisorBindingId: string): TerritorySupervisorDraftStep {
@@ -654,14 +644,16 @@ function canonicalSteps(
   territory: { territory_id: string; name: string } | null,
   supervisorBindingId: string | null,
 ): CanonicalDraftStep[] {
-  if (parsed.role_type !== 'SUPERVISOR' || territory === null) {
-    return [operation.kind === 'role.bind' ? roleBindStep(operation) : roleSessionStep(operation)]
-  }
-  if (supervisorBindingId !== null) return [roleSessionStep(operation as RoleSessionDraftOperation)]
   if (operation.kind === 'role.session') {
+    if (parsed.role_type !== 'SUPERVISOR' || territory === null || supervisorBindingId !== null) {
+      return [roleSessionStep(operation)]
+    }
+    // 改绑既有席位后还要把它设为该领地主理：两步（先改 session，再设主理）。
     return [roleSessionStep(operation), territorySupervisorExactStep(territory.territory_id, operation.args.binding_id)]
   }
-  return [roleBindStep(operation as RoleBindDraftOperation), territorySupervisorStep(territory.territory_id)]
+  // v3.2.0：主管的 role.bind 已经携带 territory_id，席位与主理在同一事务内原子完成，
+  // 因此不再需要第二步 `/kingdom territory.supervisor`（旧两步草案在新语法下第一步就会被拒）。
+  return [roleBindStep(operation)]
 }
 
 function readyDraft(
@@ -917,7 +909,9 @@ function buildDraftFromParsed(
   if (existing && 'ok' in existing) return ambiguousDraft(normalizedInput, parsedIntent, existing.code)
   const operation: DraftOperation = existing
     ? { kind: 'role.session', args: { binding_id: existing.binding_id, session_id: session.session_ref } }
-    : { kind: 'role.bind', args: { role_type: parsed.role_type, role_name: canonicalRoleName(parsed.role_type), session_id: session.session_ref } }
+    : { kind: 'role.bind', args: { role_type: parsed.role_type, role_name: canonicalRoleName(parsed.role_type), session_id: session.session_ref,
+      // 主管的领地归属是任命的一部分：Draft 必须与 direct Slash 语法一致，否则草案不可执行。
+      ...(parsed.role_type === 'SUPERVISOR' && territory ? { territory_id: territory.territory_id } : {}) } }
   return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
 }
 

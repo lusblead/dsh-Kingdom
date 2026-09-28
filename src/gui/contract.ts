@@ -478,6 +478,12 @@ export interface WorkbenchRoleItem {
   roleType: string
   roleName: string
   sessionBound: boolean
+  /**
+   * v3.2.0：主管席位的隶属领地（来自领地投影的同一份事实）。
+   * 空数组 = 该席位未隶属任何活跃领地（遗留席位，需 Owner 处理）；非主管角色恒为空数组（不适用）。
+   * 一个席位可以主理多个领地，因此这里是列表而不是单个值。
+   */
+  territories: { territoryId: string; name: string }[]
   taskCount: number
   taskIds: string[]
   taskIdsTruncated: boolean

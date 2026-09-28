@@ -43,6 +43,7 @@ import { installRuntimeCostObservers, type RuntimeCostHost } from './runtime-cos
 import { setCapabilityCeiling } from './capability/admin.js'
 import {
   bindRole,
+  bindSupervisorForTerritory,
   listBindings,
   parseExecutionProfile,
   rebindSession,
@@ -565,7 +566,15 @@ export function ensureGuiSetupTerritory(
   return created
 }
 
-/** Ensure setup role identity without ever binding a Worker to the activator. */
+/**
+ * Ensure setup role identity without ever binding a Worker to the activator.
+ *
+ * v3.2.0：主管席位必须隶属一个领地，因此这里的 SUPERVISOR 分支走**原子通道**
+ * （`bindSupervisorForTerritory`：建席位 + 设主理同一事务），并要求显式 `territoryId`。
+ * 缺少领地时由该通道给出明确拒绝，不会先建出一个没有领地的主管席位。
+ * 本助手当前只有测试调用（产品入口是 direct Slash / Owner 管理窗口），但它是包的公开导出，
+ * 所以同样不放宽不变量。
+ */
 export function ensureGuiSetupBinding(
   store: KingdomStore,
   input: {
@@ -573,17 +582,27 @@ export function ensureGuiSetupBinding(
     roleType: 'CHANCELLOR' | 'SUPERVISOR' | 'WORKER'
     roleName: string
     sessionId: string | null
+    /** 仅 SUPERVISOR 需要：该席位要主理的领地（3.2.0 起必填）。 */
+    territoryId?: string
   },
   auth: AdminAuth,
 ): RoleBindingRow {
   const existing = store.getBindingByRole(input.kingdomId, input.roleType)
   if (!existing) {
-    const result = bindRole(store, {
-      kingdomId: input.kingdomId,
-      roleType: input.roleType,
-      roleName: input.roleName,
-      sessionId: input.sessionId,
-    }, auth)
+    const result = input.roleType === 'SUPERVISOR'
+      ? bindSupervisorForTerritory(store, {
+        kingdomId: input.kingdomId,
+        roleType: input.roleType,
+        roleName: input.roleName,
+        sessionId: input.sessionId,
+        territoryId: input.territoryId ?? '',
+      }, auth)
+      : bindRole(store, {
+        kingdomId: input.kingdomId,
+        roleType: input.roleType,
+        roleName: input.roleName,
+        sessionId: input.sessionId,
+      }, auth)
     throwOnGuiSetupFailure(result)
     const created = store.getBindingByRole(input.kingdomId, input.roleType)
     if (!created) throw new Error(`错误：setup.basic 创建 ${input.roleType} 后找不到 binding。`)
@@ -2507,16 +2526,39 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
           return { kind: text.startsWith('UNKNOWN/') || text.startsWith('错误：') ? 'error' : 'success', text }
         }
         case 'role.bind': {
-          const parsed = parseJsonEnvelope(rest, ['role_type', 'role_name', 'session_id', 'model_name', 'agent_name', 'session_meta'], ['role_type'])
+          const parsed = parseJsonEnvelope(rest, ['role_type', 'role_name', 'session_id', 'model_name', 'agent_name', 'session_meta', 'territory_id'], ['role_type'])
           if (!parsed.ok || typeof parsed.value.role_type !== 'string') return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${parsed.ok ? 'role_type 必须是 string。' : parsed.message}` }
           const value = parsed.value
-          if ((value.role_type as string).toUpperCase() === 'OWNER') return { kind: 'error', text: 'OWNER_CONTROL_REQUIRED: OWNER projection 不得通过 role.bind 改绑为 Session。' }
-          for (const key of ['role_name', 'session_id', 'model_name', 'agent_name', 'session_meta'] as const) {
+          const boundRoleType = (value.role_type as string).trim().toUpperCase()
+          if (boundRoleType === 'OWNER') return { kind: 'error', text: 'OWNER_CONTROL_REQUIRED: OWNER projection 不得通过 role.bind 改绑为 Session。' }
+          for (const key of ['role_name', 'session_id', 'model_name', 'agent_name', 'session_meta', 'territory_id'] as const) {
             if (value[key] !== undefined && typeof value[key] !== 'string') return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${key} 必须是 string。` }
           }
           const sessionCheck = await validateDirectSessionPayload('role.bind', value.session_id)
           if (!sessionCheck.ok) return { kind: 'error', text: sessionCheck.message }
-          const text = ownerWrite('role.bind', () => bindRole(store, { kingdomId: requireKingdom()!, roleType: value.role_type as string, roleName: value.role_name as string | undefined, sessionId: value.session_id as string | undefined, modelName: value.model_name as string | undefined, agentName: value.agent_name as string | undefined, sessionMeta: value.session_meta as string | undefined, sessionEvidence: sessionCheck.evidence }, auth))
+          // v3.2.0（Owner 2026-09-28 口径）：领地与主管完全绑定——任命主管必须同时给出领地，
+          // 且「建席位 + 设主理」必须在同一事务里原子完成，不存在"有主管、没领地"的中间态。
+          // 语义校验放在会话校验之后，保证「会话不可信」仍按 SESSION_* 原因码优先暴露。
+          const territoryId = typeof value.territory_id === 'string' ? value.territory_id.trim() : ''
+          if (boundRoleType !== 'SUPERVISOR' && territoryId) {
+            return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: territory_id 只用于任命 SUPERVISOR（收到 ${boundRoleType || '空'}）；其它角色不隶属领地。` }
+          }
+          if (boundRoleType === 'SUPERVISOR' && !territoryId) {
+            return { kind: 'error', text: 'INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: 任命 SUPERVISOR 必须同时给出 territory_id —— 主管不能没有领地（未写入）。' }
+          }
+          const bindParams = {
+            kingdomId: requireKingdom()!,
+            roleType: value.role_type as string,
+            roleName: value.role_name as string | undefined,
+            sessionId: value.session_id as string | undefined,
+            modelName: value.model_name as string | undefined,
+            agentName: value.agent_name as string | undefined,
+            sessionMeta: value.session_meta as string | undefined,
+            sessionEvidence: sessionCheck.evidence,
+          }
+          const text = ownerWrite('role.bind', () => boundRoleType === 'SUPERVISOR'
+            ? bindSupervisorForTerritory(store, { ...bindParams, territoryId }, auth)
+            : bindRole(store, bindParams, auth))
           return { kind: text.startsWith('UNKNOWN/') || text.startsWith('错误：') || text.startsWith('角色 ') && text.includes('已有绑定') ? 'error' : 'success', text }
         }
         case 'role.unbind': {
@@ -2585,9 +2627,10 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
               '/kingdom ceiling {"ceiling":{"tool:pwsh":true}} | {"clear":true}',
               '/kingdom territory.create {"name":"研发领","workspace_path":"C:/work"}',
               '/kingdom territory.delete {"territory_id":"...","force":false}',
-              '/kingdom territory.supervisor {"territory_id":"...","supervisor_binding_id":"..."}',
-              '/kingdom role.bind {"role_type":"SUPERVISOR","role_name":"主理","session_id":"真实 DSH session"}',
-              '/kingdom role.unbind {"binding_id":"...","reason":"换届"}',
+              '/kingdom territory.supervisor {"territory_id":"...","supervisor_binding_id":"..."}（改派/解除既有主理）',
+              '/kingdom role.bind {"role_type":"SUPERVISOR","role_name":"主理","territory_id":"...","session_id":"真实 DSH session"}  ← 主管必须同时指定领地（同一事务原子完成）',
+              '/kingdom role.bind {"role_type":"WORKER","role_name":"执行者"}（非主管角色不带 territory_id）',
+              '/kingdom role.unbind {"binding_id":"...","reason":"换届"}（退任主管会同时解除其领地主理）',
               '/kingdom role.session {"binding_id":"...","session_id":"真实 DSH session"}',
               '/kingdom execution-profile {"binding_id":"...","provider":"spawn","model":"..."}',
               '以上写命令只接受一个 JSON object；unknown key、额外 token、Owner Session 均拒绝。',

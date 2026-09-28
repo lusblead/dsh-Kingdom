@@ -91,12 +91,14 @@ test('Supervisor 唯一 Territory 生成 role.bind Draft，并保留已解析 Te
   assert.equal(draft.status, 'DRAFT_READY')
   assert.equal(draft.operation?.kind, 'role.bind')
   assert.deepEqual(draft.intent.territory, { territory_id: 'territory-rag', name: 'RAG研发' })
-  assert.equal(draft.operation && 'territory_id' in draft.operation.args, false)
+  // v3.2.0：主管的 role.bind 必须自带 territory_id，才能与 direct Slash 语法一致。
+  assert.equal(draft.operation && 'territory_id' in draft.operation.args
+    ? draft.operation.args.territory_id : null, 'territory-rag')
   assert.match(draft.canonical_direct_slash ?? '', /^\/kingdom role\.bind /u)
   assert.equal(draft.confirmation, DIRECT_SLASH_CONFIRM_REQUIRED)
 })
 
-test('Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果', () => {
+test('Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完', () => {
   const draft = draftOwnerBindingIntent({
     text: '让当前会话主管研发辖区',
     context: {
@@ -105,18 +107,14 @@ test('Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖
     },
   })
 
-  assert.deepEqual(draft.steps.map(step => step.kind), ['role.bind', 'territory.supervisor'])
-  assert.equal(draft.steps[0]?.canonical_direct_slash, '/kingdom role.bind {"role_name":"主管","role_type":"SUPERVISOR","session_id":"session-supervisor"}')
-  assert.equal(draft.steps[1]?.canonical_direct_slash, null)
-  assert.deepEqual(draft.steps[1]?.args, {
-    territory_id: 'territory-rag',
-    supervisor_binding_id_ref: 'ROLE_BIND.result.binding_id',
-  })
-  assert.equal(draft.steps[1]?.canonical_direct_slash_template, '/kingdom territory.supervisor {"supervisor_binding_id":"${ROLE_BIND.result.binding_id}","territory_id":"territory-rag"}')
-  assert.deepEqual(draft.steps[1]?.depends_on, ['ROLE_BIND'])
-  assert.equal(canonicalTerritorySupervisorSlash('territory-rag', 'binding-supervisor'), '/kingdom territory.supervisor {"supervisor_binding_id":"binding-supervisor","territory_id":"territory-rag"}')
+  assert.deepEqual(draft.steps.map(step => step.kind), ['role.bind'])
+  assert.equal(draft.steps[0]?.canonical_direct_slash,
+    '/kingdom role.bind {"role_name":"主管","role_type":"SUPERVISOR","session_id":"session-supervisor","territory_id":"territory-rag"}')
   assert.equal(draft.steps[0]?.policy.failure, 'STOP_NO_AGENT_RETRY_OR_COMPENSATION')
-  assert.equal(draft.steps[1]?.policy.failure, 'STOP_NO_AGENT_RETRY_OR_COMPENSATION')
+  assert.equal(draft.canonical_direct_slash, draft.steps[0]?.canonical_direct_slash)
+  // 旧两步流程的材料化仍可用（供存量调用方），但不再是 Draft 的步骤。
+  assert.equal(canonicalTerritorySupervisorSlash('territory-rag', 'binding-supervisor'),
+    '/kingdom territory.supervisor {"supervisor_binding_id":"binding-supervisor","territory_id":"territory-rag"}')
 })
 
 test('已有 Territory supervisor_binding_id 时对 exact Supervisor binding 生成 role.session', () => {
@@ -492,7 +490,7 @@ test('structured OWNER gate precedes request and target session proof across gen
   assert.equal(exactInvalidExpired.write_effect, 'ZERO_WRITE')
 })
 
-test('Supervisor OWNER_CONTROL_REQUIRED rejection helper returns the full dependent two-step Draft', () => {
+test('Supervisor OWNER_CONTROL_REQUIRED rejection helper returns the executable single-step Draft', () => {
   const draft = draftOwnerBindingIntentFromRejectedWrite({
     code: 'OWNER_CONTROL_REQUIRED',
     operation: 'kingdom_bind_role',
@@ -506,12 +504,11 @@ test('Supervisor OWNER_CONTROL_REQUIRED rejection helper returns the full depend
 
   assert.equal(draft.status, 'DRAFT_READY')
   assert.equal(draft.normalized_input, '让当前会话主管研发辖区')
-  assert.deepEqual(draft.steps.map(step => step.kind), ['role.bind', 'territory.supervisor'])
-  assert.equal(draft.steps[0]?.canonical_direct_slash, '/kingdom role.bind {"role_name":"主管","role_type":"SUPERVISOR","session_id":"session-rejected-supervisor"}')
-  assert.equal(draft.steps[1]?.canonical_direct_slash_template, '/kingdom territory.supervisor {"supervisor_binding_id":"${ROLE_BIND.result.binding_id}","territory_id":"territory-rag"}')
+  assert.deepEqual(draft.steps.map(step => step.kind), ['role.bind'])
+  assert.equal(draft.steps[0]?.canonical_direct_slash,
+    '/kingdom role.bind {"role_name":"主管","role_type":"SUPERVISOR","session_id":"session-rejected-supervisor","territory_id":"territory-rag"}')
   assert.equal(draft.authority_source, 'NONE')
   assert.equal(draft.owner_authority, false)
   assert.equal(draft.write_effect, 'ZERO_WRITE')
   assert.equal(draft.steps[0]?.policy.failure, 'STOP_NO_AGENT_RETRY_OR_COMPENSATION')
-  assert.equal(draft.steps[1]?.policy.failure, 'STOP_NO_AGENT_RETRY_OR_COMPENSATION')
 })

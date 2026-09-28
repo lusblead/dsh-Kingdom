@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { realpathSync, statSync } from 'node:fs'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { EventRow, KingdomStore, RoleBindingRow, TerritoryRow } from './db.js'
-import { bindRole, rebindSession, setExecutionProfile, type AdminAuth, type ExecutionProfileV1 } from './binding.js'
+import { bindRole, bindSupervisorForTerritory, rebindSession, setExecutionProfile, type AdminAuth, type ExecutionProfileV1 } from './binding.js'
 import { createTerritory, setTerritorySupervisor, updateTerritory } from './territory.js'
 import { setCapabilityCeiling } from '../capability/admin.js'
 import {
@@ -261,8 +261,8 @@ export type OwnerOperationInput =
   | { action: 'init'; parameters: { kingdom_name: string; owner_name: string } }
   | { action: 'territory.create'; parameters: { name: string; workspace_path: string; summary?: string | null } }
   | { action: 'territory.update'; parameters: { territory_id: string; name?: string; summary?: string | null } }
-  | { action: 'territory.supervisor'; parameters: { territory_id: string; supervisor_binding_id: string } }
-  | { action: 'role.bind'; parameters: { role_type: OwnerManagedRole; role_name: string; session_id?: string | null } }
+  | { action: 'territory.supervisor'; parameters: { territory_id: string; supervisor_binding_id: string | null } }
+  | { action: 'role.bind'; parameters: { role_type: OwnerManagedRole; role_name: string; session_id?: string | null; territory_id?: string | null } }
   | { action: 'role.session'; parameters: { binding_id: string; session_id: string } }
   | { action: 'ceiling'; parameters: { ceiling: Record<string, boolean> } }
   | { action: 'execution-profile'; parameters: { binding_id: string; profile: ExecutionProfileV1 | null } }
@@ -424,15 +424,24 @@ function normalizeInput(raw: OwnerOperationInput): OwnerOperationInput {
     }
     case 'territory.supervisor': {
       const p = object(outer.parameters, ['territory_id', 'supervisor_binding_id'])
-      return { action: 'territory.supervisor', parameters: { territory_id: string(p.territory_id, '领地 ID'), supervisor_binding_id: string(p.supervisor_binding_id, '主管绑定 ID') } }
+      // v3.2.0（Owner 2026-09-29 裁定）：管理窗口必须能表达"解除现任主理"。
+      // 显式 JSON null = 解除；缺失（undefined）仍然是输入错误，不会被当成解除。
+      const supervisorBindingId = p.supervisor_binding_id === null ? null : string(p.supervisor_binding_id, '主管绑定 ID')
+      return { action: 'territory.supervisor', parameters: { territory_id: string(p.territory_id, '领地 ID'), supervisor_binding_id: supervisorBindingId } }
     }
     case 'role.bind': {
-      const p = object(outer.parameters, ['role_type', 'role_name', 'session_id'], ['role_type', 'role_name'])
+      const p = object(outer.parameters, ['role_type', 'role_name', 'session_id', 'territory_id'], ['role_type', 'role_name'])
       if (!MANAGED_ROLES.includes(p.role_type as string)) fail('INVALID_ROLE', '仅支持宰相、主管和执行者。')
       const session = p.session_id === undefined || p.session_id === null ? null : string(p.session_id, 'Session ID')
       if (p.role_type === 'WORKER' && session !== null) fail('WORKER_SESSION_UNSUPPORTED', '执行者 Session 由正常 governed 执行路径建立。')
       if (p.role_type !== 'WORKER' && session === null) fail('TARGET_SESSION_REQUIRED', '主管和宰相必须选择已有真实 Session。')
-      return { action: 'role.bind', parameters: { role_type: p.role_type as OwnerManagedRole, role_name: string(p.role_name, '角色名称', 120), session_id: session } }
+      // v3.2.0（Owner 2026-09-28 口径）：领地与主管完全绑定——任命主管必须同时选领地。
+      // 非主管角色不隶属领地，携带 territory_id 一律拒绝（不静默忽略）。
+      const territoryId = p.territory_id === undefined || p.territory_id === null ? null : string(p.territory_id, '领地 ID')
+      if (p.role_type === 'SUPERVISOR' && territoryId === null) fail('TERRITORY_REQUIRED', '任命主管必须同时选择它要主理的领地；主管不能没有领地。')
+      if (p.role_type !== 'SUPERVISOR' && territoryId !== null) fail('TERRITORY_UNSUPPORTED', '只有主管在任命时指定领地；其它角色不隶属领地。')
+      return { action: 'role.bind', parameters: { role_type: p.role_type as OwnerManagedRole, role_name: string(p.role_name, '角色名称', 120), session_id: session,
+        ...(territoryId === null ? {} : { territory_id: territoryId }) } }
     }
     case 'role.session': {
       const p = object(outer.parameters, ['binding_id', 'session_id'])
@@ -568,7 +577,11 @@ export class OwnerDecisionController {
     const kingdomId = record.view.kingdomId
     const bindings = kingdomId ? this.store.listBindings(kingdomId).filter(b => b.status === 'ACTIVE'
       && s.bindingIds.includes(b.binding_id) && s.roleTypes.includes(b.role_type as OwnerManagedRole)) : []
-    return { territories: kingdomId ? this.store.listTerritories(kingdomId).filter(t => s.territoryIds.includes(t.territory_id))
+    // 目录与提交必须逐 action 同判据：只有**显式在授权范围内**的领地才列出。
+    // 不用 kingdomWide 放宽目录——否则会出现"清单里选得到、提交必被拒"
+    // （territory.update/delete/supervisor 的共享 territory() 只认 scope.territoryIds）。
+    return { territories: kingdomId ? this.store.listTerritories(kingdomId)
+      .filter(t => t.status !== 'DELETED' && s.territoryIds.includes(t.territory_id))
       .map(t => ({ id: t.territory_id, name: t.name })) : [],
       bindings: bindings.map(b => ({ id: b.binding_id, roleType: b.role_type, roleName: b.role_name })),
       runtimeSessions: [...new Map(sessions.filter(item => s.targetSessionIds.includes(item.id))
@@ -1164,7 +1177,21 @@ export class OwnerDecisionController {
         after = JSON.stringify({ name, summary: p.summary === undefined ? row.summary : p.summary }); summary = '更新领地名称和说明'; break
       }
       case 'territory.supervisor': {
-        const p = input.parameters, row = territory(p.territory_id), supervisor = binding(p.supervisor_binding_id)
+        const p = input.parameters, row = territory(p.territory_id)
+        if (p.supervisor_binding_id === null) {
+          // v3.2.0：解除现任主理。1:1 之下"把主理换到别处"必须先走这一步。
+          // 旧责任关系仍作为相关事实登记：它的 session 参与未结算工作守卫（不允许在在途工作时解除责任）。
+          if (row.supervisor_binding_id) {
+            const previous = this.store.getBindingById(row.supervisor_binding_id)
+            if (previous && previous.kingdom_id !== kingdomId) fail('RELATED_BINDING_UNAVAILABLE', '旧主管引用不属于当前王国，无法安全修改责任。')
+            facts.push({ previousSupervisor: previous, previousSupervisorId: row.supervisor_binding_id })
+            bindings.add(row.supervisor_binding_id)
+            if (previous?.session_id) sessions.add(previous.session_id)
+          }
+          before = row.supervisor_binding_id; after = null
+          summary = '解除领地现任主理（该领地随即 fail-closed，直到指派新的）'; break
+        }
+        const supervisor = binding(p.supervisor_binding_id)
         if (supervisor.role_type !== 'SUPERVISOR') fail('INVALID_ROLE', '目标必须是活跃主管。')
         if (row.supervisor_binding_id) {
           // The previous relationship is historical input, not a request to edit
@@ -1175,6 +1202,22 @@ export class OwnerDecisionController {
           facts.push({ previousSupervisor: previous, previousSupervisorId: row.supervisor_binding_id })
           bindings.add(row.supervisor_binding_id)
           if (previous?.session_id) sessions.add(previous.session_id)
+          // v3.2.0（Owner D2）：在任主理不静默替换——先解除再指派。判据与 core 的
+          // applyTerritorySupervisor 完全对齐：只有"当前指针仍指向**在任 ACTIVE** 席位"才算冲突；
+          // 指向已退任席位的悬挂引用可直接改派（修复），不再出现 GUI 比 direct Slash 更严的分叉。
+          if (previous && previous.status === 'ACTIVE' && previous.binding_id !== supervisor.binding_id) {
+            fail('TERRITORY_ALREADY_SUPERVISED', `领地「${row.name}」已有在任主理（${previous.role_name}）；请先解除现有主理，再指派新的。`)
+          }
+        }
+        // v3.2.0（Owner 1:1 裁定）：一个主管席位只主理一个领地。与 core 同判据（排除本次目标领地、
+        // 排除 DELETED 领地），在预览阶段就给出准确原因，而不是等到提交才回滚。
+        const otherTerritory = this.store.listTerritories(kingdomId!)
+          .find(item => item.status !== 'DELETED' && item.territory_id !== row.territory_id
+            && item.supervisor_binding_id === supervisor.binding_id) ?? null
+        if (otherTerritory) {
+          facts.push(otherTerritory); territories.add(otherTerritory.territory_id)
+          fail('SUPERVISOR_ALREADY_ATTACHED',
+            `主管 ${supervisor.role_name} 已隶属领地「${otherTerritory.name}」；一个主管席位只能主理一个领地，请先解除原领地的主理。`)
         }
         before = row.supervisor_binding_id; after = supervisor.binding_id; summary = '更新领地主理主管'; break
       }
@@ -1186,8 +1229,33 @@ export class OwnerDecisionController {
           facts.push(existing)
           if (existing) fail('ROLE_ALREADY_BOUND', '宰相席位已有活跃绑定。')
         }
+        if (p.role_type === 'SUPERVISOR') {
+          // v3.2.0：主管必须同时落到一个领地上；预览阶段就证明「领地在授权范围内」且「当前无其他主理」，
+          // 不让人类在提交后才发现冲突。
+          if (!p.territory_id) fail('TERRITORY_REQUIRED', '任命主管必须指定领地。')
+          // 与共享 territory() 助手、以及 catalog.territories 同一判据：领地必须显式在本次授权范围内。
+          // 这里刻意**不**用 kingdomWide 放宽——否则目录可见性与提交判定会分叉（3.2.0 审计 r1 的 DV5 缺陷）。
+          if (!scope.territoryIds.includes(p.territory_id)) fail('SCOPE_DENIED', '领地不在授权范围内或不可用。')
+          const row = this.store.getTerritoryById(p.territory_id)
+          if (!row || row.kingdom_id !== kingdomId || row.status === 'DELETED') fail('SCOPE_DENIED', '领地不在授权范围内或不可用。')
+          territories.add(row.territory_id); facts.push(row)
+          if (row.supervisor_binding_id) {
+            const current = this.store.getBindingById(row.supervisor_binding_id)
+            facts.push({ previousSupervisor: current, previousSupervisorId: row.supervisor_binding_id })
+            if (current?.session_id) sessions.add(current.session_id)
+            // 与 core 的 applyTerritorySupervisor 同判据：只有在任 ACTIVE 主理才算冲突，
+            // 指向已退任席位的悬挂引用属于修复（可直接改派），两条入口结论必须一致。
+            if (current && current.status === 'ACTIVE') {
+              fail('TERRITORY_ALREADY_SUPERVISED',
+                `领地「${row.name}」已有在任主理（${current.role_name}）；请先解除现有主理（territory.supervisor 传 null），再指派新的。`)
+            }
+          }
+          after = JSON.stringify({ roleType: p.role_type, territoryId: row.territory_id, territoryName: row.name })
+        } else {
+          after = JSON.stringify(p)
+        }
         if (p.session_id) targetSession(p.session_id, null)
-        after = JSON.stringify(p); summary = '任命角色'; break
+        summary = p.role_type === 'SUPERVISOR' ? '任命主管并同时指定其领地（席位与主理同一事务原子写入）' : '任命角色'; break
       }
       case 'role.session': {
         const p = input.parameters, row = binding(p.binding_id)
@@ -1217,6 +1285,9 @@ export class OwnerDecisionController {
   }
 
   private guardUnsettled(kingdomId: string, all: boolean, context: OperationContext): void {
+    // 3.2.0 审计 r1 更正：本守卫只覆盖 **Owner 管理窗口** 这条路径。
+    // direct Slash / core 的 role.bind 与 territory.supervisor 没有等价守卫（3.1.0 既有语义），
+    // 因此文档不得声称"旧主管的未结算执行一定会拦截改派"。
     const affected = (territoryId: string | null, bindingId: string | null, sessionId: string | null): boolean => all
       || !!territoryId && context.territoryIds.includes(territoryId)
       || !!bindingId && context.bindingIds.includes(bindingId)
@@ -1274,10 +1345,20 @@ export class OwnerDecisionController {
       }
       case 'territory.supervisor': {
         const describe = (id: string | null) => id ? `${this.store.getBindingById(id)?.role_name ?? '主管'}（${id}）` : null
-        return [change('主理主管', describe(context.before), describe(context.after))]
+        return [change('主理主管', describe(context.before), describe(context.after)),
+          ...(input.parameters.supervisor_binding_id === null
+            ? [change('解除后', null, '该领地无主理：任何 Supervisor 都不能治理该领地（fail-closed），直到指派新的。')]
+            : [])]
       }
-      case 'role.bind': return [change('角色身份', null, { CHANCELLOR: '宰相', SUPERVISOR: '主管', WORKER: '执行者' }[input.parameters.role_type]),
-        change('角色名称', null, input.parameters.role_name), change('目标 Session', null, input.parameters.session_id)]
+      case 'role.bind': {
+        const after = context.after ? JSON.parse(context.after) as { territoryId?: string; territoryName?: string } : null
+        const scope = input.parameters.role_type === 'SUPERVISOR'
+          ? [change('主理领地', null, after?.territoryName && after.territoryId ? `${after.territoryName}（${after.territoryId}）` : null),
+            change('写入方式', null, '主管席位与领地主理在同一事务内原子写入；任一步不合法则整体回滚，不会留下没有领地的主管。')]
+          : []
+        return [change('角色身份', null, { CHANCELLOR: '宰相', SUPERVISOR: '主管', WORKER: '执行者' }[input.parameters.role_type]),
+          change('角色名称', null, input.parameters.role_name), change('目标 Session', null, input.parameters.session_id), ...scope]
+      }
       case 'role.session': return [change('角色 Session', context.before, context.after)]
       case 'ceiling': {
         const before = context.before ? JSON.parse(context.before) as Record<string, boolean> : {}
@@ -1415,7 +1496,10 @@ export class OwnerDecisionController {
       }
       case 'role.bind': {
         const p = input.parameters
-        message = run({ kingdomId, roleType: p.role_type, roleName: p.role_name, sessionId: p.session_id }, bindRole)
+        // v3.2.0：主管走原子通道（建席位 + 设主理同一事务）；其它角色保持原路径。
+        message = p.role_type === 'SUPERVISOR'
+          ? run({ kingdomId, roleType: p.role_type, roleName: p.role_name, sessionId: p.session_id, territoryId: p.territory_id! }, bindSupervisorForTerritory)
+          : run({ kingdomId, roleType: p.role_type, roleName: p.role_name, sessionId: p.session_id }, bindRole)
         eventType = 'ROLE_BOUND'; break
       }
       case 'role.session': {

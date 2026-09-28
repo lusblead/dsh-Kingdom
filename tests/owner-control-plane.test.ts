@@ -100,8 +100,8 @@ test('Owner Control direct Slash 原子 init、Owner actor 与 Tool zero-write',
       assert.equal(store.listEvents(kingdom.kingdom_id, 100).length, missingRegistryEvents)
       assert.equal(store.getBindingsByRole(kingdom.kingdom_id, 'SUPERVISOR').length, 0)
 
-      const bind = await command.handler({ rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"Supervisor"}' })
-      assert.equal(bind.kind, 'success')
+      const bind = await command.handler({ rawInput: `role.bind {"role_type":"SUPERVISOR","role_name":"Supervisor","territory_id":"${territory.territory_id}"}` })
+      assert.equal(bind.kind, 'success', bind.text)
       const supervisor = store.getBindingsByRole(kingdom.kingdom_id, 'SUPERVISOR')[0]!
       const scope = await command.handler({ rawInput: `territory.supervisor {"territory_id":"${territory.territory_id}","supervisor_binding_id":"${supervisor.binding_id}"}` })
       assert.equal(scope.kind, 'success')

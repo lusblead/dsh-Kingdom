@@ -175,6 +175,9 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
     const title = make('label', label); title.htmlFor = input.id; box.append(title, input); el('fields').append(box); return input;
   }
   function allowedBindings(filter) { return (state.control.catalog?.bindings || []).filter(filter || (() => true)).map(item => ({id:item.id,label:(roleNames[item.roleType] || item.roleType) + ' · ' + item.roleName + ' · ' + item.id})); }
+  // v3.2.0：解除领地主理用的勾选框。它刻意不带 name（不进入通用字段收集），
+  // 只由 payload() 显式转成 supervisor_binding_id: null。
+  const releaseSupervisorChecked = () => { const box = el('fields').querySelector('[data-release-supervisor]'); return !!box && box.checked; };
   function ceilingRow() {
     const row = make('div', undefined, 'ceiling-row');
     const box = make('label', '能力名称', 'field'); const input = make('input'); input.required = true; input.maxLength = 200; input.setAttribute('aria-label', '能力名称'); box.append(input);
@@ -189,10 +192,42 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
     if (action === 'init') { field('kingdom_name','王国名称'); field('owner_name','所有者显示名'); }
     if (action === 'territory.create') { field('name','领地名称'); field('workspace_path','已存在的工作目录'); field('summary','领地说明','textarea',undefined,false); const roots = make('p','允许的根目录：' + (catalog.workspaceRoots || []).join('；'),'muted'); roots.classList.add('wide'); el('fields').append(roots); }
     if (action === 'territory.update') { field('territory_id','领地','select',territories); field('name','新名称（不改请留空）','text',undefined,false); field('summary','新说明（不改请留空）','textarea',undefined,false); }
-    if (action === 'territory.supervisor') { field('territory_id','领地','select',territories); field('supervisor_binding_id','主管','select',allowedBindings(item=>item.roleType==='SUPERVISOR')); }
+    if (action === 'territory.supervisor') {
+      field('territory_id','领地','select',territories);
+      const supervisor = field('supervisor_binding_id','主管','select',allowedBindings(item=>item.roleType==='SUPERVISOR'));
+      // v3.2.0：管理窗口此前无法表达“解除”，而 1:1 之下“换领地”必须先解除。
+      const releaseBox = make('label', undefined, 'field wide');
+      const release = make('input'); release.type='checkbox'; release.id='param-release-supervisor'; release.dataset.releaseSupervisor='true';
+      const releaseText = make('span','解除现任主理（不指派新主管）'); releaseBox.append(release, releaseText); el('fields').append(releaseBox);
+      const releaseHint = make('p','解除后该领地无主理：任何 Supervisor 都不能治理它（fail-closed），直到指派新的。1:1 之下“把主理换到另一个领地”就是“先在这里解除、再去那边指派”。','muted');
+      releaseHint.classList.add('wide'); el('fields').append(releaseHint);
+      const supervisorChoices = allowedBindings(item=>item.roleType==='SUPERVISOR');
+      const update = () => {
+        const releasing = release.checked;
+        supervisor.required = !releasing; supervisor.disabled = releasing; supervisor.parentElement.hidden = releasing;
+        releaseHint.hidden = false;
+        el('prepare').disabled = !releasing && !supervisorChoices.length;
+      };
+      release.addEventListener('change', update); update();
+    }
     if (action === 'role.bind') {
       const role = field('role_type','角色','select',(state.control.decision.scope.roleTypes || []).map(id=>({id,label:roleNames[id]}))); field('role_name','角色名称');
-      const session = field('session_id','运行会话','select',sessions); const update = () => { const needed = role.value !== 'WORKER'; session.required = needed; session.disabled = !needed; session.parentElement.hidden = !needed; }; role.addEventListener('change',update); update();
+      const session = field('session_id','运行会话','select',sessions);
+      // v3.2.0：主管必须同时隶属一个领地（席位与主理同一事务写入），因此这里强制选择领地；
+      // 其它角色不隶属领地，字段隐藏并禁用，不进入 payload。
+      const territory = field('territory_id','主理领地（主管必选）','select',territories);
+      const territoryHint = make('p', territories.length
+        ? '领地和主管完全绑定：任命主管时会同时把该领地的主理设为此席位；领地当前已有主理时会被拒绝，请先解除现有主理再指派。'
+        : '本次授权范围内没有任何可用领地：无法任命主管。请先创建领地，或重新激活本包含目标领地的管理窗口。','muted');
+      territoryHint.classList.add('wide'); el('fields').append(territoryHint);
+      const update = () => {
+        const needed = role.value !== 'WORKER'; session.required = needed; session.disabled = !needed; session.parentElement.hidden = !needed;
+        const supervisor = role.value === 'SUPERVISOR';
+        territory.required = supervisor; territory.disabled = !supervisor; territory.parentElement.hidden = !supervisor;
+        territoryHint.hidden = !supervisor;
+        el('prepare').disabled = supervisor && !territories.length;
+      };
+      role.addEventListener('change',update); update();
     }
     if (action === 'role.session') { field('binding_id','要调整的角色','select',allowedBindings(item=>['CHANCELLOR','SUPERVISOR'].includes(item.roleType))); field('session_id','新的运行会话','select',sessions); }
     if (action === 'execution-profile') {
@@ -305,6 +340,12 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
   function payload() {
     const action=el('action').value; const parameters={};
     for (const field of el('fields').querySelectorAll('[name]')) if (!field.disabled && field.value.trim() !== '') parameters[field.name]=field.value.trim();
+    // v3.2.0：解除现任主理必须**显式**发送 JSON null。空 select 会被上面的收集逻辑跳过，
+    // 无法表达“解除”，因此这里读专用勾选框（它不参与 [name] 收集，避免向服务端多送字段）。
+    if (action==='territory.supervisor' && releaseSupervisorChecked()) {
+      if (!parameters.territory_id) throw new Error('请选择要解除主理的领地。');
+      return {action,parameters:{territory_id:parameters.territory_id,supervisor_binding_id:null}};
+    }
     if (action==='execution-profile') { const binding_id=parameters.binding_id; if (!parameters.model) throw new Error('请填写明确的模型名称。'); const profile={...(parameters.provider?{provider:parameters.provider}:{}),model:parameters.model}; return {action,parameters:{binding_id,profile}}; }
     if (action==='ceiling') { const ceiling=Object.create(null); for (const row of el('ceiling-rows').children) { const name=row.querySelector('input').value.trim(); if (!name || Object.hasOwn(ceiling,name)) throw new Error('能力名称不能为空或重复。'); ceiling[name]=row.querySelector('select').value==='true'; } if (!Object.keys(ceiling).length) throw new Error('请至少配置一项能力。'); return {action,parameters:{ceiling}}; }
     if (action==='budget.policy') { const numeric={}; for (const key of ['limit_tokens','reserve_tokens','warning_percent']) { const value=Number(parameters[key]); if (!Number.isSafeInteger(value) || value<1 || key==='warning_percent' && value>100) throw new Error('预算额度、预留和阈值必须是范围内的正整数。'); numeric[key]=value; } if (numeric.reserve_tokens>numeric.limit_tokens) throw new Error('每次预留不能超过周期额度。'); return {action,parameters:{enabled:parameters.enabled==='true',...numeric,unknown_policy:parameters.unknown_policy}}; }

@@ -296,8 +296,10 @@ test('v1 GUI command surface is session-bound, state-safe, replay-safe, and dire
   }
   await directOwner('init')
   await directOwner(`territory.create ${JSON.stringify({ name: 'Command Territory', workspace_path: root })}`)
+  // v3.2.0：任命主管必须同时给出它的领地（席位与主理同一事务原子写入）。
+  const commandTerritoryId = store.listTerritories(store.getDefaultKingdom()!.kingdom_id)[0]!.territory_id
   await directOwner(`role.bind ${JSON.stringify({
-    role_type: 'SUPERVISOR', role_name: 'Command Supervisor', session_id: OWNER_ROLE_SESSION,
+    role_type: 'SUPERVISOR', role_name: 'Command Supervisor', session_id: OWNER_ROLE_SESSION, territory_id: commandTerritoryId,
   })}`)
   await directOwner(`role.bind ${JSON.stringify({
     role_type: 'CHANCELLOR', role_name: 'Command Chancellor', session_id: OWNER_ROLE_SESSION,

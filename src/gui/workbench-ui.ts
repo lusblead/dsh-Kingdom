@@ -70,11 +70,16 @@ export const WORKBENCH_CSS = String.raw`
 .delivery-layer > h4 { font-size: 14px; margin: 0; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
 .delivery-module { display: grid; gap: 6px; padding: 8px 0 8px 12px; border-left: 2px solid var(--line); min-width: 0; }
 .delivery-module > h5 { font-size: 14px; margin: 0; }
-.delivery-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; min-width: 0; }
-.delivery-row-body { display: grid; gap: 5px; min-width: 0; }
+/* v3.2.0 版面修复：此前是 grid-template-columns: minmax(0,1fr) auto。
+   右列 auto = max-content，而控制区里有一条 flex: 1 0 100% 的状态文本，
+   它把右轨撑到最宽，左轨被压成 0 宽——正文因此退化成每行一两个字、竖排的"任/务/要/求"。
+   改成分行 flex：正文占弹性主列（20rem 起），控制区按自身内容窄排，
+   放不下时整体换行，而不是继续抢宽。 */
+.delivery-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; min-width: 0; }
+.delivery-row-body { flex: 1 1 20rem; display: grid; gap: 5px; min-width: 0; }
 .delivery-row-body p { margin: 0; }
 .delivery-row-label { font-weight: 600; }
-.delivery-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.delivery-controls { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 /* 图标按钮的就地操作提示：一个包装层 + 一条提示节点。
    可用按钮的操作说明在 hover 或键盘 focus 时就地弹出，不挤动按钮行；禁用原因常驻可见，
    因为键盘用户必须能读到“为什么不可用”，而不是只看到 title。 */
@@ -727,6 +732,13 @@ export const WORKBENCH_SCRIPT = String.raw`
       append(parent, 'h3', role.roleName); const kind = role.roleType; append(parent, 'p', ({ CHANCELLOR: '职责：统筹目标、规划任务，并交给所属领地。', SUPERVISOR: '职责：在所属领地分派任务、核对执行并审查呈报。', WORKER: '职责：在授权范围执行任务，提交产物与风险说明。' })[kind] || '职责以宿主组织绑定为准。');
       addParagraph(parent, '会话', role.sessionBound ? '已绑定' : '尚未绑定', '尚未确认');
       const rolesProjection = record(workbenchData(snapshot).roles); const projected = queueItems(rolesProjection).find(item => item.bindingId === state.selectedRoleId || typedEntityId(item.bindingRef, 'binding') === state.selectedRoleId);
+      // v3.2.0：主管必须隶属领地；未隶属的遗留席位在此显式标注为待处理，不推断归属。
+      if (kind === 'SUPERVISOR') {
+        const seatTerritories = projected && Array.isArray(projected.territories) ? projected.territories : [];
+        addParagraph(parent, '隶属领地', seatTerritories.length
+          ? seatTerritories.map(item => text(item.name) + '（' + text(item.territoryId) + '）').join('、')
+          : '未隶属领地（待处理）', '尚未确认');
+      }
       const tasks = projected && Array.isArray(projected.taskIds) ? taskItems().filter(task => projected.taskIds.includes(task.taskId)) : taskItems().filter(task => kind === 'WORKER' ? task.assignedBindingId === state.selectedRoleId : kind === 'SUPERVISOR' ? task.territoryId === typedEntityId(role.territoryRef, 'territory') : false);
       append(parent, 'h4', '职责范围内的任务'); if (!tasks.length) addEmpty(parent, '当前没有已投影的关联任务。'); tasks.forEach(task => { const row = document.createElement('article'); row.className = 'workbench-item'; addTaskLink(row, task.taskId, task.title, 'role-task:' + task.taskId); append(row, 'p', executionExplanation(task)); parent.append(row); });
       if (projected) { addDataRow(parent, '进行中执行', projected.activeExecutionCount); addDataRow(parent, '待主管复核', projected.reviewTaskCount); addDataRow(parent, '恢复核对中', projected.recoveringTaskCount); if (projected.taskIdsTruncated) addEmpty(parent, '关联任务已截断：显示 ' + projected.taskIds.length + ' / ' + projected.taskCount + ' 项。'); }

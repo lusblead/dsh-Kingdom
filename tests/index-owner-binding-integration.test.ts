@@ -270,8 +270,13 @@ test('Supervisor Draft preserves exact territory binding and direct Slash valida
   harness.setInitiator(target)
   const createTerritory = await command.handler({ rawInput: 'territory.create {"name":"研发领"}' })
   assert.equal(createTerritory.kind, 'success')
+  // v3.2.0：主管任命必须同时给出领地；这里先读回刚创建的领地 id 供 role.bind 使用。
+  const territoryId = (() => {
+    const probe = new KingdomStore(join(harness.root, 'kingdom', 'kingdom.db'), { allowSchemaV4: true })
+    try { return probe.listTerritories(probe.getDefaultKingdom()!.kingdom_id)[0]!.territory_id } finally { probe.close() }
+  })()
   const bindSupervisor = await command.handler({
-    rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"原主管","session_id":"direct-live-session"}',
+    rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"原主管","session_id":"direct-live-session","territory_id":"' + territoryId + '"}',
   })
   assert.equal(bindSupervisor.kind, 'success', bindSupervisor.text)
 
@@ -300,7 +305,9 @@ test('Supervisor Draft preserves exact territory binding and direct Slash valida
     ))) as Record<string, any>
     assert.equal(newSupervisor.write_effect, 'ZERO_WRITE')
     assert.equal(newSupervisor.status, 'DRAFT_READY')
-    assert.deepEqual(newSupervisor.steps.map((step: Record<string, unknown>) => step.kind), ['role.bind', 'territory.supervisor'])
+    // v3.2.0：主管任命是单步原子命令（role.bind 自带 territory_id），不再是两步。
+    assert.deepEqual(newSupervisor.steps.map((step: Record<string, unknown>) => step.kind), ['role.bind'])
+    assert.match(String(newSupervisor.steps[0]?.canonical_direct_slash ?? ''), /"territory_id":"[^"]+"/u)
 
     const eventsBefore = store.listEvents(kingdom.kingdom_id, 100).length
     const rejected = await command.handler({
@@ -383,12 +390,18 @@ test('v3.1：只在持久会话存储中登记（无 live Agent）的会话可�
   const store = new KingdomStore(join(harness.root, 'kingdom', 'kingdom.db'), { allowSchemaV4: true })
   try {
     const kingdom = store.getDefaultKingdom()!
+    // v3.2.0：主管席位必须同时落在一个领地上（同一事务原子写入）。
+    const created = await command.handler({ rawInput: 'territory.create {"name":"太素领"}' })
+    assert.equal(created.kind, 'success', created.text)
+    const territoryId = store.listTerritories(kingdom.kingdom_id)[0]!.territory_id
     const bound = await command.handler({
-      rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"Sup-Taisu","session_id":"unstarted-session"}',
+      rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"Sup-Taisu","session_id":"unstarted-session","territory_id":"' + territoryId + '"}',
     })
     assert.equal(bound.kind, 'success', bound.text)
     const supervisor = store.getBindingByRole(kingdom.kingdom_id, 'SUPERVISOR')!
     assert.equal(supervisor.session_id, 'unstarted-session')
+    assert.equal(store.getTerritoryById(territoryId)!.supervisor_binding_id, supervisor.binding_id,
+      '席位与领地主理必须在同一事务里一起写入')
 
     const boundEvents = store.listEvents(kingdom.kingdom_id, 100).filter(event => event.event_type === 'ROLE_BOUND')
     assert.equal(JSON.parse(boundEvents[boundEvents.length - 1]!.payload_json).session_evidence, 'DURABLE_SESSION')

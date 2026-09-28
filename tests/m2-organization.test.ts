@@ -96,7 +96,7 @@ test('Topology：session-bound 下仅 OWNER 可建/删领地、设主理', () =>
 // ── Scope ──────────────────────────────────────────────────────────
 
 test('Scope：未指派 Territory fail-closed；Supervisor A 不能治理 B；退任后立即 DENY；接管后 PASS', () => {
-  const { store, supA, supB, workerA, terrA } = makeOrg()
+  const { store, supA, supB, workerA, terrA, terrB } = makeOrg()
   // 未指派领地：任何 Supervisor DENY
   const unassigned = randomUUID()
   const now = new Date().toISOString()
@@ -117,12 +117,20 @@ test('Scope：未指派 Territory fail-closed；Supervisor A 不能治理 B；�
   const taskA = planIn(store, terrA, 'A 任务')
   assert.match(assignTask(store, ctx(S.SUP_A), { taskId: taskA, workerBindingId: workerA }).message, /已把任务/)
 
-  // Sup-A 退任 → Territory 指针不再指向有效 ACTIVE Supervisor，立即 DENY
+  // Sup-A 退任 → v3.2.0：退任与「解除该席位在领地上的主理关系」同一事务完成，
+  // 因此领地立即回到「未指派主理」的 fail-closed 状态，不留下指向 RETIRED 席位的悬挂引用。
   unbindRole(store, { kingdomId: KID, bindingId: supA, reason: '换届' }, ownerAuth())
+  assert.equal(store.getTerritoryById(terrA)!.supervisor_binding_id, null,
+    '退任主管必须同时解除领地主理（同一事务）')
+  const releaseEvents = store.listEvents(KID, 400).filter(event => event.event_type === 'TERRITORY_SUPERVISOR_UPDATED')
+    .filter(event => JSON.parse(event.payload_json).unassigned === true)
+  assert.equal(releaseEvents.length, 1, '退任同时写出一条明确的主理解除事实')
   const deniedRetired = reviewTask(store, ctx(S.SUP_A), { taskId: taskA, decision: 'ACCEPT' }).message
-  assert.match(deniedRetired, /未指派有效的 ACTIVE Supervisor/)
+  assert.match(deniedRetired, /未指派主理 Supervisor/)
 
   // 新任 Sup-B 接管领地 A → PASS
+  // v3.2.0（Owner 1:1 裁定）：一个主管席位只能主理一个领地，Sup-B 必须先解除它在领地B上的主理。
+  assert.match(setTerritorySupervisor(store, { kingdomId: KID, territoryId: terrB, supervisorBindingId: null }, ownerAuth()), /解除主理/u)
   setTerritorySupervisor(store, { kingdomId: KID, territoryId: terrA, supervisorBindingId: supB }, ownerAuth())
   const taskA2 = planIn(store, terrA, 'A 任务 2')
   assert.match(assignTask(store, ctx(S.SUP_B), { taskId: taskA2, workerBindingId: workerA }).message, /已把任务/)

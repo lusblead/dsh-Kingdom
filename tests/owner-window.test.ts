@@ -400,9 +400,19 @@ test('Restart does not restore historical decisions as write authority', async t
   } finally { restarted.dispose() }
 })
 
-test('Retired previous Supervisor is a historical relationship, while its unsettled work still blocks replacement', async t => {
+test('Retiring a Supervisor releases its territory in the same transaction, while unsettled work still blocks the successor', async t => {
   const f = fixture(t)
+  // v3.2.0（Owner D1）：退任与「解除该席位在领地上的主理关系」同一事务完成，
+  // 不会留下指向 RETIRED 席位的悬挂引用。
   unbindRole(f.store, { kingdomId: f.kingdomId, bindingId: f.supervisor.binding_id, reason: 'Term ended' }, f.auth)
+  assert.equal(f.store.getBindingById(f.supervisor.binding_id)!.status, 'RETIRED')
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, null,
+    'the territory is released together with the retirement')
+  const releaseEvents = f.store.listEvents(f.kingdomId, 200)
+    .filter(event => event.event_type === 'TERRITORY_SUPERVISOR_UPDATED')
+    .filter(event => JSON.parse(event.payload_json).unassigned === true)
+  assert.equal(releaseEvents.length, 1, 'the release is recorded as its own fact')
+
   bindRole(f.store, { kingdomId: f.kingdomId, roleType: 'SUPERVISOR', roleName: 'Successor', sessionId: 'successor-session' }, f.auth)
   const successor = f.store.getBindingByRole(f.kingdomId, 'SUPERVISOR')!
   const decision = structuredClone(f.decision)
@@ -410,8 +420,8 @@ test('Retired previous Supervisor is a historical relationship, while its unsett
   const handle = f.activate(decision)
   const input: OwnerOperationInput = { action: 'territory.supervisor', parameters: { territory_id: f.territory.territory_id, supervisor_binding_id: successor.binding_id } }
   const preview = await f.controller.prepare(handle, input)
-  assert.ok(preview.affected.bindingIds.includes(f.supervisor.binding_id))
-  assert.match(preview.changes[0].before!, /Supervisor/)
+  assert.equal(preview.changes[0].before, null, 'the released territory has no incumbent to describe')
+  assert.match(preview.changes[0].after!, /Successor/)
   insertTask(f); const execution = insertExecution(f, 'RUNNING', 'task', 'old-supervisor')
   await assert.rejects(f.controller.commit(handle, { prepareId: preview.prepareId, operationId: preview.operationId }), { code: 'UNSETTLED_EXECUTION' })
   f.store.transitionExecution(execution, 'COMPLETED')
@@ -419,4 +429,89 @@ test('Retired previous Supervisor is a historical relationship, while its unsett
   assert.equal(result.status, 'APPLIED')
   assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, successor.binding_id)
   assert.equal(f.store.getBindingById(f.supervisor.binding_id)!.status, 'RETIRED')
+})
+
+test('An ACTIVE incumbent is never silently replaced, while a legacy pointer to a RETIRED seat can be repaired', async t => {
+  const f = fixture(t)
+  const incumbent = f.supervisor
+  // 挑战者必须在激活窗口之前就存在并进入授权范围（窗口不对候选做隐式放行）。
+  bindRole(f.store, { kingdomId: f.kingdomId, roleType: 'SUPERVISOR', roleName: 'Challenger', sessionId: 'challenger-session' }, f.auth)
+  const challenger = f.store.getBindingsByRole(f.kingdomId, 'SUPERVISOR').find(binding => binding.role_name === 'Challenger')!
+  const decision = structuredClone(f.decision)
+  decision.scope.bindingIds = [f.worker.binding_id, incumbent.binding_id, challenger.binding_id]
+  const handle = f.activate(decision)
+
+  // (a) 在任主理仍在岗：改派被拒（先解除再指派），库里没有发生任何变化。
+  const rejected = await f.controller.prepare(handle, {
+    action: 'territory.supervisor', parameters: { territory_id: f.territory.territory_id, supervisor_binding_id: challenger.binding_id },
+  }).then(() => null, (error: { code?: string }) => error.code)
+  assert.equal(rejected, 'TERRITORY_ALREADY_SUPERVISED')
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, incumbent.binding_id)
+
+  // (b) 遗留悬挂引用（3.2.0 之前的库：席位已 RETIRED，领地指针仍指向它）可以直接改派——
+  // 这是修复而不是替换，但在任主管的未结算工作仍受 unsettled 守卫约束。
+  unbindRole(f.store, { kingdomId: f.kingdomId, bindingId: incumbent.binding_id, reason: 'Term ended' }, f.auth)
+  // 用底层写入复现旧库的悬挂引用（新链路不会产生这种状态）。
+  f.store.updateTerritorySupervisor(f.territory.territory_id, incumbent.binding_id)
+  const input: OwnerOperationInput = { action: 'territory.supervisor', parameters: { territory_id: f.territory.territory_id, supervisor_binding_id: challenger.binding_id } }
+  const preview = await f.controller.prepare(handle, input)
+  assert.ok(preview.affected.bindingIds.includes(incumbent.binding_id), 'the historical relationship is still resolved exactly')
+  assert.match(preview.changes[0].before!, /Supervisor/)
+  const result = await execute(f, handle, input)
+  assert.equal(result.status, 'APPLIED')
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, challenger.binding_id)
+  assert.equal(f.store.getBindingById(incumbent.binding_id)!.status, 'RETIRED')
+})
+
+test('The Owner window can release an incumbent supervisor, and unsettled work still blocks the release', async t => {
+  const f = fixture(t)
+  const decision = structuredClone(f.decision)
+  const handle = f.activate(decision)
+  const release: OwnerOperationInput = {
+    action: 'territory.supervisor', parameters: { territory_id: f.territory.territory_id, supervisor_binding_id: null },
+  }
+
+  // 预览：写清后果（解除 → fail-closed），并把现任主理及其 session 作为相关事实登记。
+  const preview = await f.controller.prepare(handle, release)
+  assert.equal(preview.changes[0].before, `${f.supervisor.role_name}（${f.supervisor.binding_id}）`)
+  assert.equal(preview.changes[0].after, null)
+  assert.match(preview.changes[1]!.after!, /fail-closed/u)
+  assert.ok(preview.affected.bindingIds.includes(f.supervisor.binding_id))
+
+  // 在途工作时不允许解除责任；完成后才放行。
+  insertTask(f); const execution = insertExecution(f, 'RUNNING', 'task', 'old-supervisor')
+  await assert.rejects(f.controller.commit(handle, { prepareId: preview.prepareId, operationId: preview.operationId }), { code: 'UNSETTLED_EXECUTION' })
+  f.store.transitionExecution(execution, 'COMPLETED')
+  const released = await execute(f, handle, release)
+  assert.equal(released.status, 'APPLIED')
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, null)
+  // 解除是一条明确事实（不是静默删除）：席位仍在，领地明确回到「无主理」。
+  assert.equal(f.store.getBindingById(f.supervisor.binding_id)!.status, 'ACTIVE')
+  const releaseEvents = f.store.listEvents(f.kingdomId, 100).filter(event => event.event_type === 'TERRITORY_SUPERVISOR_UPDATED')
+    .filter(event => JSON.parse(event.payload_json).unassigned === true)
+  assert.equal(releaseEvents.length, 1)
+
+  // 再一次解除：仍然 APPLIED、指针保持 null（结论可重复），但它**不是** no-op 去重——
+  // 与 direct Slash 通道自 3.1.0 起的既有语义一致，每次都会追加一条 unassigned:true 的解除事实。
+  const again = await execute(f, handle, release)
+  assert.equal(again.status, 'APPLIED')
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, null)
+  const releaseEventsAfterRepeat = f.store.listEvents(f.kingdomId, 100)
+    .filter(event => event.event_type === 'TERRITORY_SUPERVISOR_UPDATED')
+    .filter(event => JSON.parse(event.payload_json).unassigned === true)
+  assert.equal(releaseEventsAfterRepeat.length, 2, '重复解除会追加一条事实，而不是被静默去重')
+})
+
+test('The Owner window rejects a release request that omits the field or targets a foreign territory', async t => {
+  const f = fixture(t)
+  const handle = f.activate()
+  // 缺失 supervisor_binding_id 与 null 不是同一件事：前者是输入错误，不会被当成"解除"。
+  await assert.rejects(f.controller.prepare(handle, {
+    action: 'territory.supervisor', parameters: { territory_id: f.territory.territory_id },
+  } as never), { code: 'INVALID_INPUT' })
+  // 范围外的领地仍然不可解除（范围判据未因新增的解除语义而放宽）。
+  await assert.rejects(f.controller.prepare(handle, {
+    action: 'territory.supervisor', parameters: { territory_id: 'not-in-scope', supervisor_binding_id: null },
+  }), { code: 'SCOPE_DENIED' })
+  assert.equal(f.store.getTerritoryById(f.territory.territory_id)!.supervisor_binding_id, f.supervisor.binding_id)
 })

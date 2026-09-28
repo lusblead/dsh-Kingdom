@@ -18,6 +18,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { KingdomStore, RoleBindingRow } from './db.js'
+import { applyTerritorySupervisor } from './territory.js'
 import { requireOwnerControl, type OwnerControlCapability, type OwnerEventSource, type OwnerOperationMatch } from './owner-control.js'
 
 export const ROLE_TYPES = ['OWNER', 'CHANCELLOR', 'SUPERVISOR', 'WORKER'] as const
@@ -233,6 +234,70 @@ export function requireAdmin(
   }
 }
 
+/**
+ * 授权无关的「插入席位 + 写 ROLE_BOUND」。调用方负责鉴权、单席位策略与事务边界。
+ * 3.2.0 抽出，供 `bindRole` 与 `bindSupervisorForTerritory`（原子"席位+领地"）共用。
+ */
+function insertRoleBindingRecord(
+  store: KingdomStore,
+  fields: {
+    kingdomId: string
+    roleType: string
+    roleName: string
+    sessionId: string | null
+    modelName: string | null
+    agentName: string | null
+    sessionMeta: string | null
+    sessionEvidence: SessionEvidence | null
+    actorId: string | null
+    eventSource: object
+  },
+): string {
+  const now = new Date().toISOString()
+  const bindingId = randomUUID()
+  store.insertBinding({
+    binding_id: bindingId,
+    kingdom_id: fields.kingdomId,
+    role_type: fields.roleType,
+    role_name: fields.roleName,
+    runtime_type: 'dsh',
+    session_id: fields.sessionId,
+    model_name: fields.modelName,
+    agent_name: fields.agentName,
+    session_meta: fields.sessionMeta,
+    execution_profile_json: null,
+    status: 'ACTIVE',
+    retired_at: null,
+    retired_reason: null,
+    principal_id: null,
+    created_at: now,
+    updated_at: now,
+  })
+  store.appendEvent({
+    event_id: randomUUID(),
+    kingdom_id: fields.kingdomId,
+    event_type: 'ROLE_BOUND',
+    // v0.5.2 审计修正：actor = 实际操作者（session-bound 下为可信 OWNER）；
+    // declarative 演示模式无可信 principal，保留被操作角色作兼容标注。
+    actor_role: 'OWNER',
+    actor_id: fields.actorId,
+    target_type: 'binding',
+    target_id: bindingId,
+    payload_json: JSON.stringify({
+      role_name: fields.roleName,
+      role_type: fields.roleType,
+      session_id: fields.sessionId,
+      model_name: fields.modelName,
+      agent_name: fields.agentName,
+      session_meta: fields.sessionMeta ? JSON.parse(fields.sessionMeta) : null,
+      session_evidence: fields.sessionEvidence,
+      ...fields.eventSource,
+    }),
+    created_at: now,
+  })
+  return bindingId
+}
+
 export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: AdminAuth): string {
   const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'role.bind', input })
   if (!admin.ok) return admin.message
@@ -257,47 +322,17 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
       `如需更换会话/身份，用 kingdom_bind_session；如需换届，用 kingdom_unbind_role 退任后重绑。）`
   }
 
-  const now = new Date().toISOString()
-  const bindingId = randomUUID()
-  store.insertBinding({
-    binding_id: bindingId,
-    kingdom_id: input.kingdomId,
-    role_type: roleType,
-    role_name: roleName,
-    runtime_type: 'dsh',
-    session_id: sessionId,
-    model_name: modelName,
-    agent_name: agentName,
-    session_meta: sessionMeta,
-    execution_profile_json: null,
-    status: 'ACTIVE',
-    retired_at: null,
-    retired_reason: null,
-    principal_id: null,
-    created_at: now,
-    updated_at: now,
-  })
-  store.appendEvent({
-    event_id: randomUUID(),
-    kingdom_id: input.kingdomId,
-    event_type: 'ROLE_BOUND',
-    // v0.5.2 审计修正：actor = 实际操作者（session-bound 下为可信 OWNER）；
-    // declarative 演示模式无可信 principal，保留被操作角色作兼容标注。
-    actor_role: 'OWNER',
-    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
-    target_type: 'binding',
-    target_id: bindingId,
-    payload_json: JSON.stringify({
-      role_name: roleName,
-      role_type: roleType,
-      session_id: sessionId,
-      model_name: modelName,
-      agent_name: agentName,
-      session_meta: sessionMeta ? JSON.parse(sessionMeta) : null,
-      session_evidence: input.sessionEvidence ?? null,
-      ...admin.eventSource,
-    }),
-    created_at: now,
+  insertRoleBindingRecord(store, {
+    kingdomId: input.kingdomId,
+    roleType,
+    roleName,
+    sessionId,
+    modelName,
+    agentName,
+    sessionMeta,
+    sessionEvidence: input.sessionEvidence ?? null,
+    actorId: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
+    eventSource: admin.eventSource,
   })
   const identity = [
     sessionId ? `session=${sessionId}` : null,
@@ -305,6 +340,79 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
     agentName ? `agent=${agentName}` : null,
   ].filter(Boolean).join('，')
   return `已绑定角色 ${roleType}（${roleName}${identity ? `，${identity}` : '，未指定会话身份'}）。`
+}
+
+export interface BindSupervisorInput extends BindRoleInput {
+  /** 3.2.0：任命主管必须同时给出它的领地，因此这条入口要求 territory_id。 */
+  territoryId: string
+}
+
+/** 事务（子事务）内信号：把「领地侧拒绝」带出内层作用域，从而回滚已插入的席位。 */
+class SupervisorAttachRejected extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SupervisorAttachRejected'
+  }
+}
+
+/**
+ * 3.2.0：**原子**地「建立主管席位 + 设为指定领地的主理」。
+ *
+ * Owner 口径（2026-09-28 + 2026-09-29 裁定）：领地与主管完全绑定，不存在"没有领地的主管"，
+ * 并且一个主管席位只主理一个领地。
+ * 两条事实在同一（子）事务内写入：领地侧不合法 → 内层回滚，绝不留下"席位已建、主理未设"的中间态。
+ * 冲突规则（由 `applyTerritorySupervisor` 统一执行）：目标领地已有**在任 ACTIVE** 主理 → 拒绝
+ * （先解除再指派，不静默覆盖）。新建席位此刻尚未隶属任何领地，因此不会触发 1:1 的反向拒绝。
+ */
+export function bindSupervisorForTerritory(store: KingdomStore, input: BindSupervisorInput, auth?: AdminAuth): string {
+  const admin = requireAdmin(store, input.kingdomId, auth, { operation: 'role.bind', input })
+  if (!admin.ok) return admin.message
+  const roleType = input.roleType.trim().toUpperCase()
+  if (roleType !== 'SUPERVISOR') {
+    return `错误：只有 SUPERVISOR 在任命时指定领地（收到 ${roleType || '空'}）。`
+  }
+  const territoryId = input.territoryId?.trim()
+  if (!territoryId) {
+    return '错误：任命主管必须同时指定领地（territory_id）；主管席位不能没有领地。'
+  }
+  const roleName = input.roleName?.trim() || `SUPERVISOR-${randomUUID().slice(0, 8)}`
+  const sessionId = input.sessionId?.trim() || null
+  const modelName = input.modelName?.trim() || null
+  const agentName = input.agentName?.trim() || null
+  const sessionMeta = normalizeSessionMeta(input.sessionMeta)
+  const actorId = admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null
+
+  try {
+    return store.withImmediateTransaction(() => {
+      const bindingId = insertRoleBindingRecord(store, {
+        kingdomId: input.kingdomId,
+        roleType,
+        roleName,
+        sessionId,
+        modelName,
+        agentName,
+        sessionMeta,
+        sessionEvidence: input.sessionEvidence ?? null,
+        actorId,
+        eventSource: admin.eventSource,
+      })
+      const attached = applyTerritorySupervisor(
+        store,
+        { kingdomId: input.kingdomId, territoryId, supervisorBindingId: bindingId },
+        { actorId, eventSource: admin.eventSource },
+      )
+      if (!attached.startsWith('领地「')) throw new SupervisorAttachRejected(attached)
+      const identity = [
+        sessionId ? `session=${sessionId}` : '未绑定 session',
+        modelName ? `model=${modelName}` : null,
+        agentName ? `agent=${agentName}` : null,
+      ].filter(Boolean).join('，')
+      return `已任命主管 ${roleName}（${identity}）：${attached}`
+    })
+  } catch (error: unknown) {
+    if (error instanceof SupervisorAttachRejected) return error.message
+    throw error
+  }
 }
 
 /**
@@ -332,28 +440,51 @@ export function unbindRole(store: KingdomStore, input: UnbindRoleInput, auth?: A
     return `角色 ${binding.role_type}（${binding.role_name}）已处于 RETIRED 状态，无需重复退任。`
   }
   const reason = input.reason?.trim() ?? null
-  store.retireBinding(binding.binding_id, reason)
-  store.appendEvent({
-    event_id: randomUUID(),
-    kingdom_id: input.kingdomId,
-    event_type: 'ROLE_UNBOUND',
-    // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被退任的绑定。
-    actor_role: 'OWNER',
-    actor_id: admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null,
-    target_type: 'binding',
-    target_id: binding.binding_id,
-    payload_json: JSON.stringify({
-      role_type: binding.role_type,
-      role_name: binding.role_name,
-      session_id: binding.session_id,
-      reason,
-      status: 'RETIRED',
-      ...admin.eventSource,
-    }),
-    created_at: new Date().toISOString(),
+  const actorId = admin.ownerControl ? admin.ownerPrincipalId : admin.owner?.binding_id ?? null
+  // v3.2.0（Owner D1，2026-09-28）：退任与「解除该席位的主理关系」必须**同一事务**。
+  // 否则会留下「席位已 RETIRED、领地仍指向它」的悬挂责任：后续治理操作一律 fail-closed，
+  // 而领地状态自相矛盾。主管席位的领地归属是它的一部分，不能退任后残留。
+  return store.withImmediateTransaction(() => {
+    // 在写锁内重读归属，避免"读在事务外、潜在已被改绑"的窗口。
+    const linked = store.listTerritories(input.kingdomId)
+      .filter(territory => territory.status !== 'DELETED' && territory.supervisor_binding_id === binding.binding_id)
+    store.retireBinding(binding.binding_id, reason)
+    store.appendEvent({
+      event_id: randomUUID(),
+      kingdom_id: input.kingdomId,
+      event_type: 'ROLE_UNBOUND',
+      // v0.5.2 审计修正：actor = 实际操作者（OWNER），target = 被退任的绑定。
+      actor_role: 'OWNER',
+      actor_id: actorId,
+      target_type: 'binding',
+      target_id: binding.binding_id,
+      payload_json: JSON.stringify({
+        role_type: binding.role_type,
+        role_name: binding.role_name,
+        session_id: binding.session_id,
+        reason,
+        status: 'RETIRED',
+        ...admin.eventSource,
+      }),
+      created_at: new Date().toISOString(),
+    })
+    const released: string[] = []
+    for (const territory of linked) {
+      const detail = applyTerritorySupervisor(
+        store,
+        { kingdomId: input.kingdomId, territoryId: territory.territory_id, supervisorBindingId: null },
+        { actorId, eventSource: admin.eventSource },
+      )
+      // 领地侧拒绝（例如已被并发改成别的 ACTIVE 主理）→ 抛出，整体回滚退任。
+      if (!detail.startsWith('领地「')) throw new Error(`SUPERVISOR_RELEASE_REJECTED: ${detail}`)
+      released.push(territory.name)
+    }
+    return `角色 ${binding.role_type}（${binding.role_name}，session=${binding.session_id ?? '未绑定'}）已退任（RETIRED）` +
+      `${reason ? `，原因：${reason}` : ''}。历史记录仍可追溯；该角色席位现在空缺，可重新 kingdom_bind_role。` +
+      (released.length
+        ? `已同时解除其领地主理：${released.join('、')}（该领地现无主理，fail-closed 直到指派新的）。`
+        : '')
   })
-  return `角色 ${binding.role_type}（${binding.role_name}，session=${binding.session_id ?? '未绑定'}）已退任（RETIRED）` +
-    `${reason ? `，原因：${reason}` : ''}。历史记录仍可追溯；该角色席位现在空缺，可重新 kingdom_bind_role。`
 }
 
 /**

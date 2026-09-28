@@ -363,6 +363,11 @@ test('a retired, re-sessioned or re-bound reviewer keeps the question visible bu
   // (c) 领地改绑给继任主管：继任者不能代答，问题也不改投。
   bindRole(f2.store, { kingdomId: f2.kingdomId, roleType: 'SUPERVISOR', roleName: '主管乙', sessionId: 'supervisor-session-c' }, f2.ownerAuth)
   const successor = f2.store.getBindingsByRole(f2.kingdomId, 'SUPERVISOR').find(binding => binding.session_id === 'supervisor-session-c')!
+  // v3.2.0：在任主理不允许静默替换——先解除，再指派继任主管。
+  const releasedForSuccessor = setTerritorySupervisor(f2.store, {
+    kingdomId: f2.kingdomId, territoryId: f2.territory.territory_id, supervisorBindingId: null,
+  }, f2.ownerAuth)
+  assert.match(releasedForSuccessor, /解除主理/u)
   setTerritorySupervisor(f2.store, { kingdomId: f2.kingdomId, territoryId: f2.territory.territory_id, supervisorBindingId: successor.binding_id }, f2.ownerAuth)
   const successorAttempt = replyToDeliveryQuestion(f2.store, supervisorContext(f2, 'supervisor-session-c'),
     { questionId: questionId2, replyText: '继任者代答' })
@@ -765,6 +770,9 @@ test('a rebind committed after entry validation but before the write lock leaves
   bindRole(second, { kingdomId: f.kingdomId, roleType: 'SUPERVISOR', roleName: '主管乙', sessionId: 'supervisor-session-b' }, f.ownerAuth)
   const successor = second.getBindingsByRole(f.kingdomId, 'SUPERVISOR').find(binding => binding.session_id === 'supervisor-session-b')!
   const restore = barrierBeforeWriteLock(f.store, () => {
+    // v3.2.0：在任主理不允许静默替换——先解除，再指派继任主管。
+    setTerritorySupervisor(second, { kingdomId: f.kingdomId, territoryId: f.territory.territory_id,
+      supervisorBindingId: null }, f.ownerAuth)
     setTerritorySupervisor(second, { kingdomId: f.kingdomId, territoryId: f.territory.territory_id,
       supervisorBindingId: successor.binding_id }, f.ownerAuth)
   })

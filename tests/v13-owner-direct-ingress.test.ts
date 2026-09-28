@@ -106,7 +106,15 @@ test('canonical command reaches independent Owner HTTP and atomic bootstrap with
   const territoryReplay = await request('commit', territoryIds); assert.equal(territoryReplay.status, 200)
   assert.deepEqual(territoryReplay.body.receipt, territoryApplied.body.receipt)
   assert.equal(store.listTerritories(kingdom.kingdom_id).length, 1)
-  const rolePreview = await request('prepare', { action: 'role.bind', parameters: { role_type: 'SUPERVISOR', role_name: 'Fixture supervisor', session_id: targetSession.id } })
+  // v3.2.0：目录与提交同判据——主管的 role.bind 要求目标领地**显式**在授权范围内
+  // （不再用 kingdomWide 放宽）。领地是本窗口里新建的，因此按 GUI 的真实用法重新激活一个
+  // 包含它的窗口，再完成任命。
+  scope.territoryIds.push(store.listTerritories(kingdom.kingdom_id)[0]!.territory_id)
+  const roleWindow = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify({ kingdomId: kingdom.kingdom_id, actions: ['role.bind'], scope: activeScope, ttlMs: 600_000 }) })
+  assert.equal(roleWindow.kind, 'success', roleWindow.text); await redeem()
+  const rolePreview = await request('prepare', { action: 'role.bind', parameters: { role_type: 'SUPERVISOR', role_name: 'Fixture supervisor', session_id: targetSession.id,
+    // v3.2.0：主管任命必须同时给出领地（席位与主理在同一事务原子写入）。
+    territory_id: store.listTerritories(kingdom.kingdom_id)[0]!.territory_id } })
   assert.equal(rolePreview.status, 200, JSON.stringify(rolePreview.body))
   agents.delete(targetSession.id)
   const staleRole = await request('commit', { prepareId: rolePreview.body.preview.prepareId, operationId: rolePreview.body.preview.operationId })

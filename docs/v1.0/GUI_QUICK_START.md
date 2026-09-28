@@ -42,11 +42,14 @@ v1.0 的 GUI 是插件内置组件，通过版本化 tgz 随 `lib/**` 交付。�
 /kingdom ceiling {"ceiling":{"tool:pwsh":true}}
 /kingdom territory.create {"name":"<领地名>","workspace_path":"<工作区>"}
 /kingdom role.bind {"role_type":"CHANCELLOR","role_name":"<执政官名称>","session_id":"<Chancellor-DSH-Session>"}
-/kingdom role.bind {"role_type":"SUPERVISOR","role_name":"<主理人名称>","session_id":"<Supervisor-DSH-Session>"}
+/kingdom role.bind {"role_type":"SUPERVISOR","role_name":"<主理人名称>","territory_id":"<领地-id>","session_id":"<Supervisor-DSH-Session>"}
 /kingdom role.bind {"role_type":"WORKER","role_name":"<执行者名称>"}
 /kingdom territory.supervisor {"territory_id":"<领地-id>","supervisor_binding_id":"<Supervisor-绑定-id>"}
 /kingdom execution-profile {"binding_id":"<Worker-绑定-id>","provider":"spawn","model":"<请求模型>"}
 ```
+
+> 主管的 `role.bind` 自 3.2.0 起必须同时给出 `territory_id`（席位与领地主理在同一事务里一次写入）；
+> 非主管角色不带该字段。`territory.supervisor` 用于改派/解除既有主理，不再能静默替换在任主理。
 
 `territory.create` 的返回文本包含领地 id；角色绑定 id 可通过只读 `kingdom_list_bindings` 查询。把对应 id 填回 `territory.supervisor` 与 `execution-profile`，不要猜测或从 Session 反推。Owner 写命令只接受一个严格 JSON object；未知字段、额外 token、任意深度的重复字段，以及把 `OWNER.session_id` 当成权限来源的输入，都应在写入前拒绝。
 

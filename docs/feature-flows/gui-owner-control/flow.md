@@ -170,6 +170,10 @@ stateDiagram-v2
 - ticket 30秒、写入授权至多10分钟、服务端时间、固定127.0.0.1 Origin和Host、CSRF、SameSite Strict。Cookie仅引用内存窗口，并额外保留5分钟只读receipt查询期，以支持到期前提交丢响应后的核对；服务端同样检查此宽限，不依靠浏览器删Cookie实施期限。未认证页面不返回scope内目录，旧Role Cookie不接受。URL票据不进入日志、错误、事件、Referer或本地存储。
 - first bootstrap只初始化姓名/王国名且OWNER.session_id=null，消费后不能扩大管理范围；重启不恢复可写窗口。历史决定与receipt保留在原事件账本。
 - 支持init、territory.create/update/supervisor、非OWNER role.bind、主管/宰相role.session、王国ceiling、execution-profile、budget.policy、revoke。既有Territory路径和Worker affinity不通过便捷配置隐式改变。
+- 主管的role.bind自3.2.0起**必填**territory_id（席位与该领地主理在同一事务里原子写入；提交时若领地已有**在任ACTIVE**主理，准备阶段即以TERRITORY_ALREADY_SUPERVISED拒绝，要求先解除）。非主管角色不携带该字段，表单对其它角色隐藏并禁用该字段。
+- 领地判据（`role.bind`(主管)、`territory.supervisor`、`territory.update` 一律相同）：目标领地必须**显式**出现在本次授权的 `scope.territoryIds` 内；`kingdomWide` **不**放宽领地清单（`catalog.territories` 与提交判定逐 action 同判据：清单里列不出的领地也提交不了，反之亦然）。
+- 领地主理自3.2.0起为**1:1**：一个主管席位只主理一个领地。指派一个已隶属其它未删除领地的席位 → 准备阶段以SUPERVISOR_ALREADY_ATTACHED拒绝（DELETED领地不计，本次目标领地不计）。换领地必须"先解除原领地、再指派"。
+- 本管理窗口**可以表达"解除"**：`territory.supervisor` 的 supervisor_binding_id 接受**显式 JSON null**（表单为"解除现任主理"勾选框；该勾选框不带 name，由 payload 显式转成 null，避免多送字段）。省略该字段仍是 INVALID_INPUT，绝不解释为解除。解除预览列出"解除后该领地无主理 → fail-closed"，并登记旧主理及其 session 参与未结算工作守卫（在途工作时不允许解除责任）。因此"换领地"可完全在窗口内完成：先在原领地解除、再在目标领地指派。重复解除**可重复且结论一致**（仍 APPLIED、指针保持 null），但**每次都会追加一条** `unassigned:true` 的解除事实——这与 direct Slash 通道自 3.1.0 起的既有语义相同（无条件 append，不做 no-op 去重）。
 - budget.policy 要求明确动作授权、王国级范围及schema V4。表单产生enabled布尔值、limit_tokens/reserve_tokens正安全整数、unknown_policy BLOCK或WARN、warning_percent 1至100（默认80）；预留不能超过额度，关闭也要求合法参数。准备固定当前政策和规范化字段，提交重验相关事实，沿用准确一次性能力、同事务政策事件/Owner来源/receipt。预算接纳计算归runtime.cost-control，不增加便捷写接口。
 - 预算是新增执行的软接纳政策，不是供应商费用硬上限。此动作允许调整未来政策而保留在途工作，不使用拓扑变更的未决执行阻断规则；关闭不重置统计起点，不派发、终止、结算或释放工作。
 - 创建目录必须存在、规范化且位于明确授权根；不创建目录、不执行命令。改绑、主管分配、ceiling、profile遇受影响的非终态Execution、未释放Lease或未结算Dispatch时拒绝。

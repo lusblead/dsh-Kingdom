@@ -220,6 +220,10 @@ export function buildPersonalWorkbench(input: PersonalWorkbenchInput): PersonalW
           '领地没有有效的在任主管。需要用户作任命决定；这不是任务的人类验收请求。', territory.territoryId)
       }
     }
+    // v3.2.0：领地与主管完全绑定。3.2.0 之前建立的、没有隶属领地的遗留主管席位不会被自动归属，
+    // 其可见性由**席位投影**（roles[].territories 为空 → 界面标注「未隶属领地（待处理）」）承担；
+    // 这里刻意不为每个遗留席位生成 Owner 待办：那样待办数量会随遗留席位线性膨胀，
+    // 而真正可执行的任命入口是领地侧的「为某领地指定主管」。
   }
 
   const orderedTasks = [...input.tasks].sort((left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt) || left.task.taskId.localeCompare(right.task.taskId))
@@ -320,7 +324,13 @@ export function buildPersonalWorkbench(input: PersonalWorkbenchInput): PersonalW
     const taskIds = new Set(taskItems.map(({ task }) => task.taskId))
     const roleExecutions = input.executions.filter(execution => live(execution.state)
       && (binding.roleType === 'WORKER' ? execution.workerBindingId === binding.bindingId : taskIds.has(execution.taskId)))
+    // v3.2.0：主管席位的领地归属直接来自领地投影（同一份事实）；空列表 = 未隶属领地。
+    const seatTerritories = binding.roleType === 'SUPERVISOR'
+      ? input.territories.filter(territory => territory.status === 'ACTIVE' && territory.supervisorBindingId === binding.bindingId)
+        .map(territory => ({ territoryId: territory.territoryId, name: territory.name }))
+      : []
     return { bindingId: binding.bindingId, roleType: binding.roleType, roleName: binding.roleName, sessionBound: binding.sessionBound,
+      territories: seatTerritories,
       taskCount: taskItems.length, taskIds: [...taskIds].slice(0, WORKBENCH_ITEM_LIMIT), taskIdsTruncated: taskIds.size > WORKBENCH_ITEM_LIMIT,
       activeExecutionCount: roleExecutions.length, reviewTaskCount: taskItems.filter(({ task }) => task.status === 'REVIEW').length,
       recoveringTaskCount: taskItems.filter(({ task }) => recoveringTaskIds.has(task.taskId)).length,

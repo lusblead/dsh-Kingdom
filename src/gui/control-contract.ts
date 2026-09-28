@@ -191,8 +191,9 @@ export const GUI_OWNER_DIRECT_SLASH_HINTS: Record<GuiOwnerOnlyAction, string> = 
   ceiling: '/kingdom ceiling {"ceiling":{"tool:pwsh":true}}',
   'territory.create': '/kingdom territory.create {"name":"<name>"}',
   'territory.delete': '/kingdom territory.delete {"territory_id":"<territory-id>","force":false}',
-  'territory.supervisor': '/kingdom territory.supervisor {"territory_id":"<territory-id>","supervisor_binding_id":"<binding-id>"}',
-  'role.bind': '/kingdom role.bind {"role_type":"SUPERVISOR","session_id":"<exact-dsh-session-id>"}',
+  'territory.supervisor': '/kingdom territory.supervisor {"territory_id":"<territory-id>","supervisor_binding_id":"<binding-id>"}（解除现任主理传 null）',
+  // v3.2.0：主管的 role.bind 必须同时给出 territory_id（席位与主理同一事务原子写入）。
+  'role.bind': '/kingdom role.bind {"role_type":"SUPERVISOR","territory_id":"<territory-id>","session_id":"<exact-dsh-session-id>"}',
   'role.unbind': '/kingdom role.unbind {"binding_id":"<binding-id>","reason":"<reason>"}',
   'role.session': '/kingdom role.session {"binding_id":"<binding-id>","session_id":"<exact-dsh-session-id>"}',
   'execution-profile': '/kingdom execution-profile {"binding_id":"<binding-id>","provider":"spawn","model":"<requested-model>"}',

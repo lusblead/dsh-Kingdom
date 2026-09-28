@@ -394,6 +394,8 @@ test('retained setup helpers are replay-safe and refuse tombstone/workspace topo
     const firstSupervisor = ensureGuiSetupBinding(store, {
       kingdomId: initialized.kingdomId, roleType: 'SUPERVISOR',
       roleName: 'Supervisor', sessionId: 'activation-session',
+      // v3.2.0：主管必须同时指定它的领地（席位与主理同一事务原子写入）。
+      territoryId: firstTerritory.territory_id,
     }, auth)
     const firstChancellor = ensureGuiSetupBinding(store, {
       kingdomId: initialized.kingdomId, roleType: 'CHANCELLOR',
@@ -423,6 +425,7 @@ test('retained setup helpers are replay-safe and refuse tombstone/workspace topo
     const secondSupervisor = ensureGuiSetupBinding(store, {
       kingdomId: initialized.kingdomId, roleType: 'SUPERVISOR',
       roleName: 'Supervisor', sessionId: 'activation-session',
+      territoryId: secondTerritory.territory_id,
     }, auth)
     const secondChancellor = ensureGuiSetupBinding(store, {
       kingdomId: initialized.kingdomId, roleType: 'CHANCELLOR',

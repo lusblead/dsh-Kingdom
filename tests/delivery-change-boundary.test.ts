@@ -185,6 +185,22 @@ function acceptEvents(f: Fixture, taskId: string) {
   return f.store.listEvents(f.kingdomId, 400).filter(event => event.event_type === 'TASK_ACCEPTED' && event.target_id === taskId)
 }
 
+/**
+ * v3.2.0（Owner 口径）：领地不允许静默替换**在任**主理——必须先解除再指派。
+ * 测试里的「改绑」必须走同一条两步路径；直接用 territory.supervisor 覆盖会被 Core 正确拒绝。
+ */
+function rebindTerritorySupervisor(f: Fixture, supervisorBindingId: string): void {
+  const auth = ownerControlAuth(f.capability)
+  const released = setTerritorySupervisor(f.store, {
+    kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId: null,
+  }, auth)
+  assert.match(released, /解除主理/u)
+  const assigned = setTerritorySupervisor(f.store, {
+    kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId,
+  }, auth)
+  assert.match(assigned, /主理 Supervisor 已设为/u)
+}
+
 // ── 缺陷 1：Git 忽略的私有内容不得成为候选，正文不得落盘 ─────────────────
 
 test('gitignored private content is never a candidate, never read into evidence, and is reported as partial coverage', () => {
@@ -348,9 +364,8 @@ test('a concurrently re-bound territory supervisor cannot sign change evidence w
   const ownerAuth = ownerControlAuth(f.capability)
   bindRole(f.store, { kingdomId: f.kingdomId, roleType: 'SUPERVISOR', roleName: '替换主管', sessionId: 'replacement-session' }, ownerAuth)
   const replacement = f.store.getBindingsByRole(f.kingdomId, 'SUPERVISOR').find(binding => binding.role_name === '替换主管')!
-  setTerritorySupervisor(f.store, {
-    kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId: replacement.binding_id,
-  }, ownerAuth)
+  // 先解除在任主理，再指派替换主管（3.2.0 不允许静默替换）。
+  rebindTerritorySupervisor(f, replacement.binding_id)
   // 并发改绑后，事务内的锁内复核必须发现调用者 session 不再是本领地主管。
   const result = reviewTask(f.store, supervisorContext(f), {
     taskId, decision: 'ACCEPT', change_evidence_id: manifest.evidenceId, change_entry_ids: [entry.entryId],
@@ -364,9 +379,7 @@ test('a concurrently re-bound territory supervisor cannot sign change evidence w
   assert.equal(f.store.listEvents(f.kingdomId, 400).some(event => event.event_type === 'TASK_ACCEPTED'), false)
 
   // 换回原主管后同一选择可以成立，且签名身份必须是当前锁内 binding。
-  setTerritorySupervisor(f.store, {
-    kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId: f.supervisor.binding_id,
-  }, ownerAuth)
+  rebindTerritorySupervisor(f, f.supervisor.binding_id)
   const accepted = reviewTask(f.store, supervisorContext(f), {
     taskId, decision: 'ACCEPT', change_evidence_id: manifest.evidenceId, change_entry_ids: [entry.entryId],
   })
@@ -463,6 +476,12 @@ test('a Territory that is a repository subdirectory still detects the real chang
   const ownerAuth = ownerControlAuth(f.capability)
   createTerritory(f.store, { kingdomId: f.kingdomId, name: '子目录领地', workspacePath: workspace }, ownerAuth)
   const subdirTerritory = f.store.listTerritories(f.kingdomId).find(territory => territory.workspace_path === workspace)!
+  // v3.2.0（Owner 1:1 裁定）：一个主管席位只能主理一个领地。本用例要让 f.supervisor 主理
+  // 「子目录领地」，因此必须先解除它在夹具领地上的主理（换领地 = 先解除再指派）。
+  const releasedFromFixture = setTerritorySupervisor(f.store, {
+    kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId: null,
+  }, ownerAuth)
+  assert.match(releasedFromFixture, /解除主理/u)
   setTerritorySupervisor(f.store, {
     kingdomId: f.kingdomId, territoryId: subdirTerritory.territory_id, supervisorBindingId: f.supervisor.binding_id,
   }, ownerAuth)
@@ -679,9 +698,8 @@ test('a rebind injected between the outer pre-read and the ACCEPT transaction is
         bindRole(f.store, { kingdomId: f.kingdomId, roleType: 'SUPERVISOR', roleName: '锁内新主管', sessionId: 'midflight-session' },
           ownerControlAuth(f.capability))
         const replacement = f.store.getBindingsByRole(f.kingdomId, 'SUPERVISOR').find(binding => binding.role_name === '锁内新主管')!
-        setTerritorySupervisor(f.store, {
-          kingdomId: f.kingdomId, territoryId: f.territory.territory_id, supervisorBindingId: replacement.binding_id,
-        }, ownerControlAuth(f.capability))
+        // 先解除在任主理，再指派锁内新主管（3.2.0 不允许静默替换）。
+        rebindTerritorySupervisor(f, replacement.binding_id)
       }
       return fn()
     })
