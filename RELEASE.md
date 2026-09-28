@@ -7,7 +7,7 @@
 1. 核实官方 npm 与 GitHub 上的现有版本、远端分支和发布权限。冻结本次范围，排除数据库、凭据、个人路径、本地报告与未确认许可的媒体。
 2. 在独立工作区安装锁定依赖：`npm ci --registry=https://registry.npmjs.org`。运行 `npm run typecheck`、`npm test` 及三个隔离 smoke 入口：`scripts/p2-smoke.mjs`、`scripts/p3-smoke.mjs`、`scripts/hotplug-audit.mjs`。
 3. 完成独立审查并修复具体问题，更新用户指南、版本说明、受影响流程契约和测试。Windows 专用发布脚本故障测试在其他系统跳过，其余测试必须通过。
-4. 按明确清单形成源码提交。在干净工作区运行 `pwsh -File scripts/release.ps1 -Version 3.0.0 -DryRun`。此脚本只执行本地 P0–P3，编译和测试非零退出都会停止；不提交、不推送、不发布。当前脏候选不得直接运行该发布门。
+4. 按明确清单形成源码提交。在干净工作区运行 `pwsh -File scripts/release.ps1 -Version 3.1.0 -DryRun`。此脚本只执行本地 P0–P3，编译和测试非零退出都会停止；不提交、不推送、不发布。当前脏候选不得直接运行该发布门。
 5. 冻结准确 tgz 和 SHA-256，核对公开入口、类型、12 个 SVG、指南与许可证。`prepack` 重新构建，避免旧编译产物混入。用提取的准确包检查官方 DSH 接线、GUI 四主题与窄屏、隔离安装和数据恢复；记录实际测试来源及未测项。
 
 ## 发布与对账

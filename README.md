@@ -5,9 +5,9 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-3.0.0%20local%20candidate-blue)](docs/V3.0-RELEASE-NOTES.md)
+[![Version](https://img.shields.io/badge/version-3.1.0%20local%20candidate-blue)](docs/V3.1-RELEASE-NOTES.md)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
-[![DSH](https://img.shields.io/badge/DSH-0.1.5--rc-orange)](#1-前置要求)
+[![DSH](https://img.shields.io/badge/DSH-0.1.5--rc%20%7C%200.1.7--rc-orange)](#1-前置要求)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#1-前置要求)
 
 </div>
@@ -63,13 +63,13 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 1. 前置要求
 
-- **DeepSeek Harness（dsh）**：本版 peer 声明覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成，`0.1.7-rc` 的实机加载验证另记（见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）。旧宿主请继续使用对应旧版插件
+- **DeepSeek Harness（dsh）**：本版 peer 声明覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成，`0.1.7-rc.2` 的实机加载已于 2026-09-28 验证（无 bundle 跳过，见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）。旧宿主请继续使用对应旧版插件
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
-### 2. 安装 v3.1.0 本地候选
+### 2. 安装 v3.1.0
 
-本候选尚未公开发布；先从当前源码构建并取得准确的 `dsh-kingdom-3.1.0.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
+本版以 GitHub [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm 为公开入口；若当前环境还取不到已发布包，可从源码构建取得准确的 `dsh-kingdom-3.1.0.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
 
 ```bash
 dsh plugin --profile web add ./dsh-kingdom-3.1.0.tgz
@@ -198,7 +198,8 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 0.9.0-alpha.1 | 内置可操作 GUI 最小闭环 | 本地源码阶段，尚未发布 |
 | 1.0.0 | 王国地图、管理中心、王国账本、移交、沙箱与诚实的执行控制投影 | ✅ 已发布 |
 | 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 上一版本；发布状态以 Releases 为准 |
-| 3.0.0 | Owner 交付清单、逐条知悉、主管确认的改动证据、条目问答 | 当前本地候选；尚未公开发布 |
+| 3.0.0 | Owner 交付清单、逐条知悉、主管确认的改动证据、条目问答 | 随 3.1.0 一并发布 |
+| 3.1.0 | DSH 0.1.7 兼容（peer 分线声明）、无 live Agent 会话可绑定席位、`session_evidence` 证据字段 | 当前版本；发布状态以 Releases 为准 |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 
@@ -206,6 +207,7 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 
 ## 📖 文档
 
+- [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md) — DSH 0.1.7 兼容范围与无 live Agent 会话的席位绑定
 - [3.0 使用指南](docs/V3.0-USER-GUIDE.md) — 交付清单、知悉、查看改动与条目问答
 - [3.0 版本说明](docs/V3.0-RELEASE-NOTES.md) — 新增内容及实际验证范围
 - [3.0 功能介绍](docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md) — 面向使用者的文章草稿
