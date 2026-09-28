@@ -801,11 +801,14 @@ test('two identical symlink observations are never reported as a confirmable mod
 test('an unchanged symbolic link is never reported as a confirmable change', (t) => {
   const f = fixture(test)
   const taskId = 'task-unchanged-symlink'
-  writeRepoFile(f.repo, 'target.txt', 'stable target\n')
-  git(f.repo, ['add', 'target.txt'])
-  git(f.repo, ['commit', '--quiet', '-m', 'add symlink target'])
+  // 目标放在**仓库之外**：产品没有任何正当理由读取它，因此它的正文一旦出现在证据目录里，
+  // 就只可能来自「跟随符号链接」。仓库内的已跟踪文件不能用作目标——快照会合法保存它的正文，
+  // 断言便会与符号链接无关地失败（这正是本用例早先的缺陷：Windows 上因无法创建符号链接而
+  // 长期 skip，Linux CI 才第一次执行并暴露）。
+  const outsideTarget = join(f.root, 'outside-target.txt')
+  writeFileSync(outsideTarget, `${CANARY}\n`)
   try {
-    symlinkSync('target.txt', join(f.repo, 'link.txt'))
+    symlinkSync(outsideTarget, join(f.repo, 'link.txt'))
   } catch (error) {
     t.skip(`this host cannot create a symbolic link: ${(error as Error).message}`)
     return
@@ -829,8 +832,8 @@ test('an unchanged symbolic link is never reported as a confirmable change', (t)
   // 对照：同一份 manifest 里真实的内容改动仍可被确认，证明拒绝不是来自整条通道关闭。
   const real = manifest.entries.find(entry => entry.repoPath === 'src/app.ts')!
   assert.equal(validateChangeSelection(undefined, manifest, [real.entryId], { taskId, attemptNo: 1 }).ok, true, 'an ordinary content change stays confirmable')
-  // 符号链接正文（目标内容）也从未被复制进证据目录。
-  assert.equal(readEvidenceBodies(f.evidenceRoot).includes('stable target'), false,
+  // 符号链接正文（目标内容）也从未被复制进证据目录：仓库外目标只可能被「跟随」读到。
+  assert.equal(readEvidenceBodies(f.evidenceRoot).includes(CANARY), false,
     'the symlink target body is never persisted as the link body')
 })
 
