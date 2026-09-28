@@ -62,6 +62,55 @@ export const WORKBENCH_CSS = String.raw`
 .usage-table { width: 100%; border-collapse: collapse; text-align: left; }
 .usage-table th, .usage-table td { padding: 12px 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .usage-table th { color: var(--muted); font-weight: 500; }
+/* 交付知悉清单：成果摘要 → 模块/事项 → 证据/改动 三层结构。 */
+.delivery-item { display: grid; gap: 10px; }
+.delivery-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.delivery-acceptance { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0; }
+.delivery-layer { display: grid; gap: 8px; padding: 11px 0 11px 14px; border-left: 2px solid var(--line); min-width: 0; }
+.delivery-layer > h4 { font-size: 14px; margin: 0; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+.delivery-module { display: grid; gap: 6px; padding: 8px 0 8px 12px; border-left: 2px solid var(--line); min-width: 0; }
+.delivery-module > h5 { font-size: 14px; margin: 0; }
+.delivery-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; min-width: 0; }
+.delivery-row-body { display: grid; gap: 5px; min-width: 0; }
+.delivery-row-body p { margin: 0; }
+.delivery-row-label { font-weight: 600; }
+.delivery-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* 图标按钮的就地操作提示：一个包装层 + 一条提示节点。
+   可用按钮的操作说明在 hover 或键盘 focus 时就地弹出，不挤动按钮行；禁用原因常驻可见，
+   因为键盘用户必须能读到“为什么不可用”，而不是只看到 title。 */
+.delivery-control-hint { position: relative; display: inline-flex; }
+.delivery-control-status { flex: 1 0 100%; margin: 4px 0 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.delivery-control-hint > .delivery-control-status[data-control-status="AVAILABLE"] {
+ position: absolute; top: calc(100% + 4px); left: 0; z-index: 6; display: none;
+ width: max-content; max-width: min(320px, 80vw); margin: 0; padding: 6px 8px;
+ border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft);
+ color: var(--ink); box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+}
+.delivery-control-hint:hover > .delivery-control-status[data-control-status="AVAILABLE"],
+.delivery-control-hint:focus-within > .delivery-control-status[data-control-status="AVAILABLE"] { display: block; }
+.delivery-control-hint:has(> .delivery-control-status[data-control-status="DISABLED"]) { flex: 1 0 100%; flex-wrap: wrap; }
+.delivery-state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 2px 0; }
+.delivery-state-icon { display: inline-block; flex: 0 0 16px; width: 16px; height: 16px; background: currentColor; -webkit-mask: var(--delivery-state-symbol, var(--icon-unknown)) center / contain no-repeat; mask: var(--delivery-state-symbol, var(--icon-unknown)) center / contain no-repeat; }
+.delivery-state[data-ack-state="ACKNOWLEDGED"] { --delivery-state-symbol: var(--icon-known); font-weight: 600; }
+.delivery-state[data-ack-state="PENDING"] { --delivery-state-symbol: var(--icon-pending); }
+.delivery-state[data-ack-state="PENDING_REVISION"] { --delivery-state-symbol: var(--icon-revised); }
+.delivery-state[data-ack-state="NOT_CONFIRMED"] { --delivery-state-symbol: var(--icon-unknown); }
+/* 历史（v1.0.0）接受证据较弱：可见标注，不只靠颜色，也不是普通注脚。 */
+.delivery-evidence-weak { margin: 0; padding: 9px 11px; border: 1px solid var(--line); border-left: 3px solid var(--gold); border-radius: 8px; background: var(--panel-soft); overflow-wrap: anywhere; }
+.delivery-evidence-weak strong { display: inline-block; margin-right: 4px; }
+.delivery-note { margin: 0; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-soft); color: var(--ink); cursor: pointer; }
+.icon-button .ui-icon { width: 20px; height: 20px; flex: 0 0 20px; }
+.icon-button[disabled] { opacity: .6; cursor: not-allowed; }
+/* 语义化禁用（仍可聚焦以便键盘读出原因）与原生 disabled 保持同一可见弱化。 */
+.icon-button[aria-disabled="true"] { opacity: .6; cursor: not-allowed; }
+.icon-button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+.icon-button[aria-disabled="true"]:focus-visible { outline-style: dashed; }
+.delivery-control-hint:focus-within > .icon-button { outline: 3px solid var(--gold); outline-offset: 2px; }
+/* 复制 Owner 激活命令的就地反馈；失败与成功都写明，不只靠颜色。 */
+.delivery-copy-status { margin: 4px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.delivery-copy-failed { border-left: 3px solid var(--gold); padding-left: 8px; }
+@media (prefers-reduced-motion: reduce) { .icon-button { transition: none; } }
 .workbench-page [hidden] { display: none !important; }
 #task-detail-content, #task-action-slot { min-width: 0; }
 .task-return { display: inline-block; margin-bottom: 12px; color: var(--gold); }
@@ -172,6 +221,348 @@ export const WORKBENCH_SCRIPT = String.raw`
       }
       const characters = Array.from(preview); return characters.length > 240 ? characters.slice(0, 240).join('') + '…' : preview;
     };
+    const DELIVERY_STATE_LABELS = { ACKNOWLEDGED: 'Owner 已知悉该条当前版本', PENDING: '待你知悉（当前版本）', PENDING_REVISION: '已有旧版本知悉，当前版本待你知悉', NOT_CONFIRMED: '交付尚未确认' };
+    const DELIVERY_STATE_SYMBOLS = { ACKNOWLEDGED: '✓', PENDING: '○', PENDING_REVISION: '↻', NOT_CONFIRMED: '?' };
+    const addDeliveryState = (parent, state, extra) => {
+      const row = document.createElement('span');
+      row.className = 'delivery-state';
+      row.setAttribute('data-ack-state', state);
+      row.setAttribute('data-status-icon', DELIVERY_STATE_SYMBOLS[state] || '?');
+      const icon = document.createElement('span'); icon.className = 'delivery-state-icon'; icon.setAttribute('aria-hidden', 'true'); row.append(icon);
+      append(row, 'span', (DELIVERY_STATE_LABELS[state] || state) + (extra ? ' · ' + extra : ''));
+      parent.append(row); return row;
+    };
+    /**
+     * 接受证据强度标注。legacy v1.0.0 的 TASK_ACCEPTED 缺少被审查结果 ID 与内容摘要，
+     * Owner 已裁决允许知悉，但工作台必须可见地标注「历史接受证据较弱」，且不得把它
+     * 呈现为 exact result-bound。强证据不额外占位。
+     */
+    const addAcceptanceEvidence = (parent, evidence) => {
+      const value = record(evidence);
+      if (value.kind !== 'LEGACY_ATTEMPT_ONLY') return null;
+      const notice = document.createElement('p');
+      notice.className = 'delivery-evidence-weak';
+      notice.setAttribute('data-acceptance-evidence', 'LEGACY_ATTEMPT_ONLY');
+      notice.setAttribute('role', 'note');
+      append(notice, 'strong', '历史接受证据较弱');
+      append(notice, 'span', ' ' + friendly(value.note, '该 Task/attempt 的 TASK_ACCEPTED 是 v1.0.0 旧格式，只有尝试编号，缺少被审查结果 ID 与内容摘要；本条按真实事件字段与同 Task/attempt 的唯一 WorkerResult 判定，不构成 exact result-bound 证据。'));
+      parent.append(notice); return notice;
+    };
+    const addIconButton = (parent, iconHtml, label, key) => {
+      const button = append(parent, 'button', null, 'icon-button');
+      button.type = 'button';
+      button.setAttribute('data-focus-key', key);
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      const icon = document.createElement('span'); icon.className = 'ui-icon'; icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = iconHtml;
+      button.append(icon);
+      // 图标按钮不再重复长文案：可见状态由相邻的状态文本承担，名称与提示保留在 aria-label/title。
+      return button;
+    };
+    // 知悉入口只把准确的三元组交给 canonical Owner 窗口预选；写入仍由 Owner 授权、预览、提交与回执完成。
+    const ownerAckHref = (taskId, itemId, contentHash) => '/owner?ack_task=' + encodeURIComponent(String(taskId))
+      + '&ack_item=' + encodeURIComponent(String(itemId)) + '&ack_hash=' + encodeURIComponent(String(contentHash));
+    /**
+     * 提问入口与知悉入口使用**同一套**精确三元组与预选协议，只是目标动作不同。
+     *
+     * 二者互不触发：打开提问不会写入知悉；打开知悉也不会产生问题。
+     */
+    const ownerAskHref = (taskId, itemId, contentHash) => '/owner?ask_task=' + encodeURIComponent(String(taskId))
+      + '&ask_item=' + encodeURIComponent(String(itemId)) + '&ask_hash=' + encodeURIComponent(String(contentHash));
+    /**
+     * 本条交付的最小 Owner 激活命令；动作参数决定它是知悉命令还是提问命令。
+     *
+     * 只申请 delivery.item.ack 或 delivery.item.question 之一与**本条领地范围**（territoryIds
+     * 只含本条领地），并携带非授权的 exact task/item/contentHash hint 与 hintAction；不含票据、
+     * 不含 kingdomWide 兜底、不含本机路径或凭据。范围刻意不引用提交时的主管 bindingId：
+     * 绑定可能在该快照之后退任或更换，而领地范围由 direct 入口按当前真实状态校验，命令不会
+     * 因过时绑定而无法执行。复制本身不授权、不预选、不写任何事实：人类仍须直接在 DSH 执行它。
+     */
+    const ownerLaunchCommand = (entry, action) => {
+      const ask = action === 'ask';
+      const scope = { kingdomWide: false, territoryIds: [entry.territoryId], bindingIds: [],
+        roleTypes: [], targetSessionIds: [], workspaceRoots: [] };
+      const envelope = { kingdomId: entry.kingdomId, actions: [ask ? 'delivery.item.question' : 'delivery.item.ack'], scope, ttlMs: 600000 };
+      return '/kingdom owner.gui ' + JSON.stringify({ ...envelope, hintAction: ask ? 'ask' : 'ack',
+        taskHint: entry.taskId, itemHint: entry.itemId, contentHashHint: entry.contentHash });
+    };
+    /**
+     * 复制命令文本。只使用浏览器 Clipboard API：没有它就没有可确认成功的复制路径，
+     * 因此明确失败，不保留任何无法验证结果、也无法确认已复制的旧式回退。
+     */
+    const copyLaunchCommand = (entry, action) => {
+      const command = ownerLaunchCommand(entry, action);
+      const clipboard = globalThis.navigator && globalThis.navigator.clipboard;
+      if (clipboard && typeof clipboard.writeText === 'function') return Promise.resolve(clipboard.writeText(command));
+      return Promise.reject(new Error('浏览器没有提供 Clipboard API'));
+    };
+    /** 复制结果就地反馈：成功提示人类去 DSH 直接执行；失败明确说明未复制，不假装成功。 */
+    const addCopyStatus = (parent, message, ok) => {
+      const host = parent && parent.parentElement ? parent.parentElement : parent;
+      if (!host) return null;
+      const existing = host.querySelector('[data-copy-status]');
+      if (existing) existing.remove();
+      const line = append(host, 'p', message, ok ? 'delivery-copy-status' : 'delivery-copy-status delivery-copy-failed');
+      line.setAttribute('data-copy-status', ok ? 'COPIED' : 'FAILED');
+      line.setAttribute('role', 'status');
+      return line;
+    };
+    /**
+     * 给图标按钮加一层「就地操作提示」。
+     *
+     * 提示文本始终跟随控件，键盘聚焦禁用按钮后可经 aria-describedby 读出原因；
+     * 「不可定位 / 已知悉」这类禁用原因不是次要注脚，直接可见，其余提示在 hover 或
+     * focus 时显示。只加一层可访问包装与一段文案，不新增控件类型或第二套状态。
+     */
+    /**
+     * 给图标按钮加一层「就地操作提示」。
+     *
+     * 提示节点始终挂在控件自己的包装层（由调用方直接传入，不靠 DOM 类型探测）：可用
+     * 按钮的说明在 hover 或键盘 focus 时可见，禁用原因常驻可见，因为键盘用户必须能
+     * 读到“为什么不可用”。两种情形共用这一个机制，不新增控件类型或第二套状态。
+     */
+    const addControlStatus = (host, button, message, state) => {
+      // 状态行 id 只由控件自己的 focus key 派生，不读取父级属性，也不依赖 DOM 结构。
+      const statusId = 'delivery-control-status-' + String(button.getAttribute('data-focus-key') || 'control').replace(/[^A-Za-z0-9_-]/g, '-');
+      const line = append(host, 'p', message, 'delivery-control-status');
+      line.setAttribute('data-control-status', state);
+      line.setAttribute('id', statusId);
+      button.setAttribute('aria-describedby', statusId);
+      return line;
+    };
+    const addDeliveryControl = (parent, iconHtml, label, key) => {
+      const host = append(parent, 'span', null, 'delivery-control-hint');
+      const button = addIconButton(host, iconHtml, label, key);
+      return { host, button };
+    };
+    /** 语义化的「不可用」：保留 aria-disabled 与精确原因，不把禁用原因藏进只读 title。 */
+    const markControlDisabled = (host, button, reason) => {
+      button.setAttribute('aria-disabled', 'true');
+      button.setAttribute('data-disabled', 'true');
+      button.onclick = null;
+      addControlStatus(host, button, reason, 'DISABLED');
+      return button;
+    };
+    /**
+     * 可用的图标按钮：hover / 键盘 focus 时显示操作说明。
+     *
+     * 说明文本直接取调用方已经写好的 title：同一处文本同时服务 tooltip 与就地提示，
+     * 不另造第二份会漂移的文案。调用方必须先设置 button.title。
+     */
+    const markControlAvailable = (host, button) => {
+      addControlStatus(host, button, button.title, 'AVAILABLE');
+      return button;
+    };
+    const addLaunchHintControl = (parent, entry, key, action) => {
+      // 提问与知悉各自有一条最小 direct 命令：命令携带 hintAction，兑换后才会回到同一个
+      // 动作与同一条目标，不会把提问入口悄悄退化成知悉入口。
+      const ask = action === 'ask';
+      const actionLabel = ask ? '提问' : '逐条知悉';
+      const actionName = ask ? 'delivery.item.question' : 'delivery.item.ack';
+      const exact = Boolean(entry.kingdomId) && Boolean(entry.territoryId) && Boolean(entry.taskId)
+        && Boolean(entry.itemId) && Boolean(entry.contentHash);
+      const control = addDeliveryControl(parent, '__DELIVERY_ICON_COPY__',
+        exact
+          ? '复制本条 Owner 激活命令：只申请' + actionLabel + '与本条领地范围，并携带该条 task/item/contentHash；命令不含票据，仍需你在 DSH 直接执行并授权'
+          : '本条缺少准确的王国、领地、任务或内容版本，不能生成 Owner 激活命令',
+        key);
+      const button = control.button;
+      if (!exact) {
+        // 缺少准确范围时不生成命令；原因既在 aria-label/title，也在随焦点可读的可见提示里。
+        button.setAttribute('aria-label', '本条缺少准确的王国、领地、任务或内容版本，不能生成 Owner 激活命令');
+        button.title = '缺少准确的王国、领地、任务或内容版本；不会生成命令，也不提供替代范围。';
+        control.host.setAttribute('title', button.title);
+        return markControlDisabled(control.host, button, '不可用：缺少准确的王国、领地、任务或内容版本；不会生成命令，也不提供替代范围。');
+      }
+      button.title = '复制一条 direct /kingdom owner.gui 命令：只申请 ' + actionName + ' 与本条领地范围，携带该条准确 task/item/contentHash。复制不授权、不写入；请到 DSH 直接执行。';
+      markControlAvailable(control.host, button);
+      button.onclick = () => {
+        const entryValue = { kingdomId: entry.kingdomId, territoryId: entry.territoryId,
+          taskId: entry.taskId, itemId: entry.itemId, contentHash: entry.contentHash };
+        const done = () => addCopyStatus(button, '命令已复制。请在 DSH 直接执行并核对授权范围；复制与执行都不会自动' + actionLabel + '该条。', true);
+        const failed = () => addCopyStatus(button, '命令未复制：当前浏览器没有可用的 Clipboard API，本页无法交出这条 exact 命令。恢复方式：先在 DSH 直接激活包含 ' + actionName + ' 的管理窗口，再回到本页用条目' + actionLabel + '入口预选该条；单独点击入口或单独激活管理窗口都不会回到本条。', false);
+        try { Promise.resolve(copyLaunchCommand(entryValue, action)).then(done, failed); } catch (_) { failed(); }
+      };
+      return button;
+    };
+    /**
+     * 已确认改动证据的只读入口。
+     *
+     * 只有 REPO_RELATIVE_VERIFIED 且携带精确 evidenceId/entryId 时才生成链接；
+     * 链接指向 canonical Owner 窗口，正文只在有效管理窗口内经只读接口返回。
+     * 查看不写入、不自动知悉，也不改变 Task/Claim。
+     */
+    const ownerChangeHref = (taskId, evidenceId, entryId) => '/owner?change_task=' + encodeURIComponent(String(taskId))
+      + '&change_evidence=' + encodeURIComponent(String(evidenceId)) + '&change_item=' + encodeURIComponent(String(entryId));
+    const addChangeControl = (parent, change, key, taskId) => {
+      const value = record(change);
+      const trusted = value.kind === 'REPO_RELATIVE_VERIFIED' && Boolean(value.evidenceId) && Boolean(value.entryId) && Boolean(taskId);
+      const label = trusted
+        ? '查看改动（主管确认的改动证据）：' + friendly(value.repoPath, '未提供路径') + '，固定版本 ' + friendly(value.revision, '未提供版本') + '。只读，不写入，也不会自动知悉。'
+        : '查看改动：不可定位。本条目没有可验证的仓库相对路径与固定源码版本，不提供链接。';
+      const control = addDeliveryControl(parent, trusted ? '__DELIVERY_ICON_CHANGE__' : '__DELIVERY_ICON_UNLOCATED__', label, key);
+      const button = control.button;
+      if (!trusted) {
+        button.title = friendly(value.note, '本条目没有可验证的仓库相对路径与固定源码版本；不提供改动链接。');
+        control.host.setAttribute('title', button.title);
+        return markControlDisabled(control.host, button, '不可定位：' + button.title);
+      }
+      button.title = '在有效的人类管理窗口中只读查看这条「主管确认的改动证据」；查看不写入、不自动知悉，也不改变任务或 Claim。';
+      markControlAvailable(control.host, button);
+      button.onclick = () => { globalThis.location.assign(ownerChangeHref(taskId, value.evidenceId, value.entryId)); };
+      return button;
+    };
+    const addAcknowledgeControl = (parent, item, key) => {
+      const acknowledged = Boolean(item.acknowledgement && item.acknowledgement.acknowledged);
+      const exact = Boolean(item.taskId) && Boolean(item.itemId) && Boolean(item.contentHash);
+      const control = addDeliveryControl(parent, '__DELIVERY_ICON_ACK__', acknowledged ? '已知悉（当前版本）' : '记下已知悉', key);
+      const button = control.button;
+      if (acknowledged) {
+        button.setAttribute('aria-label', '该条当前版本已有 Owner 知悉；重复知悉不会新增记录');
+        button.title = '该条当前版本已有 Owner 知悉；重复知悉不会新增记录。';
+        control.host.setAttribute('title', button.title);
+        return markControlDisabled(control.host, button, '已知悉：该条当前版本已有 Owner 知悉；重复知悉不会新增记录。');
+      }
+      if (!exact) {
+        button.setAttribute('aria-label', '该条缺少准确的条目编号或内容版本，不能进入人类管理窗口');
+        button.title = '该条缺少准确的条目编号或内容版本；不会打开管理窗口，也不提供替代选择。';
+        control.host.setAttribute('title', button.title);
+        return markControlDisabled(control.host, button, '不可用：缺少准确的条目编号或内容版本；不会打开管理窗口，也不提供替代选择。');
+      }
+      button.setAttribute('aria-label', '在人类管理窗口预选并记下已知悉「' + friendly(item.label, '该条') + '」当前版本；仍需由你授权、查看预览并确认提交，不采集理由或理解程度');
+      button.title = '在人类管理窗口预选该条当前版本；仍需由你确认授权、查看预览并提交回执。不会一键写入。';
+      markControlAvailable(control.host, button);
+      button.onclick = () => { globalThis.location.assign(ownerAckHref(item.taskId, item.itemId, item.contentHash)); };
+      return button;
+    };
+    /**
+     * 就某条交付提问的入口。
+     *
+     * 只携带 exact task/item/contentHash 打开 canonical Owner 窗口并预选该条；提问
+     * 仍由 Owner 填写、预览、提交与回执。工作台不写事实、不代替 Owner 授权，也不
+     * 投影问答正文——正文只经有效管理窗口或当前责任主管的 session-bound Tool 读取。
+     * 该控件与「知悉」完全分离：提问不会写入知悉，点击查看/提问也不会自动知悉。
+     */
+    const addAskControl = (parent, item, key) => {
+      const exact = Boolean(item.taskId) && Boolean(item.itemId) && Boolean(item.contentHash);
+      const state = record(item.questions);
+      const total = Number(state.totalCount) || 0;
+      const pending = Number(state.pendingCount) || 0;
+      const unreachable = Boolean(total) && Boolean(state.latestReplyState) && state.latestReplyState !== 'REPLY_ACCESSIBLE';
+      const summary = total
+        ? '该条已有 ' + total + ' 条提问（' + pending + ' 待回复）' + (unreachable ? '；最近一条的接收主管当前不可达' : '')
+        : '该条还没有提问记录';
+      const control = addDeliveryControl(parent, '__DELIVERY_ICON_ASK__', exact
+        ? '就这条交付向接受该交付的主管提问：' + summary + '。仍须由你在管理窗口填写问题、查看预览并确认提交'
+        : '本条缺少准确的条目编号或内容版本，不能发起提问', key);
+      const button = control.button;
+      if (!exact) {
+        button.setAttribute('aria-label', '该条缺少准确的条目编号或内容版本，不能发起提问');
+        button.title = '该条缺少准确的条目编号或内容版本；不会打开管理窗口，也不提供替代选择。';
+        control.host.setAttribute('title', button.title);
+        return markControlDisabled(control.host, button, '不可用：缺少准确的条目编号或内容版本；不会打开管理窗口，也不提供替代选择。');
+      }
+      button.setAttribute('aria-label', '就「' + friendly(item.label, '该条') + '」向接受该交付的主管提问；' + summary + '。提问不是知悉，也不代表验收或任务完成');
+      button.title = '在人类管理窗口中预选该条并填写一个具体问题；提问与答复各记一条对话事实，不改变任务状态、不自动派发或唤醒。仍需由你确认授权、查看预览并提交回执。';
+      markControlAvailable(control.host, button);
+      button.onclick = () => { globalThis.location.assign(ownerAskHref(item.taskId, item.itemId, item.contentHash)); };
+      return button;
+    };
+    const addDeliveryEntry = (parent, taskId, item, keyPrefix, scope) => {
+      const row = document.createElement('article'); row.className = 'delivery-row';
+      const body = document.createElement('div'); body.className = 'delivery-row-body';
+      append(body, 'p', friendly(item.label, '条目'), 'delivery-row-label');
+      append(body, 'p', friendly(item.detail, '未提供内容'));
+      const version = document.createElement('small');
+      version.textContent = '内容版本 ' + String(item.contentHash || '').slice(0, 12) + '… · 条目编号 ' + friendly(item.itemId, '未提供');
+      body.append(version);
+      const questionState = record(item.questions);
+      if (Number(questionState.totalCount) > 0) {
+        append(body, 'small', '该条有 ' + Number(questionState.totalCount) + ' 条提问（' + Number(questionState.pendingCount) + ' 待主管回复）。未回复的问题在主管实际读取前只显示「待领取」；问答正文不进入本页。');
+      }
+      const controls = document.createElement('div'); controls.className = 'delivery-controls';
+      const acknowledgement = record(item.acknowledgement);
+      addDeliveryState(controls, String(acknowledgement.state || 'PENDING'),
+        acknowledgement.acknowledgedAt ? '于 ' + friendly(new Date(acknowledgement.acknowledgedAt).toLocaleString(), '时间未知') : null);
+      if (Number(acknowledgement.historicalCount) > 0) append(controls, 'small', '此前有 ' + acknowledgement.historicalCount + ' 次旧版本知悉，仅留历史，不覆盖当前版本。');
+      addChangeControl(controls, item.change, keyPrefix + ':change', taskId);
+      addAcknowledgeControl(controls, { label: item.label, acknowledgement: item.acknowledgement, taskId: taskId,
+        itemId: item.itemId, contentHash: item.contentHash }, keyPrefix + ':ack');
+      addAskControl(controls, { label: item.label, taskId: taskId, itemId: item.itemId,
+        contentHash: item.contentHash, questions: item.questions }, keyPrefix + ':ask');
+      // 一键复制的只是 direct 命令文本；授权、预选与写入都不在这里发生。
+      // 知悉与提问各有一条最小命令：各自只申请对应动作，并在兑换后各自预选同一条目标。
+      const launchHint = { kingdomId: scope.kingdomId, territoryId: scope.territoryId,
+        supervisorBindingId: scope.supervisorBindingId, taskId: taskId, itemId: item.itemId, contentHash: item.contentHash };
+      addLaunchHintControl(controls, launchHint, keyPrefix + ':launch', 'ack');
+      addLaunchHintControl(controls, launchHint, keyPrefix + ':launch-ask', 'ask');
+      row.append(body, controls); parent.append(row); return row;
+    };
+    const renderWorkbenchDelivery = (item, index) => {
+      const card = document.createElement('article'); card.className = 'workbench-item delivery-item';
+      const head = document.createElement('div'); head.className = 'delivery-head';
+      addTaskLink(head, item.taskId, item.title, 'delivery:' + item.taskId);
+      append(head, 'small', '任务治理：' + stateDisplay(item.status) + ' · 人类验收：尚未记录');
+      card.append(head);
+      const acceptance = document.createElement('div'); acceptance.className = 'delivery-acceptance';
+      append(acceptance, 'small', item.supervisorAccepted
+        ? '主管已接受本次尝试的呈报；只有同一尝试的主管 ACCEPT 才使这里显示为已交付。'
+        : '主管接受尚未确认：执行者自述不等于交付，也不等于任务完成。');
+      append(acceptance, 'small', '人类验收：尚未记录。');
+      card.append(acceptance);
+      // 弱接受证据在卡片顶部可见，且先于条目层出现；不可见地折叠在注脚里不算标注。
+      if (item.deliveryConfirmed) addAcceptanceEvidence(card, item.acceptanceEvidence);
+      if (!item.deliveryConfirmed) {
+        append(card, 'p', '执行者自述：' + claimSummaryPreview(record(item.claim).summary));
+        append(card, 'p', '该任务尚无可确认交付：不展示条目层，也不提供逐条知悉。');
+        append(card, 'small', friendly(record(item.acknowledgement).note, ''));
+        return card;
+      }
+      append(card, 'small', '交付编号 ' + friendly(item.deliveryId, '未提供') + ' · 已接受尝试第 ' + friendly(item.attemptNo, '未知') + ' 次。逐条知悉不代表理解、质量认可、人类验收、Task DONE 或发布授权。');
+      // 复制命令所需的最小范围事实；缺任一项时按钮禁用，不以 kingdomWide 兜底。
+      const launchScope = { kingdomId: item.kingdomId, territoryId: item.territoryId, supervisorBindingId: item.supervisorBindingId };
+      const summaryLayer = document.createElement('section'); summaryLayer.className = 'delivery-layer';
+      append(summaryLayer, 'h4', '第一层 · 成果摘要');
+      const summaryRow = document.createElement('article'); summaryRow.className = 'delivery-row';
+      const summaryBody = document.createElement('div'); summaryBody.className = 'delivery-row-body';
+      append(summaryBody, 'p', friendly(item.summary, '未提供摘要'), 'delivery-row-label');
+      append(summaryBody, 'small', '来源：执行者呈报摘要（Claim），不是独立验证结果。外层摘要知悉不覆盖子条。');
+      const summaryControls = document.createElement('div'); summaryControls.className = 'delivery-controls';
+      const summaryAcknowledgement = record(item.summaryAcknowledgement);
+      if (item.summaryItemId) {
+        addDeliveryState(summaryControls, String(summaryAcknowledgement.state || 'PENDING'),
+          summaryAcknowledgement.acknowledgedAt ? '于 ' + friendly(new Date(summaryAcknowledgement.acknowledgedAt).toLocaleString(), '时间未知') : null);
+        addChangeControl(summaryControls, { kind: 'NOT_LOCATABLE', note: '摘要条目是执行者自述文本，不构成仓库路径；不提供改动链接。' }, 'delivery-summary:' + item.taskId + ':change', item.taskId);
+        addAcknowledgeControl(summaryControls, { label: '成果摘要', acknowledgement: summaryAcknowledgement,
+          taskId: item.taskId, itemId: item.summaryItemId, contentHash: item.summaryContentHash }, 'delivery-summary:' + item.taskId + ':ack');
+        addAskControl(summaryControls, { label: '成果摘要', taskId: item.taskId, itemId: item.summaryItemId,
+          contentHash: item.summaryContentHash, questions: item.summaryQuestions }, 'delivery-summary:' + item.taskId + ':ask');
+        addLaunchHintControl(summaryControls, { ...launchScope, taskId: item.taskId, itemId: item.summaryItemId,
+          contentHash: item.summaryContentHash }, 'delivery-summary:' + item.taskId + ':launch');
+      } else {
+        addDeliveryState(summaryControls, 'PENDING');
+        append(summaryControls, 'small', '摘要层条目投影尚未读取；不能据此判断已知悉。');
+      }
+      summaryRow.append(summaryBody, summaryControls); summaryLayer.append(summaryRow); card.append(summaryLayer);
+      const evidenceLayer = document.createElement('section'); evidenceLayer.className = 'delivery-layer';
+      append(evidenceLayer, 'h4', '第二层 · 模块/事项 → 第三层 · 证据/改动');
+      append(evidenceLayer, 'small', '只有主管在 ACCEPT 中显式选择、且本地内容寻址证据 hash 重验通过的条目才显示为可定位，并固定标注「主管确认的改动证据」。其余条目一律显示为「不可定位」：执行者自述文本、本机绝对路径与现有 SourceRef 都不会被当作路径。查看差异正文需要有效的人类管理窗口，查看不写入也不自动知悉。', 'delivery-change-policy');
+      const modules = Array.isArray(item.modules) ? item.modules : [];
+      if (!modules.length) addEmpty(evidenceLayer, '本次交付没有可展示的模块/事项条目。');
+      modules.forEach(module => {
+        const box = document.createElement('section'); box.className = 'delivery-module';
+        append(box, 'h5', friendly(module.label, '模块'));
+        append(box, 'small', friendly(module.detail, '未提供模块说明'));
+        const entries = Array.isArray(module.items) ? module.items : [];
+        if (!entries.length) append(box, 'p', '本模块当前没有条目；这不表示无风险或已验证。');
+        entries.forEach(entry => addDeliveryEntry(box, item.taskId, entry, 'delivery:' + item.taskId + ':' + entry.itemId, launchScope));
+        evidenceLayer.append(box);
+      });
+      card.append(evidenceLayer);
+      append(card, 'small', friendly(record(item.acknowledgement).note, ''));
+      return card;
+    };
     const renderWorkbench = snapshot => {
       const data = workbenchData(snapshot);
       renderWorkbenchQueue('today-owner', data.ownerActions, '当前没有明确需要你处理的事项。');
@@ -180,7 +571,17 @@ export const WORKBENCH_SCRIPT = String.raw`
       renderWorkbenchQueue('today-internal', data.internalActions, '当前没有等待团队内部处理的事项。');
       renderWorkbenchQueue('inbox-internal', data.internalActions, '当前没有等待团队内部处理的事项。');
       const active = clear('today-active'); if (active) { const tasks = taskItems().filter(task => ['CREATED', 'ASSIGNED', 'RUNNING', 'REVIEW'].includes(task.status)); if (!tasks.length) addEmpty(active, '尚无进行中的任务。可以先写下一句话目标。'); tasks.slice(0, 6).forEach(task => { const row = document.createElement('article'); row.className = 'workbench-item'; addTaskLink(row, task.taskId, task.title, 'active:' + task.taskId); append(row, 'p', executionExplanation(task)); active.append(row); }); if (tasks.length > 6) { const link = append(active, 'a', '查看全部 ' + tasks.length + ' 个任务'); link.href = '#tasks'; } }
-      const deliveries = clear('today-deliveries'); if (deliveries) { const queue = data.deliveries; const items = queueItems(queue); if (!queue) addEmpty(deliveries, '最近交付投影尚未提供。'); else if (!items.length) addEmpty(deliveries, '尚无执行者呈报或交付记录。'); items.forEach(item => { const row = document.createElement('article'); row.className = 'workbench-item'; addTaskLink(row, item.taskId, item.title, 'delivery:' + item.taskId); append(row, 'p', '执行者自述：' + claimSummaryPreview(record(item.claim).summary)); append(row, 'small', (item.supervisorAccepted ? '主管已接受' : '主管接受尚未确认') + ' · 人类验收：尚未记录'); deliveries.append(row); }); if (queue && queue.truncated) addEmpty(deliveries, '最近交付显示 ' + items.length + ' / ' + queue.totalCount + ' 项。'); }
+      const deliveries = clear('today-deliveries'); if (deliveries) { const queue = data.deliveries; const items = queueItems(queue); if (!queue) addEmpty(deliveries, '最近交付投影尚未提供。'); else if (!items.length) addEmpty(deliveries, '尚无执行者呈报或交付记录。'); items.forEach((item, index) => deliveries.append(renderWorkbenchDelivery(item, index))); if (queue && queue.truncated) addEmpty(deliveries, '最近交付显示 ' + items.length + ' / ' + queue.totalCount + ' 项。'); }
+      // 提问汇总只是元数据：正文不进入本页，也不构成待办或通知。旧内容版本的问题
+      // 只留历史，既不算当前待办，也不在这里被说成「当前可回复」。
+      const questions = record(data.deliveryQuestions);
+      if (deliveries && Number(questions.totalQuestions) > 0) {
+        append(deliveries, 'p', '条目提问：共 ' + Number(questions.totalQuestions) + ' 条'
+          + '（' + Number(questions.pendingQuestions) + ' 条当前版待主管回复 / ' + Number(questions.answeredQuestions) + ' 已回复'
+          + (Number(questions.unreachableQuestions) > 0 ? '；其中 ' + Number(questions.unreachableQuestions) + ' 条当前版提问的接收主管当前不可达，不会改投继任者' : '')
+          + (Number(questions.historicalQuestions) > 0 ? '；另有 ' + Number(questions.historicalQuestions) + ' 条属于旧内容版本，仅留历史，不计当前待办' : '')
+          + '）。' + friendly(questions.note, ''), 'hint');
+      }
       renderCollaboration(data.collaboration); renderWorkbenchUsage(data.usage, data.cost); renderRoleInspector(snapshot);
     };
     const renderCollaboration = value => {

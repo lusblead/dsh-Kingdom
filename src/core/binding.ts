@@ -29,6 +29,14 @@ export type RoleType = (typeof ROLE_TYPES)[number]
  */
 export const SINGLETON_ROLES: readonly RoleType[] = ['OWNER', 'CHANCELLOR']
 
+/**
+ * v3.1：direct Owner 写入目标会话时的证明强度（只作事件证据，不参与授权判断）。
+ * - `LIVE_AGENT`：写入当时 `agents.get(session_id)` 返回同一条 live Agent。
+ * - `DURABLE_SESSION`：注册表里没有 live Agent，但该 session_id 在本机 DSH 持久会话
+ *   存储中存在（通常是刚创建、尚未产生任何消息的会话）。
+ */
+export type SessionEvidence = 'LIVE_AGENT' | 'DURABLE_SESSION'
+
 /** 会话身份预留字段（v0.4）。现在可空，未来完整会话会逐步填满。 */
 export interface SessionIdentity {
   /** DSH 会话 id（绑定即“角色属于这个独立会话”）。 */
@@ -144,6 +152,12 @@ export interface BindRoleInput extends SessionIdentity {
   kingdomId: string
   roleType: string
   roleName?: string
+  /**
+   * v3.1：写入当时对目标会话的证明强度，**只作为事件证据落账**，不参与授权判断。
+   * `LIVE_AGENT` = 当时存在 live Agent；`DURABLE_SESSION` = 只在本机持久会话存储中
+   * 登记（绑定写入成立，但该会话真正启动前不能执行）。
+   */
+  sessionEvidence?: SessionEvidence | null
 }
 
 export interface UnbindRoleInput {
@@ -159,6 +173,8 @@ export interface RebindSessionInput extends SessionIdentity {
   /** 二选一：roleType 或 bindingId。 */
   roleType?: string
   bindingId?: string
+  /** v3.1：同 BindRoleInput.sessionEvidence，只作事件证据。 */
+  sessionEvidence?: SessionEvidence | null
 }
 
 /**
@@ -278,6 +294,7 @@ export function bindRole(store: KingdomStore, input: BindRoleInput, auth?: Admin
       model_name: modelName,
       agent_name: agentName,
       session_meta: sessionMeta ? JSON.parse(sessionMeta) : null,
+      session_evidence: input.sessionEvidence ?? null,
       ...admin.eventSource,
     }),
     created_at: now,
@@ -399,6 +416,7 @@ export function rebindSession(store: KingdomStore, input: RebindSessionInput, au
       model_name: after?.model_name ?? null,
       agent_name: after?.agent_name ?? null,
       session_meta: after?.session_meta ? JSON.parse(after.session_meta) : null,
+      session_evidence: input.sessionEvidence ?? null,
       ...admin.eventSource,
     }),
     created_at: new Date().toISOString(),

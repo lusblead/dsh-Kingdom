@@ -94,6 +94,12 @@ export type KingdomErrorCode =
   | 'EXECUTION_NOT_FOUND'
   | 'ILLEGAL_EXECUTION_STATE'
   | 'RECOVERY_REQUIRED'
+  /** 改动证据必须由真实 session-bound 主管确认；declarative 低信任模式不得签发。 */
+  | 'CHANGE_EVIDENCE_SESSION_REQUIRED'
+  /** 证据不存在、hash 漂移、不属于本次 Task/attempt/result 或领地工作区。 */
+  | 'CHANGE_EVIDENCE_UNVERIFIED'
+  /** 未显式选择、选择为空或选择了快照中不存在的改动引用。 */
+  | 'CHANGE_SELECTION_INVALID'
 
 /**
  * v0.5.2（M1-B/P0-B）：GUI 写命令守卫。
@@ -314,6 +320,105 @@ export interface WorkbenchActionItem {
   sourceRefs: SourceRef[]
 }
 
+/** 交付知悉状态。仅 Owner 通过 canonical 人类管理窗口知悉当前版本。 */
+export type DeliveryAcknowledgementState = 'ACKNOWLEDGED' | 'PENDING' | 'PENDING_REVISION'
+
+/** 条目「查看改动」的可信度；不可信时明确不可定位，不给链接。 */
+export type DeliveryChangeKind = 'REPO_RELATIVE_VERIFIED' | 'NOT_LOCATABLE'
+
+export interface DeliveryChangeView {
+  kind: DeliveryChangeKind
+  /** 仅可信时存在；仓库相对路径，绝不是本机绝对路径。 */
+  repoPath: string | null
+  /** 固定源码版本或差异标识。 */
+  revision: string | null
+  reasonCode: string | null
+  note: string
+  /**
+   * 主管确认的改动证据引用；只在 `REPO_RELATIVE_VERIFIED` 时存在。
+   * Owner 面板据此经有效管理窗口读取只读详情，工作台不携带差异正文。
+   */
+  evidenceId?: string | null
+  entryId?: string | null
+  /** 固定标注「主管确认的改动证据」；不可定位时为 null。 */
+  evidenceLabel?: string | null
+  /** 部分覆盖的诚实提示；完整覆盖为 null。 */
+  coverageNote?: string | null
+}
+
+export interface DeliveryItemView {
+  /** 稳定 ID；同一交付内同一逻辑条目跨重建不变。 */
+  itemId: string
+  /** 内容版本；变化后旧知悉只留历史，当前版本重新待知悉。 */
+  contentHash: string
+  /** 层级：SUMMARY（成果摘要）/ EVIDENCE（证据与改动）。 */
+  layer: 'SUMMARY' | 'EVIDENCE'
+  label: string
+  detail: string
+  change: DeliveryChangeView
+  acknowledgement: {
+    state: DeliveryAcknowledgementState
+    acknowledged: boolean
+    /** 旧版本知悉次数；只作历史，不代表当前版本已知悉。 */
+    historicalCount: number
+    acknowledgedAt: string | null
+    acknowledgementEventSeq: number | null
+  }
+  /**
+   * 条目提问的**最小元数据**：只有计数、时间与接收主管是否可达，绝不含问题或回复
+   * 正文。正文只经有效 Owner 窗口或当前责任主管的 session-bound Agent Tool 返回。
+   */
+  questions?: DeliveryItemQuestionState | null
+}
+
+/** 条目提问状态；仅 Owner 窗口与当前责任主管 Tool 能看到正文。 */
+export interface DeliveryItemQuestionState {
+  threadId: string
+  totalCount: number
+  /** 当前内容版本且尚无回复的条数；旧版未答问题不计入。 */
+  pendingCount: number
+  answeredCount: number
+  /** 属于可确认的旧内容版本、仅留历史的条数。 */
+  historyCount: number
+  lastAskedAt: string | null
+  lastRepliedAt: string | null
+  /** 最近一条问题的接收主管当前是否可回复；不可达时界面必须照实说明。 */
+  latestReplyState: 'REPLY_ACCESSIBLE' | 'REVIEWER_BINDING_MISSING' | 'REVIEWER_BINDING_RETIRED' | 'REVIEWER_SESSION_CHANGED' | 'SUPERVISOR_REBOUND' | null
+  /**
+   * 最近一条问题相对当前交付目录的版本关系。`CURRENT` 之外的值都不得被读成
+   * 「当前仍可回复」；`UNVERIFIABLE` 表示当前无法重验该条目版本。
+   */
+  latestItemVersion: 'CURRENT' | 'HISTORICAL' | 'UNVERIFIABLE'
+  /** 最近一条当前版本问题的内容版本；没有当前版本问题时为 null。 */
+  currentContentHash: string | null
+}
+
+/** 模块/事项层：把证据层的条目按来源分组，形成「摘要 → 模块/事项 → 证据/改动」层级。 */
+export interface DeliveryModuleView {
+  moduleId: string
+  label: string
+  detail: string
+  items: DeliveryItemView[]
+}
+
+/** 主管 ACCEPT 确认交付时实际可核对到的接受证据强度（与 Core 分类同义）。 */
+export type DeliveryAcceptanceEvidenceKind = 'EXACT_RESULT_BOUND' | 'LEGACY_ATTEMPT_ONLY'
+
+/**
+ * 历史接受证据较弱的固定标注。单一来源是 `src/core/delivery-ack.ts`；这里只做
+ * 类型兼容的再导出，避免两处文案漂移。运行期值为 `undefined` 时由 GUI 回退到
+ * 「按真实事件字段与唯一 WorkerResult 判定」的等价短文案。
+ */
+export { LEGACY_ACCEPTANCE_EVIDENCE_NOTE } from '../core/delivery-ack.js'
+
+export interface WorkbenchAcceptanceEvidence {
+  kind: DeliveryAcceptanceEvidenceKind
+  /** true 仅当 TASK_ACCEPTED 锁定了本次结果 ID 与内容摘要且两者都与当前呈报一致。 */
+  exactResultBound: boolean
+  /** 弱证据时必须在界面可见地标注的固定文案；强证据为 null。 */
+  note: string | null
+}
+
 export interface WorkbenchDeliveryItem {
   taskId: string
   title: string
@@ -324,6 +429,47 @@ export interface WorkbenchDeliveryItem {
   /** 当前没有人类验收事实；DONE 也不能填为人类已验收。 */
   humanAcceptance: 'NOT_RECORDED'
   updatedAt: string
+  /** 已由同一 Task/attempt 主管 ACCEPT 确认后才为 true；Worker Claim 不会使其为真。 */
+  deliveryConfirmed: boolean
+  /** 确认该交付实际依据的接受证据；未确认交付时为 null。 */
+  acceptanceEvidence: WorkbenchAcceptanceEvidence | null
+  /** 交付身份；未确认交付时为 null。 */
+  deliveryId: string | null
+  attemptNo: number | null
+  /**
+   * 生成「复制本条 Owner 激活命令」图标所需的准确范围事实。
+   * 只用于让人类复制一条 direct `/kingdom owner.gui` 命令；命令本身仍由
+   * Owner 直接执行并授权，这些字段不构成任何权限，也不授予知悉。
+   */
+  kingdomId: string | null
+  territoryId: string
+  territoryName: string | null
+  /** 该领地当前 ACTIVE 主管绑定；未知时复制命令只用领地范围，不用 kingdomWide 兜底。 */
+  supervisorBindingId: string | null
+  /** 成果摘要层条目文本（执行者自述摘要）。 */
+  summary: string | null
+  /** 成果摘要层条目自身的稳定 ID 与内容版本；未确认交付时为 null。 */
+  summaryItemId: string | null
+  summaryContentHash: string | null
+  /** 成果摘要层知悉状态；子条知悉不覆盖它，它也不覆盖子条。 */
+  summaryAcknowledgement: DeliveryItemView['acknowledgement'] | null
+  /** 成果摘要层的提问元数据（不含正文）；无记录时为 null。 */
+  summaryQuestions: DeliveryItemQuestionState | null
+  /** 模块/事项层。未确认交付时为空数组。 */
+  modules: DeliveryModuleView[]
+  /**
+   * 条目提问的最小元数据（不含正文）。正文只经有效 Owner 窗口或当前责任主管的
+   * session-bound Agent Tool 返回；工作台不携带、也不投影问答正文。
+   */
+  deliveryQuestions: DeliveryItemQuestionState[]
+  acknowledgement: {
+    acknowledgedCount: number
+    pendingCount: number
+    pendingRevisionCount: number
+    lastAcknowledgedAt: string | null
+    /** 条目版本已知悉，但整体仍不等于人类验收、Task DONE 或发布授权。 */
+    note: string
+  }
   sourceRefs: SourceRef[]
 }
 
@@ -420,6 +566,21 @@ export interface PersonalWorkbenchData {
   usage: WorkbenchUsageSummary
   cost: WorkbenchCostSummary
   collaboration: WorkbenchCollaborationView
+  /**
+   * 交付条目提问的**最小元数据**汇总（无正文）。用于说明「有多少问题等待主管
+   * 回复」，不作通知、不作待办状态库，也不代表主管已读取。
+   */
+  deliveryQuestions: {
+    totalQuestions: number
+    /** 当前内容版本且主管尚未回复的问题数；未被实际读取前只算「待领取」。 */
+    pendingQuestions: number
+    answeredQuestions: number
+    /** 接收主管已退任、换 session 或领地改绑的**当前版**问题数；它们保持可见但明确不可达。 */
+    unreachableQuestions: number
+    /** 属于旧内容版本、仅留历史的问题数；它们不计当前待办，也不声称可回复。 */
+    historicalQuestions: number
+    note: string
+  }
 }
 
 export interface ReadonlySnapshotProjection {

@@ -22,7 +22,21 @@ import { readCollaborationReadiness, readCollaborationPlan } from './collaborati
 import { assertWorkspaceAvailable, canonicalWorkspaceKey, WorkspaceAdmissionError } from './workspace-admission.js'
 import { asTaskStatus, REVIEW_DECISION_TARGET, type ReviewDecision } from './task.js'
 import { asExecutionState, isLiveExecutionState } from './execution.js'
-import type { EventRow, ExecutionRow, KingdomStore, RoleBindingRow, TaskRow } from './db.js'
+import {
+  DELIVERY_CHANGE_SNAPSHOT_EVENT_TYPE,
+  capturePostAndBuildChangeManifest,
+  capturePreChangeSnapshot,
+  changeSnapshotEventId,
+  changeSnapshotEventPayload,
+  listChangeEntries,
+  readChangeSnapshotEvent,
+  validateChangeSelection,
+  verifyChangeManifest,
+  workspaceKeyOf,
+  type DeliveryChangeEvidenceRef,
+  type DeliveryChangeManifest,
+} from './delivery-change.js'
+import type { EventRow, ExecutionRow, KingdomStore, RoleBindingRow, TaskRow, WorkerResultRow } from './db.js'
 import type { ExecutorInfo, WorkerContext, WorkerExecutor } from '../worker/executor.js'
 import { buildExecutionProfileSnapshot } from '../worker/executor-factory.js'
 import type { AllowedAction, AuthView, CommandResultView, KingdomErrorCode } from '../gui/contract.js'
@@ -620,7 +634,16 @@ export async function startTask(
   if ('ok' in prepared) return prepared
   const { task, execution, attemptNo, context, collector, role, info } = prepared
 
+  // 实际执行副作用前的有界基线。采集失败不阻断执行：没有可信前后快照时
+  // 就不产生任何改动证据，而不是伪造一个空差异。
+  const workspacePath = store.getTerritoryById(task.territory_id)?.workspace_path ?? null
+  const pre = workspacePath
+    ? capturePreChangeSnapshot({ workspacePath, taskId: task.task_id, attemptNo, territoryId: task.territory_id, executionId: execution.execution_id })
+    : null
   const outcome = await executor.execute(task, context)
+  const changeManifest = pre && workspacePath
+    ? capturePostAndBuildChangeManifest({ workspacePath, pre, taskId: task.task_id, attemptNo, territoryId: task.territory_id, executionId: execution.execution_id })
+    : null
 
   // 结算写入必须整体成功。最常见的失败原因是**执行期间插件被卸载**
   // （热重载 / DSH 退出）导致 SQLite 连接已关闭。此时把裸 SQLite 错误
@@ -630,6 +653,7 @@ export async function startTask(
       task, execution, attemptNo, outcome, executorKind: executor.kind,
       resolvedModel: outcome.resolvedModel ?? null,
       info,
+      changeManifest,
     })
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
@@ -658,9 +682,11 @@ function settleExecution(
     executorKind: string
     resolvedModel: string | null
     info: ExecutorInfo | undefined
+    /** 本 attempt 的有界前后快照差异；采集失败时为 null（不产生任何改动链接）。 */
+    changeManifest?: DeliveryChangeManifest | null
   },
 ): CommandResultView {
-  const { attemptNo, outcome, executorKind, resolvedModel, info } = args
+  const { attemptNo, outcome, executorKind, resolvedModel, info, changeManifest } = args
   let { task, execution } = args
 
   // v0.6.0（M1-C）：结算时一次性补执行证据（resolved_model + 快照 resolved 节，此后不再改写）。
@@ -711,8 +737,9 @@ function settleExecution(
 
   // Claim 到达：落 worker_results，Task 推到 REVIEW —— 而不是 DONE。
   const claim = outcome.result
+  const resultId = randomUUID()
   store.insertWorkerResult({
-    result_id: randomUUID(),
+    result_id: resultId,
     task_id: task.task_id,
     attempt_no: attemptNo,
     worker_binding_id: task.assigned_binding_id,
@@ -723,6 +750,15 @@ function settleExecution(
   })
   execution = store.transitionExecution(execution, 'COMPLETED', { sessionId: outcome.sessionId })
   task = store.transitionTask(task, 'REVIEW', { result_summary: claim.summary })
+
+  // 改动证据事件只记 task/attempt/result、manifest/hash 与有界元数据；仓库正文
+  // 留在专用本地证据目录。executor 客观失败时没有 Claim，因此不写该事件。
+  if (changeManifest) {
+    collector.emit(DELIVERY_CHANGE_SNAPSHOT_EVENT_TYPE,
+      { role: 'SUPERVISOR', id: reviewer.binding_id },
+      { type: 'task', id: task.task_id },
+      changeSnapshotEventPayload(changeManifest, resultId))
+  }
 
   collector.emit('WORKER_RESULT_SUBMITTED',
     { role: 'WORKER', id: task.assigned_binding_id },
@@ -802,12 +838,134 @@ function openIntegrityIncidentForClaim(
 
 // ── review（SUPERVISOR，唯一能产生 DONE 的路径）──────────────────
 
-export interface ReviewTaskInput {
-  taskId: string
+/**
+ * 核对主管显式选择的改动引用。
+ *
+ * 必须全部成立（任一失败即拒绝、零写入）：
+ * - 调用者是真实 session-bound 主管（`declarative` 低信任模式不能签发主管确认）；
+ * - 选择字段一旦出现就必须完整、规范（空串/空白 id 不算「没选」）；
+ * - 该 Task/attempt 确有改动快照事件，且 evidence id 与事件一致；
+ * - 快照事件绑定的 result 非空且精确等于本次被 ACCEPT 的 Claim；
+ * - 本地 manifest 按内容寻址重验通过（缺失/漂移即不可信）；
+ * - manifest 的 Territory ID 精确等于本 Task 的 Territory（同一工作区可被多个领地指向）；
+ * - manifest 的 Territory canonical workspace key 与当前领地工作区一致；
+ * - 选中的 entry 必须真实存在于该快照内、非空且不是「无法证明变化」的条目。
+ *
+ * 上述「当前」事实都在 ACCEPT 的 `withImmediateTransaction` 内重新读取，
+ * 因此并发改绑不能在锁内以过期身份签发改动证据。
+ */
+function resolveChangeSelection(
+  store: KingdomStore,
+  ctx: CommandContext,
+  task: TaskRow,
+  claim: WorkerResultRow | null,
+  input: ReviewTaskInput,
+): { ok: true; ref: DeliveryChangeEvidenceRef | null } | { ok: false; code: KingdomErrorCode; message: string } {
+  // 「字段是否出现」而不是「值是否非空」：显式 `change_entry_ids: []`、`null`、
+  // 空白 evidence id 都必须在进入普通 ACCEPT 之前就被拒绝，不能静默退化。
+  const evidencePresent = input.change_evidence_id !== undefined
+  const entriesPresent = input.change_entry_ids !== undefined
+  if (!evidencePresent && !entriesPresent) return { ok: true, ref: null }
+  if (ctx.auth.mode !== 'session-bound') {
+    return { ok: false, code: 'CHANGE_EVIDENCE_SESSION_REQUIRED',
+      message: '错误：改动证据必须由真实 session-bound 主管在同一会话内确认；低信任 declarative 模式不能签发「主管确认的改动证据」。' }
+  }
+  if (!claim) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED', message: '错误：本次审查没有可确认的 Worker Claim，不能确认改动证据。' }
+  }
+  const evidenceId = typeof input.change_evidence_id === 'string' ? input.change_evidence_id.trim() : ''
+  const rawEntryIds = Array.isArray(input.change_entry_ids) ? input.change_entry_ids : []
+  const entryIds = rawEntryIds.filter((id): id is string => typeof id === 'string').map(id => id.trim())
+  if (!evidenceId || !entryIds.length || entryIds.some(id => !id) || entryIds.length !== rawEntryIds.length) {
+    return { ok: false, code: 'CHANGE_SELECTION_INVALID',
+      message: '错误：确认改动证据必须同时给出证据 ID 与非空的改动条目选择（条目 ID 不能是空值或空白）；普通 ACCEPT 不会自动确认全部差异。' }
+  }
+  const snapshot = readChangeSnapshotEvent(store, ctx.kingdomId, task.task_id, claim.attempt_no)
+  if (!snapshot || snapshot.evidenceId !== evidenceId) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED',
+      message: '错误：找不到与本次 Task/attempt 匹配的改动证据，拒绝确认。' }
+  }
+  // 快照必须精确绑定本次被 ACCEPT 的 Claim；结果引用缺失不是「跳过比对」的理由。
+  if (snapshot.resultId === null || snapshot.resultId !== claim.result_id) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED',
+      message: '错误：改动证据绑定的结果与本次被接受的结果不一致，拒绝确认。' }
+  }
+  const verified = verifyChangeManifest(undefined, evidenceId)
+  if (!verified.ok) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED', message: `错误：${verified.reason}` }
+  }
+  // Territory 归属必须精确对齐：两个领地可以指向同一 canonical 工作区（workspaceKey
+  // 相同），只有 workspaceKey 比对时，另一份领地 ID 的有效 manifest 会凭其余条件通过。
+  if (verified.manifest.territoryId !== task.territory_id) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED',
+      message: '错误：改动证据不属于本 Task 的领地，拒绝确认。' }
+  }
+  const workspacePath = store.getTerritoryById(task.territory_id)?.workspace_path ?? ''
+  const workspaceKey = workspaceKeyOf(workspacePath)
+  if (!workspaceKey || verified.manifest.workspaceKey !== workspaceKey) {
+    return { ok: false, code: 'CHANGE_EVIDENCE_UNVERIFIED',
+      message: '错误：改动证据不属于当前领地的 canonical 工作区，拒绝确认。' }
+  }
+  const validated = validateChangeSelection(undefined, verified.manifest, entryIds, { taskId: task.task_id, attemptNo: claim.attempt_no })
+  if (!validated.ok) return { ok: false, code: 'CHANGE_SELECTION_INVALID', message: `错误：${validated.reason}` }
+  return { ok: true, ref: validated.ref }
+}
+
+/**
+ * 主管只读候选清单：列出本 Task 当前 attempt 的有界改动条目。
+ *
+ * 这是主管「查看候选并显式选择」的入口；它只读、不写任何事实，也要求
+ * 真实 session-bound 主管。没有快照时如实说明，不伪造候选。
+ */
+export function describeTaskChangeCandidates(
+  store: KingdomStore,
+  ctx: CommandContext,
+  taskId: string,
+): { ok: true; text: string } | { ok: false; code: KingdomErrorCode; message: string } {
+  if (ctx.auth.mode !== 'session-bound') {
+    return { ok: false, code: 'CHANGE_EVIDENCE_SESSION_REQUIRED',
+      message: '错误：改动候选只能由真实 session-bound 主管查看。' }
+  }
+  const loaded = loadTask(store, ctx.kingdomId, taskId)
+  if (!loaded.ok) return loaded
+  const role = resolveTaskSupervisor(store, ctx, loaded.task)
+  if (!role.ok) return role
+  const claim = store.latestWorkerResult(taskId)
+  if (!claim) return { ok: false, code: 'TASK_NOT_FOUND', message: '错误：该任务还没有 Worker Claim，没有可确认的改动候选。' }
+  const snapshot = readChangeSnapshotEvent(store, ctx.kingdomId, taskId, claim.attempt_no)
+  if (!snapshot) {
+    return { ok: true, text: `任务 ${taskId} 第 ${claim.attempt_no} 次尝试没有可用的改动快照：本次执行未采集到有界前后快照。`
+      + '不存在候选，也不能用执行者自述或任意路径代替。' }
+  }
+  const verified = verifyChangeManifest(undefined, snapshot.evidenceId)
+  if (!verified.ok) {
+    return { ok: true, text: `任务 ${taskId} 第 ${claim.attempt_no} 次尝试的改动证据不可用（${verified.code}）：${verified.reason}` }
+  }
+  const entries = listChangeEntries(verified.manifest)
+  const lines = [
+    `改动证据 ${snapshot.evidenceId}（Task ${taskId}，第 ${claim.attempt_no} 次尝试，结果 ${claim.result_id}）。`,
+    `覆盖：${verified.manifest.coverage.complete ? '完整' : `部分（${verified.manifest.coverage.reasons.join('、') || '存在未判定项'}）`}；`
+      + `共 ${verified.manifest.entries.length} 条，列出 ${entries.length} 条。`,
+    '这是有界本地窗口观测 + 主管确认，不证明 Git 作者身份。',
+    'ACCEPT 时请用 change_evidence_id 与 change_entry_ids 显式选择属于本次交付的条目。',
+  ]
+  for (const entry of entries) lines.push(`- ${entry.entryId} · ${entry.status} · ${entry.repoPath}`)
+  return { ok: true, text: lines.join('\n') }
+}
+
+export interface ReviewTaskInput {  taskId: string
   decision: string
   reason?: string
   /** HANDOFF 专用：目标 Worker binding id。 */
   to_binding_id?: string
+  /**
+   * ACCEPT 专用：主管显式选择属于本次交付的改动引用。
+   *
+   * 两者必须同时给出；只给 evidence id 或只给空选择都视为非法，普通 ACCEPT
+   * 不会自动确认全部 diff。确认入口额外要求真实 session-bound 主管会话。
+   */
+  change_evidence_id?: string
+  change_entry_ids?: string[]
 }
 
 /**
@@ -946,6 +1104,13 @@ export function reviewTask(
       }
 
       const currentClaim = store.latestWorkerResult(input.taskId)
+      // 锁内复核当前 Territory Supervisor binding：事务外的预读身份可能在并发改绑后
+      // 已过期，改动证据签名必须使用锁内身份。普通 review 合同不变，只是不再以
+      // 过期 binding 记签名事件。
+      const currentSupervisor = resolveTaskSupervisor(store, ctx, currentTask)
+      if (!currentSupervisor.ok) return fail(store, ctx.kingdomId, currentSupervisor.code, currentSupervisor.message)
+      const changeSelection = resolveChangeSelection(store, ctx, currentTask, currentClaim, input)
+      if (!changeSelection.ok) return fail(store, ctx.kingdomId, changeSelection.code, changeSelection.message)
       const incident = currentClaim
         ? openIntegrityIncidentForClaim(store, input.taskId, currentClaim.attempt_no)
         : null
@@ -962,21 +1127,24 @@ export function reviewTask(
       const task = store.transitionTask(currentTask, 'DONE')
       store.closeActiveAssignment(input.taskId, 'task-terminal')
       collector.emit('TASK_ACCEPTED',
-        { role: 'SUPERVISOR', id: role.binding.binding_id },
+        { role: 'SUPERVISOR', id: currentSupervisor.binding.binding_id },
         { type: 'task', id: task.task_id },
         {
           decision: verdict,
           reason,
-          reviewer_binding_id: role.binding.binding_id,
+          reviewer_binding_id: currentSupervisor.binding.binding_id,
           reviewed_attempt_no: currentClaim?.attempt_no ?? 0,
           reviewed_result_id: currentClaim?.result_id ?? null,
           reviewed_result_digest: currentClaim ? ownerInputHash(currentClaim) : null,
           claimed_outcome: currentClaim?.outcome ?? null,
+          // 只有主管在本次 ACCEPT 中显式选择的改动引用才进入同一条事实；
+          // 普通 ACCEPT 不自动确认全部 diff。
+          ...(changeSelection.ref ? { delivery_change_evidence: changeSelection.ref } : {}),
         })
 
       return succeed(store, ctx.kingdomId,
         `已 ACCEPT 第 ${currentClaim?.attempt_no ?? 0} 次尝试的结果。任务「${task.title}」→ **DONE**（终态）。\n`
-        + `Worker 的 Claim 至此才成为组织事实，已记 TASK_ACCEPTED（reviewer=${role.binding.role_name}）。`,
+        + `Worker 的 Claim 至此才成为组织事实，已记 TASK_ACCEPTED（reviewer=${currentSupervisor.binding.role_name}）。`,
         task, null, collector)
     })
   }

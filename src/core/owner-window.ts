@@ -12,8 +12,44 @@ import {
 import { initializeKingdomFacts } from './kingdom.js'
 import { normalizeBudgetPolicyParameters, readBudgetPolicy, setBudgetPolicy, type BudgetPolicyParameters } from './budget.js'
 import { adoptCollaborationPlan, listCollaborationPlans, readCollaborationPlan, normalizePlanAdoptionParameters, type PlanAdoptionParameters, type CollaborationPlanView } from './collaboration.js'
+import {
+  DELIVERY_ACK_EVENT_TYPE,
+  CHANGE_EVIDENCE_LABEL,
+  DELIVERY_QUESTION_NOTE,
+  DELIVERY_QUESTION_EVENT_TYPE,
+  DELIVERY_QUESTION_TEXT_LIMIT,
+  DELIVERY_REPLY_STATES,
+  boundedQuestionText,
+  classifyAcceptedDelivery,
+  deliveryAcknowledgementView,
+  deliveryChangeItemId,
+  deliveryIdFor,
+  deliveryQuestionEventId,
+  deliveryQuestionThreadForItem,
+  deliveryReviewerBindingId,
+  deriveDeliveryItems,
+  listDeliveryQuestionHistory,
+  readDeliveryAcknowledgements,
+  readDeliveryItemVersion,
+  readDeliveryQuestionThread,
+  readLatestReviewEvent,
+  recordDeliveryAcknowledgement,
+  recordDeliveryQuestion,
+  redactDeliveryText,
+  type DeliveryAcceptanceEvidenceKind,
+  type DeliveryChangeEvidenceInput,
+  type DeliveryItemQuestionThread,
+  type DeliveryItemVersionState,
+  type DeliveryReplyState,
+} from './delivery-ack.js'
+import {
+  readAcceptedChangeEvidence,
+  readChangeEntry,
+  resolveChangeEvidenceForDelivery,
+  type DeliveryChangeEvidenceRef,
+} from './delivery-change.js'
 
-export const OWNER_MUTATION_ACTIONS = ['init', 'territory.create', 'territory.update', 'territory.supervisor', 'role.bind', 'role.session', 'ceiling', 'execution-profile', 'budget.policy', 'plan.adopt'] as const
+export const OWNER_MUTATION_ACTIONS = ['init', 'territory.create', 'territory.update', 'territory.supervisor', 'role.bind', 'role.session', 'ceiling', 'execution-profile', 'budget.policy', 'plan.adopt', 'delivery.item.ack', 'delivery.item.question'] as const
 export type OwnerMutationAction = typeof OWNER_MUTATION_ACTIONS[number]
 export type OwnerManagedRole = 'CHANCELLOR' | 'SUPERVISOR' | 'WORKER'
 export interface OwnerDecisionScope {
@@ -59,6 +95,144 @@ export interface OwnerProfileValidationInput {
   signal: AbortSignal
 }
 export interface OwnerRuntimeSessionChoice { id: string; label: string }
+/** 交付清单条目：只有已被主管 ACCEPT 确认的交付才会出现。 */
+export interface OwnerDeliveryItemChoice {
+  taskId: string
+  taskTitle: string
+  deliveryId: string
+  attemptNo: number
+  resultId: string
+  itemId: string
+  contentHash: string
+  layer: string
+  label: string
+  detail: string
+  changeKind: string
+  changeNote: string
+  acknowledgementState: 'ACKNOWLEDGED' | 'PENDING' | 'PENDING_REVISION'
+  acknowledgedAt: string | null
+  /**
+   * 本次确认交付实际依据的接受证据强度。`LEGACY_ATTEMPT_ONLY` 时
+   * `acceptanceEvidenceNote` 必须原样展示给 Owner（历史接受证据较弱），
+   * 且不得把它当作 exact result-bound。
+   */
+  acceptanceEvidenceKind: DeliveryAcceptanceEvidenceKind
+  acceptanceEvidenceExact: boolean
+  acceptanceEvidenceNote: string | null
+  /**
+   * 该条目已有的 Owner 提问元数据（不含正文）。正文只经
+   * {@link OwnerDecisionController.readDeliveryQuestions} 在有效窗口内按精确条目返回。
+   */
+  questions: OwnerDeliveryItemQuestions | null
+}
+
+/** 条目提问的**元数据**：不含问题或回复正文。 */
+export interface OwnerDeliveryItemQuestions {
+  threadId: string
+  totalCount: number
+  /** 主管尚未回复的问题数；未被实际读取前只算「待领取」。 */
+  pendingCount: number
+  answeredCount: number
+  /** 属于旧内容版本、仅留历史的问题数。 */
+  historyCount: number
+  lastAskedAt: string | null
+  lastRepliedAt: string | null
+  /** 最近一条问题的接收主管是否仍可回复；不可达时界面必须照实说明。 */
+  latestReplyState: DeliveryReplyState | null
+}
+
+/**
+ * Owner 只读问答历史入口的一条精确条目（不含问题或回复正文）。
+ *
+ * 与 `deliveryItems` 分开：它只来自既有提问事实，因此包含已经离开当前交付目录、
+ * 目前无法重验的旧问答。它只供只读回看，**绝不**作为新提问目标；新提问仍须落在
+ * 当前已确认交付目录内并逐条精确重验。
+ */
+export interface OwnerDeliveryQuestionHistoryChoice {
+  taskId: string
+  taskTitle: string
+  itemId: string
+  itemLabel: string
+  lastAskedAt: string
+  questionCount: number
+  /** 已验证当前版本且尚无回复的条数；历史版与无法重验的都不计入。 */
+  pendingCount: number
+  answeredCount: number
+  historyCount: number
+  unverifiableCount: number
+  latestItemVersion: DeliveryItemVersionState
+  currentContentHash: string | null
+}
+
+/**
+ * Owner 只读的条目问答线程。
+ *
+ * 与「查看改动」同款边界：只经有效 Owner 窗口、精确条目引用与本次动作授权返回，
+ * **读取不写任何事实**、不自动知悉、也不替主管回复。
+ */
+export interface OwnerDeliveryQuestionEntry {
+  questionId: string
+  questionText: string
+  askedAt: string
+  ownerId: string
+  /** 接受该交付的主管 binding；首版唯一合法接收者。 */
+  reviewerBindingId: string
+  replyState: DeliveryReplyState
+  replyStateNote: string
+  /**
+   * 该问题相对当前交付目录的版本关系：已验证当前、可确认的旧版本，或无法重验。
+   * 后两者仍可读、仍保留原文与回复，但**不计当前待办**，界面也不得据此声称
+   * 「当前可回复」。
+   */
+  itemVersion: DeliveryItemVersionState
+  /** 当前读取时该条目重新派生出的内容版本；无法派生时为 null。 */
+  currentItemContentHash: string | null
+  reply: { replyText: string; repliedAt: string; responderBindingId: string } | null
+}
+
+export interface OwnerDeliveryQuestionView {
+  deliveryId: string
+  taskId: string
+  taskTitle: string
+  itemId: string
+  itemLabel: string
+  /** 本次读取时该条目的当前内容版本；无法在当前交付目录中重验时为 null。 */
+  contentHash: string | null
+  questions: OwnerDeliveryQuestionEntry[]
+  answeredCount: number
+  /** 已验证当前版本且尚无回复的条数；历史版与无法重验的未答问题都不计入。 */
+  pendingCount: number
+  historyCount: number
+  /** 当前交付目录无法重验该条目版本、因此不声称任何版本关系的条数。 */
+  unverifiableCount: number
+  note: string
+}
+
+/**
+ * Owner 只读的已确认改动详情。
+ *
+ * 这是「主管确认的改动证据」的可读视图：只经有效 Owner 窗口、精确
+ * task/evidence/entry id 与 scope 返回，**查看不写入任何事实**，也不自动知悉。
+ */
+export interface OwnerDeliveryChangeView {
+  kind: 'SUPERVISOR_CONFIRMED_BOUNDED_WINDOW'
+  label: string
+  evidenceId: string
+  entryId: string
+  taskId: string
+  taskTitle: string
+  attemptNo: number
+  status: string
+  repoPath: string
+  revision: string
+  repoVcs: string
+  repoHead: string | null
+  coverageComplete: boolean
+  coverageReasons: string[]
+  labels: string[]
+  note: string
+  hunks: { kind: string; beforeLine: number | null; afterLine: number | null; text: string }[]
+}
 export interface OwnerDecisionControllerOptions {
   now?: () => number
   validationTimeoutMs?: number
@@ -72,6 +246,16 @@ export interface OwnerOperationCatalog {
   bindings: { id: string; roleType: string; roleName: string }[]
   runtimeSessions: OwnerRuntimeSessionChoice[]
   workspaceRoots: string[]
+  /**
+   * 本次授权范围内的已确认交付条目；逐条知悉与逐条提问共用同一份目录。
+   * 只要窗口授权了其中任一动作就返回；读取权限仍由各自动作单独把关。
+   */
+  deliveryItems?: OwnerDeliveryItemChoice[]
+  /**
+   * 本次授权范围内**已有提问记录**的精确条目只读入口（含已离开当前目录的旧问答）。
+   * 只在窗口授权 `delivery.item.question` 时返回，供只读回看；不是新提问目标来源。
+   */
+  deliveryQuestionHistory?: OwnerDeliveryQuestionHistoryChoice[]
 }
 export type OwnerOperationInput =
   | { action: 'init'; parameters: { kingdom_name: string; owner_name: string } }
@@ -84,6 +268,8 @@ export type OwnerOperationInput =
   | { action: 'execution-profile'; parameters: { binding_id: string; profile: ExecutionProfileV1 | null } }
   | { action: 'budget.policy'; parameters: BudgetPolicyParameters }
   | { action: 'plan.adopt'; parameters: PlanAdoptionParameters }
+  | { action: 'delivery.item.ack'; parameters: { task_id: string; delivery_id: string; item_id: string; content_hash: string; attempt_no: number; result_id: string } }
+  | { action: 'delivery.item.question'; parameters: { task_id: string; delivery_id: string; item_id: string; content_hash: string; attempt_no: number; result_id: string; question_text: string } }
 export interface OwnerOperationPreview {
   prepareId: string
   operationId: string
@@ -105,7 +291,7 @@ export interface OwnerOperationReceipt {
   action: OwnerMutationAction
   inputHash: string
   status: 'APPLIED'
-  target: { type: 'kingdom' | 'territory' | 'binding' | 'collaboration-plan'; id: string }
+  target: { type: 'kingdom' | 'territory' | 'binding' | 'collaboration-plan' | 'delivery'; id: string }
   receiptSeq: number
   appliedAt: string
   message: string
@@ -143,6 +329,39 @@ interface OperationContext {
 }
 const MANAGED_ROLES: readonly string[] = ['CHANCELLOR', 'SUPERVISOR', 'WORKER']
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+/** 条目提问元数据：只计数与时间，不含任何正文。 */
+function ownerDeliveryItemQuestions(thread: DeliveryItemQuestionThread): OwnerDeliveryItemQuestions {
+  const replied = thread.questions.filter(question => question.reply !== null)
+  const asked = thread.questions.map(question => question.askedAt).sort()
+  const answered = replied.map(question => question.reply!.repliedAt).sort()
+  return {
+    threadId: thread.deliveryId + ':' + thread.itemId,
+    totalCount: thread.questions.length,
+    pendingCount: thread.pendingCount,
+    answeredCount: thread.answeredCount,
+    historyCount: thread.historyCount,
+    lastAskedAt: asked.length ? asked[asked.length - 1]! : null,
+    lastRepliedAt: answered.length ? answered[answered.length - 1]! : null,
+    latestReplyState: thread.questions.length ? thread.questions[thread.questions.length - 1]!.replyState : null,
+  }
+}
+
+/** 固定的可达性说明；界面与报告共用，避免两处措辞漂移。 */
+function classifyReplyStateNote(state: DeliveryReplyState): string {
+  // `DELIVERY_REPLY_STATES` 是唯一状态清单：新增状态而忘记补说明时这里立刻失败，
+  // 而不是静默回退成一句含糊的通用文案。
+  if (!DELIVERY_REPLY_STATES.includes(state)) fail('DELIVERY_QUESTION_STATE_UNKNOWN', '未知的回复可达性状态。')
+  const notes: Record<DeliveryReplyState, string> = {
+    REPLY_ACCESSIBLE: '该问题仍由接受交付的主管负责：它仍是领地当前主理并持有 ACTIVE session，可读取并回复。',
+    REVIEWER_BINDING_MISSING: '接受该交付时记录的主管绑定已不存在或不再是主管，本条不可达；不会改投继任主管。',
+    REVIEWER_BINDING_RETIRED: '接受该交付的主管已退任，本条不可达；不会改投继任主管。',
+    REVIEWER_SESSION_CHANGED: '该主管当前没有可用的 ACTIVE session，本条暂时不可达。',
+    SUPERVISOR_REBOUND: '该领地已改由其他主管主理，本条仍归原接受主管，不可达；不会自动改投继任者。',
+  }
+  return notes[state]
+}
+
 function fail(code: string, message: string): never { throw new OwnerOperationError(code, message) }
 function object(value: unknown, allowed: readonly string[], required: readonly string[] = allowed): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -240,10 +459,38 @@ function normalizeInput(raw: OwnerOperationInput): OwnerOperationInput {
       }
       return { action: 'execution-profile', parameters: { binding_id: string(p.binding_id, '绑定 ID'), profile } }
     }
+    case 'delivery.item.ack': {
+      const p = object(outer.parameters, ['task_id', 'delivery_id', 'item_id', 'content_hash', 'attempt_no', 'result_id'])
+      const attemptNo = p.attempt_no
+      if (!Number.isSafeInteger(attemptNo) || (attemptNo as number) < 1 || (attemptNo as number) > 1_000_000) {
+        fail('INVALID_INPUT', '交付尝试次数必须是正整数。')
+      }
+      const contentHash = string(p.content_hash, '条目内容版本', 128)
+      if (!/^[0-9a-f]{64}$/u.test(contentHash)) fail('INVALID_INPUT', '条目内容版本必须是小写十六进制摘要。')
+      return { action: 'delivery.item.ack', parameters: {
+        task_id: string(p.task_id, '任务 ID'), delivery_id: string(p.delivery_id, '交付 ID'),
+        item_id: string(p.item_id, '条目 ID'), content_hash: contentHash,
+        attempt_no: attemptNo as number, result_id: string(p.result_id, '结果 ID') } }
+    }
+    case 'delivery.item.question': {
+      const p = object(outer.parameters, ['task_id', 'delivery_id', 'item_id', 'content_hash', 'attempt_no', 'result_id', 'question_text'])
+      const attemptNo = p.attempt_no
+      if (!Number.isSafeInteger(attemptNo) || (attemptNo as number) < 1 || (attemptNo as number) > 1_000_000) {
+        fail('INVALID_INPUT', '交付尝试次数必须是正整数。')
+      }
+      const contentHash = string(p.content_hash, '条目内容版本', 128)
+      if (!/^[0-9a-f]{64}$/u.test(contentHash)) fail('INVALID_INPUT', '条目内容版本必须是小写十六进制摘要。')
+      // 与知悉同款的「非空、长度受限」文本校验；正文随后在 Core 里统一脱敏并限长，
+      // 因此事实里永远不保存未脱敏正文。
+      const questionText = string(p.question_text, '问题内容', DELIVERY_QUESTION_TEXT_LIMIT)
+      return { action: 'delivery.item.question', parameters: {
+        task_id: string(p.task_id, '任务 ID'), delivery_id: string(p.delivery_id, '交付 ID'),
+        item_id: string(p.item_id, '条目 ID'), content_hash: contentHash,
+        attempt_no: attemptNo as number, result_id: string(p.result_id, '结果 ID'), question_text: questionText } }
+    }
     default: return fail('INVALID_ACTION', '不支持该管理动作。')
   }
 }
-
 /** Trusted-local decision registry. Public IDs and JSON views never confer authority. */
 export class OwnerDecisionController {
   private readonly decisions = new Map<OwnerDecisionHandle, DecisionRecord>()
@@ -328,22 +575,273 @@ export class OwnerDecisionController {
         .map(item => [item.id, { id: item.id, label: string(item.label, 'Session 名称', 512) }])).values()],
       workspaceRoots: [...s.workspaceRoots],
       plans: kingdomId && record.view.actions.includes('plan.adopt') ? listCollaborationPlans(this.store, kingdomId).filter(plan => {
-        try { this.context(record, { action: 'plan.adopt', parameters: { plan_id: plan.planId, version: plan.version, digest: plan.digest } }); return true }
+        try { this.context(record, { action: 'plan.adopt', parameters: { plan_id: plan.planId, version: plan.version, digest: plan.digest } }, randomUUID()); return true }
         catch { return false }
-      }) : [] }
+      }) : [],
+      deliveryItems: kingdomId && (record.view.actions.includes('delivery.item.ack') || record.view.actions.includes('delivery.item.question'))
+        ? this.deliveryItems(record) : [],
+      deliveryQuestionHistory: kingdomId && record.view.actions.includes('delivery.item.question')
+        ? this.deliveryQuestionHistory(record) : [] }
+  }
+
+  /**
+   * 本次授权范围内的**已有提问记录**条目（只读历史入口）。
+   *
+   * 只读且不依赖有界交付目录：它按权威提问事实列出精确 task/item，再逐条用
+   * `deliveryScopeAllows` 过滤，因此不含跨领地条目；不在当前目录、当前无法重验的
+   * 旧问答也能在这里被发现。它不返回任何正文，也**不**进入新提问 prepare 的来源目录。
+   */
+  private deliveryQuestionHistory(record: DecisionRecord): OwnerDeliveryQuestionHistoryChoice[] {
+    const kingdomId = record.view.kingdomId
+    if (!kingdomId) return []
+    const choices: OwnerDeliveryQuestionHistoryChoice[] = []
+    for (const target of listDeliveryQuestionHistory(this.store, kingdomId)) {
+      const task = this.store.getTask(target.taskId)
+      if (!task) continue
+      const territory = this.store.getTerritoryById(task.territory_id)
+      if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') continue
+      if (!this.deliveryScopeAllows(record, territory)) continue
+      choices.push({ taskId: target.taskId, taskTitle: redactDeliveryText(task.title), itemId: target.itemId,
+        itemLabel: target.itemLabel, lastAskedAt: target.lastAskedAt, questionCount: target.questionCount,
+        pendingCount: target.pendingCount, answeredCount: target.answeredCount, historyCount: target.historyCount,
+        unverifiableCount: target.unverifiableCount, latestItemVersion: target.latestItemVersion,
+        currentContentHash: target.currentContentHash })
+    }
+    return choices
+  }
+
+  /**
+   * 交付知悉的授权范围判据。
+   *
+   * catalog 与 prepare/commit 必须共用同一判据：否则会出现「清单可见、
+   * 提交被拒」或「清单不可见、提交却可行」。`kingdomWide` 是 Owner 的最高
+   * 授权级别；其余情况要求任务所在领地在 `territoryIds` 内，或该领地由
+   * 授权 `bindingIds` 中的主管主理且本次授权声明了 SUPERVISOR 角色。
+   */
+  private deliveryScopeAllows(record: DecisionRecord, territory: TerritoryRow): boolean {
+    const scope = record.view.scope
+    if (scope.kingdomWide) return true
+    if (!scope.territoryIds.length && !scope.bindingIds.length && !scope.roleTypes.length) return false
+    if (scope.territoryIds.includes(territory.territory_id)) return true
+    return scope.roleTypes.includes('SUPERVISOR')
+      && !!territory.supervisor_binding_id
+      && scope.bindingIds.includes(territory.supervisor_binding_id)
+  }
+
+  /**
+   * 本次授权范围内的已确认交付条目。只有同一 Task/attempt 主管 ACCEPT 的交付才出现，
+   * Worker Claim 永远不会进入该清单。
+   */
+  private deliveryItems(record: DecisionRecord): OwnerDeliveryItemChoice[] {
+    const kingdomId = record.view.kingdomId
+    if (!kingdomId) return []
+    const ownerId = record.view.ownerId ?? ''
+    const items: OwnerDeliveryItemChoice[] = []
+    /**
+     * 与工作台「最近交付」对齐：按交付最近更新/被接受的时间排序。
+     *
+     * 主管 ACCEPT 会经 `transitionTask` 更新 `tasks.updated_at`，因此「旧建但最近
+     * 接受的交付」会排到工作台顶部；若这里仍按 `created_at` 截断，那条交付就会
+     * 在工作台可见、却在 Owner 目录之外，既无法知悉也无法看差异。只改排序键，
+     * 不新增第二套任务索引，也不改变条目上限语义。
+     */
+    const tasks = [...this.store.listTasks(kingdomId)].sort((a, b) =>
+      b.updated_at.localeCompare(a.updated_at) || b.task_id.localeCompare(a.task_id))
+    for (const task of tasks) {
+      if (items.length >= 200) break
+      if (task.status !== 'DONE') continue
+      const territory = this.store.getTerritoryById(task.territory_id)
+      if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') continue
+      if (!this.deliveryScopeAllows(record, territory)) continue
+      const claim = this.store.latestWorkerResult(task.task_id)
+      if (!claim) continue
+      const review = readLatestReviewEvent(this.store, kingdomId, task.task_id)
+      const classification = classifyAcceptedDelivery(this.store, claim, review)
+      if (!classification) continue
+      const deliveryId = deliveryIdFor(task.task_id)
+      const acknowledgements = readDeliveryAcknowledgements(this.store, kingdomId, deliveryId)
+      const questions = readDeliveryQuestionThread(this.store, kingdomId, deliveryId)
+      for (const item of deriveDeliveryItems(task.task_id, claim, this.changeEvidenceFor(kingdomId, task.task_id))) {
+        const view = deliveryAcknowledgementView(acknowledgements, item, ownerId)
+        const thread = deliveryQuestionThreadForItem(questions, item.itemId, item.contentHash)
+        items.push({
+          taskId: task.task_id,
+          taskTitle: redactDeliveryText(task.title),
+          deliveryId,
+          attemptNo: claim.attempt_no,
+          resultId: claim.result_id,
+          itemId: item.itemId,
+          contentHash: item.contentHash,
+          layer: item.content.layer,
+          label: item.content.label,
+          detail: item.content.detail,
+          changeKind: item.content.change.kind,
+          changeNote: item.content.change.note,
+          acknowledgementState: view.state,
+          acknowledgedAt: view.acknowledgedAt,
+          acceptanceEvidenceKind: classification.kind,
+          acceptanceEvidenceExact: classification.evidence.exactResultBound,
+          acceptanceEvidenceNote: classification.legacyNote,
+          questions: thread ? ownerDeliveryItemQuestions(thread) : null,
+        })
+      }
+    }
+    return items
+  }
+
+  /**
+   * 只读返回一条已确认交付条目的完整问答线程。
+   *
+   * 有效性要求与 `readDeliveryChange` 同款：窗口 ACTIVE、本次授权包含
+   * `delivery.item.question`、任务在授权范围内、该 task 确实存在写给它的问题记录。
+   * 版本关系按该精确 task/item **独立重验**（不受有界展示目录截断影响）：命中当前
+   * 派生版本即已验证当前版，命中的是旧版本即历史版；条目已无法从当前 ACCEPT/证据
+   * 重验（例如 CHANGE 证据丢失）时仍可按精确 itemId 读回，但整条标为无法重验，
+   * 不冒充当前版、也不可回复。任一不成立都失败，且不写任何事实、不自动知悉。
+   */
+  readDeliveryQuestions(handle: OwnerDecisionHandle, input: { taskId: string; itemId: string }): OwnerDeliveryQuestionView {
+    const record = this.active(handle)
+    const kingdomId = record.view.kingdomId
+    if (!kingdomId) fail('DELIVERY_NOT_CONFIRMED', '当前窗口没有可读取交付的王国。')
+    if (!record.view.actions.includes('delivery.item.question')) {
+      fail('ACTION_NOT_AUTHORIZED', '本次管理窗口未授权交付条目提问动作，不能读取问答正文。')
+    }
+    const task = this.store.getTask(string(input.taskId, '任务 ID'))
+    if (!task) fail('SCOPE_DENIED', '任务不存在或不属于当前王国。')
+    const territory = this.store.getTerritoryById(task.territory_id)
+    if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') fail('SCOPE_DENIED', '任务不属于当前王国。')
+    if (!this.deliveryScopeAllows(record, territory)) fail('SCOPE_DENIED', '该交付不在本次授权范围内。')
+    const itemId = string(input.itemId, '条目 ID')
+    // 版本真值必须逐 Task/条目精确重验，**不能**取自有界展示目录：展示目录会截断
+    // 较旧条目，若用它判断，真实仍是当前版的问题会被误标为无法重验。
+    const currentItem = readDeliveryItemVersion(this.store, kingdomId, task.task_id, itemId)
+    const thread = deliveryQuestionThreadForItem(readDeliveryQuestionThread(this.store, kingdomId, deliveryIdFor(task.task_id)),
+      itemId, currentItem ? currentItem.contentHash : null)
+    // 条目无法重验、也没有任何提问记录时仍是「未知条目」，不能被读成一条空线程。
+    if (!thread && !currentItem) fail('DELIVERY_ITEM_UNKNOWN', '该条目已无法从当前交付重验，也没有可读取的问答记录。')
+    if (!thread) fail('DELIVERY_QUESTION_UNKNOWN', '该条目当前版本还没有提问记录。')
+    const review = readLatestReviewEvent(this.store, kingdomId, task.task_id)
+    const reviewerBindingId = deliveryReviewerBindingId(review)
+    return {
+      deliveryId: thread.deliveryId,
+      taskId: task.task_id,
+      taskTitle: redactDeliveryText(task.title),
+      itemId: thread.itemId,
+      itemLabel: currentItem ? currentItem.label : thread.itemLabel,
+      contentHash: currentItem ? currentItem.contentHash : null,
+      questions: thread.questions.map(question => ({
+        questionId: question.questionId,
+        questionText: question.questionText,
+        askedAt: question.askedAt,
+        ownerId: question.ownerId,
+        reviewerBindingId: question.reviewerBindingId,
+        replyState: question.replyState,
+        replyStateNote: classifyReplyStateNote(question.replyState),
+        itemVersion: question.itemVersion,
+        currentItemContentHash: question.currentItemContentHash,
+        reply: question.reply ? { replyText: question.reply.replyText, repliedAt: question.reply.repliedAt,
+          responderBindingId: question.reply.responderBindingId } : null,
+      })),
+      answeredCount: thread.answeredCount,
+      pendingCount: thread.pendingCount,
+      historyCount: thread.historyCount,
+      unverifiableCount: thread.unverifiableCount,
+      note: reviewerBindingId ? DELIVERY_QUESTION_NOTE
+        : `${DELIVERY_QUESTION_NOTE} 另：该交付的接受事件没有记录主管绑定，无法确定接收者。`,
+    }
+  }
+
+  /**
+   * 已由主管在 ACCEPT 中显式选择、且本地 hash 重验通过的改动证据。
+   * 缺失、漂移或未确认时返回 null：调用方显示「不可定位」，不退回执行者自述。
+   */
+  private changeEvidenceFor(kingdomId: string, taskId: string): DeliveryChangeEvidenceInput | null {
+    const review = readLatestReviewEvent(this.store, kingdomId, taskId)
+    const ref = readAcceptedChangeEvidence(review)
+    return ref ? resolveChangeEvidenceForDelivery(undefined, ref) : null
+  }
+
+  private acceptedChangeRef(kingdomId: string, taskId: string): DeliveryChangeEvidenceRef | null {
+    return readAcceptedChangeEvidence(readLatestReviewEvent(this.store, kingdomId, taskId))
+  }
+
+  /**
+   * 只读返回一条已确认改动条目的有界详情。
+   *
+   * 有效性要求：窗口 ACTIVE、**本次授权动作包含 `delivery.item.ack`**、任务在本次
+   * 授权范围内、该 task 确实存在一条主管 ACCEPT 绑定的改动证据、evidence id 与
+   * entry id 精确匹配、该条目仍需出现在当前有效交付目录中，且本地 hash 重验通过。
+   * 任一不成立都失败，且不写任何事实、不产生知悉。
+   *
+   * 只检查 ACTIVE + Territory scope 是不够的：同一领地的另一个管理窗口若没有该
+   * 动作授权，就不能凭 id 读取差异正文。这里与 `catalog` 使用同一动作判据，
+   * 不默认放行（也不新增只读动作）。
+   */
+  readDeliveryChange(handle: OwnerDecisionHandle, input: { taskId: string; evidenceId: string; entryId: string }): OwnerDeliveryChangeView {
+    const record = this.active(handle)
+    const kingdomId = record.view.kingdomId
+    if (!kingdomId) fail('DELIVERY_NOT_CONFIRMED', '当前窗口没有可读取交付的王国。')
+    if (!record.view.actions.includes('delivery.item.ack')) {
+      fail('ACTION_NOT_AUTHORIZED', '本次管理窗口未授权交付条目知悉动作，不能读取改动证据正文。')
+    }
+    const task = this.store.getTask(string(input.taskId, '任务 ID'))
+    if (!task) fail('SCOPE_DENIED', '任务不存在或不属于当前王国。')
+    const territory = this.store.getTerritoryById(task.territory_id)
+    if (!territory || territory.kingdom_id !== kingdomId || territory.status === 'DELETED') fail('SCOPE_DENIED', '任务不属于当前王国。')
+    if (!this.deliveryScopeAllows(record, territory)) fail('SCOPE_DENIED', '该交付不在本次授权范围内。')
+    const ref = this.acceptedChangeRef(kingdomId, task.task_id)
+    const evidenceId = string(input.evidenceId, '证据 ID', 128)
+    const entryId = string(input.entryId, '改动条目 ID', 128)
+    if (!ref || ref.evidenceId !== evidenceId || !ref.entryIds.includes(entryId)) {
+      fail('CHANGE_EVIDENCE_UNVERIFIED', '该改动引用不是本 Task 已由主管确认的证据，拒绝读取。')
+    }
+    // 必须仍属于当前有效交付目录：历史 ACCEPT 引用、已漂移证据或已不存在的条目
+    // 都不能单独开放正文。
+    const currentItem = this.deliveryItems(record).find(item => item.taskId === task.task_id
+      && item.changeKind === 'REPO_RELATIVE_VERIFIED'
+      && deliveryChangeItemId(item.deliveryId, entryId) === item.itemId)
+    if (!currentItem) {
+      fail('CHANGE_EVIDENCE_UNVERIFIED', '该改动条目不在当前有效交付目录内，拒绝读取。')
+    }
+    const opened = readChangeEntry(undefined, ref, entryId)
+    if (!opened.ok) fail('CHANGE_EVIDENCE_UNVERIFIED', opened.reason)
+    const entry = opened.entry
+    return {
+      kind: 'SUPERVISOR_CONFIRMED_BOUNDED_WINDOW',
+      label: CHANGE_EVIDENCE_LABEL,
+      evidenceId: ref.evidenceId,
+      entryId: entry.entryId,
+      taskId: task.task_id,
+      taskTitle: redactDeliveryText(task.title),
+      attemptNo: ref.attemptNo,
+      status: entry.status,
+      repoPath: entry.repoPath,
+      revision: `evidence:${ref.evidenceId}`,
+      repoVcs: opened.manifest.repo.vcs,
+      repoHead: opened.manifest.repo.head,
+      coverageComplete: opened.manifest.coverage.complete,
+      coverageReasons: opened.manifest.coverage.reasons.slice(0, 16),
+      labels: entry.labels.slice(0, 16),
+      note: entry.note,
+      hunks: entry.hunks.slice(0, 200).map(hunk => ({ kind: hunk.kind, beforeLine: hunk.beforeLine, afterLine: hunk.afterLine, text: hunk.text })),
+    }
   }
 
   async prepare(handle: OwnerDecisionHandle, raw: OwnerOperationInput, options: { signal?: AbortSignal } = {}): Promise<OwnerOperationPreview> {
     const record = this.active(handle)
     if (record.preparations.size >= 128) fail('PREPARATION_LIMIT', '当前窗口准备次数已达上限，请重新激活。')
     const input = normalizeInput(raw)
-    const context = this.context(record, input)
+    // 操作编号必须在预览与提交之间保持同一个：提问事实的身份以一次 Owner operation
+    // 为界（同一编号重放幂等、不同编号即使文本相同也是两条独立事实），因此它先于
+    // 预览计算生成，并同时用于指纹上下文与最终预览。
+    const operationId = randomUUID()
+    const context = this.context(record, input, operationId)
     await this.validate(record, input, options.signal)
     this.active(handle)
-    const checked = this.context(record, input)
+    const checked = this.context(record, input, operationId)
     if (checked.fingerprint !== context.fingerprint) fail('PREVIEW_STALE', '校验期间相关事实已改变，请重新预览。')
     const createdAt = new Date(this.now()).toISOString()
-    const preview: OwnerOperationPreview = { prepareId: randomUUID(), operationId: randomUUID(), decisionId: record.view.decisionId,
+    const preview: OwnerOperationPreview = { prepareId: randomUUID(), operationId, decisionId: record.view.decisionId,
       action: input.action, summary: checked.summary, changes: this.changes(input, checked),
       affected: { territoryIds: checked.territoryIds, bindingIds: checked.bindingIds }, createdAt, expiresAt: record.view.expiresAt }
     record.preparations.set(preview.prepareId, { input: clone(input), inputHash: ownerInputHash(input), fingerprint: checked.fingerprint, preview })
@@ -485,7 +983,7 @@ export class OwnerDecisionController {
     if (!result || result.ok !== true) fail(result?.ok === false ? result.code : 'VALIDATION_UNAVAILABLE', result?.ok === false ? result.message : '运行环境未提供有效校验结果。')
   }
 
-  private context(record: DecisionRecord, input: OwnerOperationInput): OperationContext {
+  private context(record: DecisionRecord, input: OwnerOperationInput, operationId: string): OperationContext {
     this.assertActive(record)
     if (!record.view.actions.includes(input.action)) fail('SCOPE_DENIED', '该动作未获本次授权。')
     const kingdomId = record.view.kingdomId
@@ -527,6 +1025,104 @@ export class OwnerDecisionController {
       facts.push(related.map(t => t.territory_id).sort())
     }
     switch (input.action) {
+      case 'delivery.item.ack': {
+        const p = input.parameters
+        const task = this.store.getTask(p.task_id)
+        if (!task) fail('SCOPE_DENIED', '任务不存在或不属于当前王国。')
+        const taskTerritory = this.store.getTerritoryById(task.territory_id)
+        if (!taskTerritory || taskTerritory.kingdom_id !== kingdomId || taskTerritory.status === 'DELETED') {
+          fail('SCOPE_DENIED', '任务不属于当前王国。')
+        }
+        // 与 catalog 共用同一范围判据；知悉不改配置或责任，因此这里只登记领地事实，
+        // 不要求领地直接列在 territoryIds 中，也不参与 guardUnsettled。
+        if (!this.deliveryScopeAllows(record, taskTerritory)) fail('SCOPE_DENIED', '该交付不在本次授权范围内。')
+        territories.add(task.territory_id)
+        facts.push(taskTerritory)
+        const claim = this.store.latestWorkerResult(p.task_id)
+        const review = readLatestReviewEvent(this.store, kingdomId!, p.task_id)
+        const classification = classifyAcceptedDelivery(this.store, claim, review)
+        if (!claim || !classification) {
+          fail('DELIVERY_NOT_CONFIRMED', '该交付尚未由同一 Task/attempt 的主管 ACCEPT 确认，不能记录知悉。')
+        }
+        if (claim.attempt_no !== p.attempt_no || claim.result_id !== p.result_id) {
+          fail('DELIVERY_VERSION_STALE', '交付的已接受版本已变化，请重新打开清单。')
+        }
+        // 接受证据强度进入 fingerprint：确认依据从强证据降为历史弱证据（或反之）时，
+        // 预览必须失效，Owner 不能在不知情的情况下按旧预览提交。
+        facts.push(claim, review, classification.kind, classification.evidence)
+        const deliveryId = deliveryIdFor(p.task_id)
+        if (deliveryId !== p.delivery_id) fail('DELIVERY_VERSION_STALE', '交付标识与当前已接受版本不一致。')
+        const derived = deriveDeliveryItems(p.task_id, claim, this.changeEvidenceFor(kingdomId!, p.task_id))
+        const item = derived.find(candidate => candidate.itemId === p.item_id)
+        if (!item) fail('DELIVERY_ITEM_UNKNOWN', '该条目不在当前交付清单中。')
+        if (item.contentHash !== p.content_hash) {
+          fail('DELIVERY_ITEM_VERSION_STALE', '该条目内容版本已变化，请重新打开清单后再知悉。')
+        }
+        facts.push(item.contentHash)
+        const ownerId = this.store.getDefaultKingdom()?.owner_id ?? ''
+        const acknowledgements = readDeliveryAcknowledgements(this.store, kingdomId!, deliveryId)
+        const view = deliveryAcknowledgementView(acknowledgements, item, ownerId)
+        if (view.acknowledged) fail('DELIVERY_ITEM_ALREADY_ACKNOWLEDGED', '该条目当前版本已由 Owner 知悉；重复知悉不会新增记录。')
+        facts.push(acknowledgements)
+        before = view.acknowledgedAt
+        after = JSON.stringify({ deliveryId, itemId: item.itemId, contentHash: item.contentHash, attemptNo: claim.attempt_no,
+          acceptanceEvidenceKind: classification.kind, acceptanceEvidenceExact: classification.evidence.exactResultBound })
+        summary = `记下已知悉「${item.content.label}」当前版本（不代表理解、质量认可、Task 完成或发布授权）`
+        break
+      }
+      case 'delivery.item.question': {
+        const p = input.parameters
+        const task = this.store.getTask(p.task_id)
+        if (!task) fail('SCOPE_DENIED', '任务不存在或不属于当前王国。')
+        const taskTerritory = this.store.getTerritoryById(task.territory_id)
+        if (!taskTerritory || taskTerritory.kingdom_id !== kingdomId || taskTerritory.status === 'DELETED') {
+          fail('SCOPE_DENIED', '任务不属于当前王国。')
+        }
+        if (!this.deliveryScopeAllows(record, taskTerritory)) fail('SCOPE_DENIED', '该交付不在本次授权范围内。')
+        territories.add(task.territory_id)
+        facts.push(taskTerritory)
+        const claim = this.store.latestWorkerResult(p.task_id)
+        const review = readLatestReviewEvent(this.store, kingdomId!, p.task_id)
+        const classification = classifyAcceptedDelivery(this.store, claim, review)
+        if (!claim || !classification) {
+          fail('DELIVERY_NOT_CONFIRMED', '该交付尚未由同一 Task/attempt 的主管 ACCEPT 确认，不能提问。')
+        }
+        if (claim.attempt_no !== p.attempt_no || claim.result_id !== p.result_id) {
+          fail('DELIVERY_VERSION_STALE', '交付的已接受版本已变化，请重新打开清单。')
+        }
+        facts.push(claim, review, classification.kind, classification.evidence)
+        const deliveryId = deliveryIdFor(p.task_id)
+        if (deliveryId !== p.delivery_id) fail('DELIVERY_VERSION_STALE', '交付标识与当前已接受版本不一致。')
+        // 接收者在写入前就固定：接受事件没有可核对的主管绑定时直接拒绝，而不是先写问题再猜接收者。
+        const reviewerBindingId = deliveryReviewerBindingId(review)
+        if (!reviewerBindingId) {
+          fail('DELIVERY_ACCEPT_REVIEWER_UNKNOWN', '接受事件没有记录主管绑定，无法确定本问题的接收者。')
+        }
+        facts.push(reviewerBindingId)
+        const derived = deriveDeliveryItems(p.task_id, claim, this.changeEvidenceFor(kingdomId!, p.task_id))
+        const item = derived.find(candidate => candidate.itemId === p.item_id)
+        if (!item) fail('DELIVERY_ITEM_UNKNOWN', '该条目不在当前交付清单中。')
+        if (item.contentHash !== p.content_hash) {
+          fail('DELIVERY_ITEM_VERSION_STALE', '该条目内容版本已变化，请重新打开清单后再提问。')
+        }
+        facts.push(item.contentHash)
+        const questionText = boundedQuestionText(p.question_text, DELIVERY_QUESTION_TEXT_LIMIT)
+        if (!questionText) fail('INVALID_INPUT', '问题内容必须是非空、长度受限的文本。')
+        // 幂等只以**本次 Owner operation** 为界：同一 operationId 重放命中同一事件 ID，
+        // 才会被判为「不会新增第二条事实」；不同 operation 即使条目与文本都相同，也各自
+        // 形成独立问题。绝不按正文去重，否则新操作的提问会被历史同文问题吞掉。
+        const operationEventId = deliveryQuestionEventId({ kingdomId: kingdomId!, deliveryId, itemId: item.itemId,
+          contentHash: item.contentHash, operationId })
+        const duplicate = this.store.getEventById(operationEventId) !== null
+        const thread = deliveryQuestionThreadForItem(readDeliveryQuestionThread(this.store, kingdomId!, deliveryId),
+          item.itemId, item.contentHash)
+        facts.push(thread?.questions.map(question => [question.questionId, question.reply?.eventId ?? null]).sort() ?? null)
+        before = thread ? `${thread.questions.length} 条提问（${thread.pendingCount} 待回复 / ${thread.answeredCount} 已回复）` : null
+        after = JSON.stringify({ deliveryId, itemId: item.itemId, contentHash: item.contentHash, attemptNo: claim.attempt_no,
+          reviewerBindingId, questionText, duplicate })
+        summary = `就「${item.content.label}」当前版本向接受该交付的主管提一个具体问题（记录为一条对话事实，不是知悉，也不改变任务状态）`
+        break
+      }
       case 'plan.adopt': {
         const p = input.parameters, plan = readCollaborationPlan(this.store, kingdomId!, p.plan_id)
         if (!plan || plan.version !== p.version || plan.digest !== p.digest || plan.state !== 'PROPOSED') fail('PLAN_VERSION_STALE', '计划已变化、已采纳或不可采纳，请重新打开计划。')
@@ -614,7 +1210,9 @@ export class OwnerDecisionController {
     }
     const context: OperationContext = { territoryIds: [...territories].sort(), bindingIds: [...bindings].sort(), sessionIds: [...sessions].sort(),
       fingerprint: ownerInputHash(facts), before, after, summary }
-    if (kingdomId && input.action !== 'territory.update' && input.action !== 'territory.create' && input.action !== 'budget.policy' && input.action !== 'plan.adopt') this.guardUnsettled(kingdomId, input.action === 'ceiling', context)
+    // `delivery.item.ack` 只追加 Owner 知悉事实，不改配置与责任，因此不受
+    // 同领地不相关未结算执行/Lease/Dispatch 阻断。
+    if (kingdomId && input.action !== 'territory.update' && input.action !== 'territory.create' && input.action !== 'budget.policy' && input.action !== 'plan.adopt' && input.action !== 'delivery.item.ack' && input.action !== 'delivery.item.question') this.guardUnsettled(kingdomId, input.action === 'ceiling', context)
     return context
   }
 
@@ -694,19 +1292,63 @@ export class OwnerDecisionController {
         const after = input.parameters.profile
         return [change('请求的 Provider', before?.provider, after?.provider), change('请求的模型', before?.model, after?.model)]
       }
+      case 'delivery.item.ack': {
+        const after = JSON.parse(context.after!) as { deliveryId: string; itemId: string; contentHash: string; attemptNo: number
+          acceptanceEvidenceKind: DeliveryAcceptanceEvidenceKind; acceptanceEvidenceExact: boolean }
+        const task = this.store.getTask(input.parameters.task_id)
+        const item = deriveDeliveryItems(input.parameters.task_id, this.store.latestWorkerResult(input.parameters.task_id)!,
+          this.changeEvidenceFor(this.store.getDefaultKingdom()?.kingdom_id ?? '', input.parameters.task_id))
+          .find(candidate => candidate.itemId === after.itemId)
+        return [change('任务', null, task?.title),
+          change('已接受尝试', null, String(after.attemptNo)),
+          change('条目', null, item ? `${item.content.label}` : after.itemId),
+          change('条目内容', null, item?.content.detail),
+          change('内容版本', null, after.contentHash),
+          change('改动定位', null, item ? `${item.content.change.kind}${item.content.change.evidenceLabel ? ` · ${item.content.change.evidenceLabel}` : ''} · ${item.content.change.note}` : null),
+          change('接受证据强度', null, after.acceptanceEvidenceExact
+            ? 'EXACT_RESULT_BOUND：TASK_ACCEPTED 锁定了本次结果 ID 与内容摘要，且两者都与当前呈报一致。'
+            : '历史接受证据较弱（LEGACY_ATTEMPT_ONLY）：该 Task/attempt 的 TASK_ACCEPTED 是 v1.0.0 旧格式，只有尝试编号，缺少被审查结果 ID 与内容摘要；本条按真实事件字段与同 Task/attempt 的唯一 WorkerResult 判定，不是 exact result-bound 证据。知悉仍只表示已知悉该条当前版本，不代表理解、质量认可、人类验收、Task DONE 或发布授权。'),
+          change('Owner 知悉时间（本窗口提交后）', null, '提交时记录'),
+          change('不改动的状态', null, '任务状态、主管审查、正式 Owner acceptance 与发布状态均不变')]
+      }
+      case 'delivery.item.question': {
+        const after = JSON.parse(context.after!) as { deliveryId: string; itemId: string; contentHash: string; attemptNo: number
+          reviewerBindingId: string; questionText: string; duplicate: boolean }
+        const task = this.store.getTask(input.parameters.task_id)
+        const item = deriveDeliveryItems(input.parameters.task_id, this.store.latestWorkerResult(input.parameters.task_id)!,
+          this.changeEvidenceFor(this.store.getDefaultKingdom()?.kingdom_id ?? '', input.parameters.task_id))
+          .find(candidate => candidate.itemId === after.itemId)
+        const reviewer = this.store.getBindingById(after.reviewerBindingId)
+        const territory = this.store.getTerritoryById(task?.territory_id ?? '')
+        return [change('任务', null, task?.title),
+          change('已接受尝试', null, String(after.attemptNo)),
+          change('条目', null, item ? item.content.label : after.itemId),
+          change('条目内容', null, item?.content.detail),
+          change('内容版本', null, after.contentHash),
+          change('接收者（接受该交付的主管）', null, reviewer ? `${reviewer.role_name}（${reviewer.binding_id}）` : after.reviewerBindingId),
+          change('该领地当前主理主管', null, territory?.supervisor_binding_id ?? '未指派'),
+          change('本次提交', null, after.duplicate
+            ? '该条目当前版本的同一问题已有记录：不会新增第二条事实，也不会改变任何状态。'
+            : '新增一条 Owner 提问事实；接收者仍是接受该交付的主管，当前未被读取前只显示「待领取」。'),
+          change('问题的准确保留范围', null, after.duplicate
+            ? '与既有记录一致，不重复写入。'
+            : '只写入提问事实本身；不自动通知、不自动派发、不自动唤醒任何 Agent。'),
+          change('不改动的状态', null, '任务状态、主管审查、知悉、正式 Owner acceptance 与发布状态均不变；提问不是知悉。'),
+          change('回复', null, '由接受该交付的主管在其 session-bound Agent Tool 中回复；Owner 不代答，其他主管不能代答。')]
+      }
     }
   }
 
   private async apply(handle: OwnerDecisionHandle, record: DecisionRecord, preparation: Preparation, signal?: AbortSignal): Promise<OwnerOperationReceipt> {
     this.active(handle)
-    const context = this.context(record, preparation.input)
+    const context = this.context(record, preparation.input, preparation.preview.operationId)
     if (context.fingerprint !== preparation.fingerprint) fail('PREVIEW_STALE', '相关对象已变化，请重新预览。')
     await this.validate(record, preparation.input, signal)
     this.active(handle)
     if (signal?.aborted) fail('REQUEST_ABORTED', '请求已取消。')
     const result = this.store.withImmediateTransaction(() => {
       this.active(handle)
-      const current = this.context(record, preparation.input)
+      const current = this.context(record, preparation.input, preparation.preview.operationId)
       if (current.fingerprint !== preparation.fingerprint || ownerInputHash(preparation.input) !== preparation.inputHash) fail('PREVIEW_STALE', '相关事实或准备内容已变化，请重新预览。')
       const source: OwnerEventSource = { source_channel: 'LOCAL_OWNER_GUI', authorization_source: 'LOCAL_DIRECT_SLASH',
         decision_id: record.view.decisionId, operation_id: preparation.preview.operationId }
@@ -747,6 +1389,8 @@ export class OwnerDecisionController {
       finally { revokeOwnerOperationCapability(capability) }
     }
     let message: string, eventType: string
+    /** 本次是否真的追加了一条新业务事实；幂等重试时没有新事件，不能按「事件数恰好 1」判定失败。 */
+    let appendedBusinessFact = true
     switch (input.action) {
       case 'plan.adopt':
         message = run({ kingdomId, ...input.parameters }, adoptCollaborationPlan)
@@ -787,11 +1431,97 @@ export class OwnerDecisionController {
         run({ kingdomId, bindingId: input.parameters.binding_id, profile: input.parameters.profile }, setExecutionProfile)
         message = '请求的执行配置已保存；这不代表模型已实际运行成功。'
         eventType = 'EXECUTION_PROFILE_UPDATED'; break
+      case 'delivery.item.ack': {
+        const claim = this.store.latestWorkerResult(input.parameters.task_id)
+        if (!claim) fail('DELIVERY_NOT_CONFIRMED', '交付对应的结果不存在。')
+        const review = readLatestReviewEvent(this.store, kingdomId, input.parameters.task_id)
+        const existing = readDeliveryAcknowledgements(this.store, kingdomId, input.parameters.delivery_id)
+        const already = existing.some(ack => ack.itemId === input.parameters.item_id && ack.contentHash === input.parameters.content_hash
+          && ack.ownerId === record.view.ownerId)
+        if (!already) {
+          const classification = classifyAcceptedDelivery(this.store, claim, review)
+          if (!classification) fail('DELIVERY_NOT_CONFIRMED', '交付尚未由主管 ACCEPT 确认。')
+          const changeEvidence = this.changeEvidenceFor(kingdomId, input.parameters.task_id)
+          const item = deriveDeliveryItems(input.parameters.task_id, claim, changeEvidence).find(candidate => candidate.itemId === input.parameters.item_id)
+          if (!item || item.contentHash !== input.parameters.content_hash) fail('DELIVERY_ITEM_VERSION_STALE', '条目内容版本已变化。')
+          recordDeliveryAcknowledgement(this.store, {
+            kingdomId,
+            deliveryId: input.parameters.delivery_id,
+            itemId: input.parameters.item_id,
+            contentHash: input.parameters.content_hash,
+            taskId: input.parameters.task_id,
+            attemptNo: input.parameters.attempt_no,
+            resultId: input.parameters.result_id,
+            ownerId: record.view.ownerId!,
+            ownerBindingId: this.store.getBindingByRole(kingdomId, 'OWNER')?.binding_id ?? null,
+            itemLabel: item.content.label,
+            acknowledgedAt: new Date(this.now()).toISOString(),
+            attribution: { ...source },
+            changeEvidence,
+          })
+        }
+        message = already
+          ? '该条目当前版本的 Owner 知悉记录已存在；未新增第二条事实。知悉不改变任务、审查与发布状态。'
+          : '已记下 Owner 已知悉该条当前版本；这不代表理解、质量认可、Task DONE、正式验收或发布授权，也未改变任务、审查与发布状态。'
+        eventType = DELIVERY_ACK_EVENT_TYPE; break
+      }
+      case 'delivery.item.question': {
+        const claim = this.store.latestWorkerResult(input.parameters.task_id)
+        if (!claim) fail('DELIVERY_NOT_CONFIRMED', '交付对应的结果不存在。')
+        const review = readLatestReviewEvent(this.store, kingdomId, input.parameters.task_id)
+        // 责任归属必须在事务内重算：预览时的接受主管身份、条目版本或领地改绑都可能已变化。
+        const reviewerBindingId = deliveryReviewerBindingId(review)
+        if (!reviewerBindingId) fail('DELIVERY_ACCEPT_REVIEWER_UNKNOWN', '接受事件没有记录主管绑定，无法确定本问题的接收者。')
+        // CHANGE 条目只由「主管在 ACCEPT 中显式选择、且本地 hash 重验通过」的改动证据派生：
+        // 预览、事务内校验与写入端必须复用**同一份**已重验证据，写入端才可能重算出同一
+        // itemId/contentHash，而不是必报 DELIVERY_ITEM_UNKNOWN。
+        const changeEvidence = this.changeEvidenceFor(kingdomId, input.parameters.task_id)
+        const item = deriveDeliveryItems(input.parameters.task_id, claim, changeEvidence)
+          .find(candidate => candidate.itemId === input.parameters.item_id)
+        if (!item || item.contentHash !== input.parameters.content_hash) fail('DELIVERY_ITEM_VERSION_STALE', '条目内容版本已变化。')
+        const questionText = boundedQuestionText(input.parameters.question_text, DELIVERY_QUESTION_TEXT_LIMIT)
+        if (!questionText) fail('INVALID_INPUT', '问题内容必须是非空、长度受限的文本。')
+        const operationId = source.operation_id
+        if (!operationId) fail('OPERATION_MISMATCH', '本次管理操作没有操作编号，拒绝写入提问事实。')
+        // 提问身份属于产生它的这次 Owner operation：同一编号重放由写入端的幂等分支核对
+        // 并原样返回既有事实；不同编号即使文本相同也各自形成独立问题。这里不再按正文去重，
+        // 「没有新事件」也不等于操作失败。
+        const recorded = recordDeliveryQuestion(this.store, {
+          kingdomId,
+          deliveryId: input.parameters.delivery_id,
+          taskId: input.parameters.task_id,
+          itemId: input.parameters.item_id,
+          itemLabel: item.content.label,
+          contentHash: input.parameters.content_hash,
+          attemptNo: input.parameters.attempt_no,
+          resultId: input.parameters.result_id,
+          ownerId: record.view.ownerId!,
+          ownerBindingId: this.store.getBindingByRole(kingdomId, 'OWNER')?.binding_id ?? null,
+          operationId,
+          questionText,
+          askedAt: new Date(this.now()).toISOString(),
+          changeEvidence,
+          attribution: { ...source },
+        })
+        appendedBusinessFact = recorded.created
+        message = recorded.created
+          ? `已记录 Owner 就该条目当前版本提出的问题，接收者为接受该交付的主管。当前只显示「待领取」：在主管实际读取前不声称已通知或已阅读；这不代表知悉、验收或任务完成，也不改变任务、审查与发布状态。`
+          : '同一 Owner 操作重放：既有提问记录与本次引用一致，未新增第二条事实，也未改变任何状态。'
+        eventType = DELIVERY_QUESTION_EVENT_TYPE; break
+      }
     }
     const events = this.store.listEventsSince(kingdomId, beforeSeq, 20)
     const business = events.filter(event => event.event_type === eventType && event.actor_role === 'OWNER' && event.actor_id === record.view.ownerId
       && JSON.parse(event.payload_json).operation_id === source.operation_id)
-    if (business.length !== 1 || !business[0].target_id || !['kingdom', 'territory', 'binding', 'collaboration-plan'].includes(business[0].target_type ?? '')) {
+    // 幂等提问没有新增事件：此时只核对既有事实仍指向同一条交付，不要求事件数为 1。
+    if (!appendedBusinessFact && input.action === 'delivery.item.question') {
+      const existing = readDeliveryQuestionThread(this.store, kingdomId, input.parameters.delivery_id)
+      const matches = existing?.questions.some(question => question.itemId === input.parameters.item_id
+        && question.contentHash === input.parameters.content_hash) ?? false
+      if (!matches) fail('MUTATION_NOT_APPLIED', '既有提问事实与本次引用不一致，事务已回滚。')
+      return { target: { type: 'delivery', id: input.parameters.delivery_id }, message }
+    }
+    if (business.length !== 1 || !business[0].target_id || !['kingdom', 'territory', 'binding', 'collaboration-plan', 'delivery'].includes(business[0].target_type ?? '')) {
       fail('MUTATION_NOT_APPLIED', 'Core 未产生准确业务事实，事务已回滚。')
     }
     return { target: { type: business[0].target_type as OwnerOperationReceipt['target']['type'], id: business[0].target_id }, message }

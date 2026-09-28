@@ -39,10 +39,22 @@ nodes:
   E1:
     kind: entry
     description: Human activates bounded Owner GUI through canonical direct command
-    trigger: /kingdom owner.gui strict JSON
+    trigger: /kingdom owner.gui strict JSON with optional non-authorizing taskHint/itemHint/contentHashHint and hintAction ack|ask
     code:
       - path: src/index.ts
         symbol: owner.gui
+      - path: src/gui/owner-control.ts
+        symbol: validateLaunchAckHint
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerLaunchCommand
+    failure_behavior: An incomplete, malformed or duplicated hint, or an invalid hintAction, is rejected before activation with no window, no decision fact and no ticket URL
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: the workbench copy icon produces the exact minimal direct owner.gui command and really copies it on click
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: owner.gui hint fields are validated as a whole, rejected before activation, and never widen authorization
+      - path: tests/v13-owner-direct-ingress.test.ts
+        symbol: canonical command reaches independent Owner HTTP and atomic bootstrap without a role session
   D1:
     kind: decision
     description: Validate direct capability and exact decision scope
@@ -72,6 +84,9 @@ nodes:
     code:
       - path: src/gui/owner-control.ts
         symbol: OwnerLocalControlManager
+      - path: src/gui/owner-control.ts
+        symbol: launchRedirectPath
+    failure_behavior: A replayed or expired ticket redeems nothing; the redirect never carries the ticket and preserves the hint action (ack_* or ask_*)
   E2:
     kind: entry
     description: Prepare a structured management action including typed kingdom soft-budget form values
@@ -355,3 +370,303 @@ nodes:
     kind: outcome
     description: Original operation remains unconfirmed
     result: Preserve original references and do not resend or claim no side effect
+  E6:
+    kind: entry
+    description: Workbench acknowledgement icon opens the Owner window with an exact task/item/contentHash reference
+    trigger: GET /owner?ack_task=…&ack_item=…&ack_hash=…
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerAckHref
+      - path: src/gui/owner-ui.ts
+        symbol: ackTargetFromLocation
+    failure_behavior: Malformed, duplicated or incomplete parameters produce no target
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench acknowledgement hands the exact task/item/contentHash to the Owner window without writing
+  D8:
+    kind: decision
+    description: Preselect only an exact three-way match inside the active, in-scope catalog
+    condition: OwnerDecision is ACTIVE, delivery.item.ack is in scope, and one catalog entry matches all of taskId, itemId and contentHash; the catalog is ordered by the delivery's most recent update or acceptance, so a late-accepted older delivery stays inside the bounded catalog exactly where the workbench shows it
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ackTargetFromLocation
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+      - path: src/gui/owner-ui.ts
+        symbol: load
+      - path: src/core/owner-window.ts
+        symbol: deliveryItems
+    failure_behavior: Keep no alternative selection, explain the mismatch, and issue no mutation request
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window preselects only an exact task/item/contentHash triple and never writes by itself
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window refuses an out-of-scope acknowledgement target instead of widening authority
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: a delivery created before the cap but accepted later stays acknowledgeable and its change stays readable
+  A5:
+    kind: action
+    description: Show the preselected item content and version, and still require prepare, preview, commit and receipt
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+      - path: src/gui/owner-ui.ts
+        symbol: payload
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window acknowledgement is scoped, idempotent and never touches task or review state
+  X7:
+    kind: outcome
+    description: Target not locatable in the current window
+    result: No fallback selection, no request and no fact; the Owner must re-read or reactivate the correct scope
+  G5:
+    kind: safeguard
+    description: Preselection grants no authority and never auto-commits
+    safeguard_type: authorization
+    guarantee: The URL only preselects a catalog entry; prepare and commit still require the exact Owner window and CSRF
+    protects: [D8, A5]
+    failure_behavior: Zero mutation requests on mismatch; no sessionStorage or ticket alias chain is introduced
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+      - path: src/gui/owner-control.ts
+        symbol: handleOwnerRequest
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window refuses an out-of-scope acknowledgement target instead of widening authority
+  E7:
+    kind: entry
+    description: Workbench change icon opens the Owner page with an exact task/evidence/entry triple
+    trigger: Explicit change icon activation on a supervisor-confirmed change item
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerChangeHref
+      - path: src/gui/owner-ui.ts
+        symbol: changeTargetFromLocation
+  D9:
+    kind: decision
+    description: An active Owner window authorized for delivery.item.ack, covered scope and a re-verified supervisor-confirmed evidence are all present
+    condition: Window ACTIVE with delivery.item.ack in its action set, deliveryScopeAllows the task territory, the ACCEPT payload binds this evidence, the manifest hash re-verifies and the entry is still in the effective catalog
+    code:
+      - path: src/core/owner-window.ts
+        symbol: readDeliveryChange
+      - path: src/core/delivery-change.ts
+        symbol: verifyChangeManifest
+    failure_behavior: Explicit rejection with no diff body, no event write and no acknowledgement
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner read path refuses unstarted windows, out-of-scope deliveries, unrecognized entries and path traversal
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an Owner window without delivery.item.ack cannot read change bodies even inside the same territory scope
+  X9:
+    kind: outcome
+    description: Change detail is unavailable or out of scope
+    result: No body returned; the page explains why and never substitutes another item
+  A6:
+    kind: action
+    description: Return the bounded read-only change detail over the same-origin read route
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: readChange
+      - path: src/gui/owner-ui.ts
+        symbol: renderChange
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner page renders a strict read-only change view and the real HTTP read route enforces window, scope and exact ids
+  G6:
+    kind: safeguard
+    description: Reading a change never writes a fact and never claims authorship
+    safeguard_type: audit
+    guarantee: The read route accepts only the three exact ids, requires a window authorized for delivery.item.ack, returns bounded re-verified text and leaves the ledger untouched
+    protects: [D9, A6]
+    failure_behavior: 400 on malformed parameters, 401 without a window, refusal without the acknowledgement action, on drift or when the entry left the effective delivery catalog; zero facts and no acknowledgement
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: handleOwnerRequest
+      - path: src/core/owner-window.ts
+        symbol: readDeliveryChange
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner page renders a strict read-only change view and the real HTTP read route enforces window, scope and exact ids
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an Owner window without delivery.item.ack cannot read change bodies even inside the same territory scope
+  E8:
+    kind: entry
+    description: Workbench question icon opens the Owner page with an exact task/item/contentHash triple
+    trigger: GET /owner?ask_task=…&ask_item=…&ask_hash=…
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerAskHref
+      - path: src/gui/owner-ui.ts
+        symbol: askTargetFromLocation
+    failure_behavior: Malformed, duplicated or incomplete parameters produce no target and disable preparation
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window exposes the separate question action, preselects only the exact item and reports an illegal hint
+  D10:
+    kind: decision
+    description: The window is active, authorized for delivery.item.question, exactly matching one catalog item and the delivery is still confirmed by the accepting supervisor
+    condition: OwnerDecision ACTIVE with delivery.item.question in its action set (the same in-scope confirmed-delivery catalog is returned whenever either delivery.item.ack or delivery.item.question is authorized), deliveryScopeAllows the task territory, one catalog entry matches taskId/itemId/contentHash, the same Task/attempt supervisor ACCEPT still classifies, and the TASK_ACCEPTED actor_id and payload reviewer_binding_id are both non-empty and equal
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+      - path: src/core/owner-window.ts
+        symbol: catalog
+      - path: src/core/owner-window.ts
+        symbol: deliveryItems
+      - path: src/core/owner-window.ts
+        symbol: context
+      - path: src/core/delivery-ack.ts
+        symbol: deliveryReviewerBindingId
+    failure_behavior: No preselection, no substitution and zero question facts; the refusal names the failed condition
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the question action is authorized separately from acknowledgement and refuses stale or forged references with zero writes
+      - path: tests/delivery-question-loop.test.ts
+        symbol: a question is refused for an unconfirmed delivery and for a window without the action
+      - path: tests/delivery-question-loop.test.ts
+        symbol: a receiver is only directed when both the event actor and payload reviewer field are non-empty and equal
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: a question-only window receives the real same-scope delivery catalogue and the page submits only that exact triple
+  A7:
+    kind: action
+    description: Preselect the exact item, require the Owner to write the question text, and preview the exact effect
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+      - path: src/gui/owner-ui.ts
+        symbol: payload
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window exposes the separate question action, preselects only the exact item and reports an illegal hint
+  T8:
+    kind: transition
+    description: Append one bounded Owner question fact in the canonical Owner transaction; question identity is the Owner operation, so a new operation with identical text is a new independent fact
+    entity: OwnerDeliveryItemQuestion
+    from: Absent
+    to: QUESTIONED
+    trigger: Owner commits the prepared delivery.item.question operation
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/delivery-ack.ts
+        symbol: recordDeliveryQuestion
+      - path: src/core/delivery-ack.ts
+        symbol: deliveryQuestionEventId
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the canonical Owner window records exactly one bounded question fact and is idempotent on retry
+      - path: tests/delivery-question-loop.test.ts
+        symbol: question text is redacted before it becomes a fact
+  X10:
+    kind: outcome
+    description: Question not submittable
+    result: No question fact; the page explains the mismatch, keeps no alternative selection and claims no notification
+  E9:
+    kind: entry
+    description: Owner reads back the questions and replies of one exact item
+    trigger: GET /api/owner/delivery-questions?task=…&item=…
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: renderQuestions
+    failure_behavior: 400 on malformed parameters, 401 without a window, refusal without the question action or outside scope
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: a real HTTP ticket redemption 303s to the exact ack query and a fresh empty-sessionStorage page preselects it with zero writes
+  D11:
+    kind: decision
+    description: Only an active window authorized for delivery.item.question with covered scope may read question or reply bodies; each question is labelled verified-current, historical or unverifiable
+    condition: Window ACTIVE, delivery.item.question in scope, deliveryScopeAllows the task territory, and the exact itemId has recorded questions for this delivery; the version relation is re-derived per exact task/item with no display-catalogue limit, so an item still current beyond the bounded catalogue stays CURRENT, a revised item is HISTORICAL, and an item the current ACCEPT/evidence can no longer re-derive (for example lost CHANGE evidence) is returned as UNVERIFIABLE and is never presented as current or replyable
+    code:
+      - path: src/core/owner-window.ts
+        symbol: readDeliveryQuestions
+      - path: src/core/delivery-ack.ts
+        symbol: readDeliveryItemVersion
+      - path: src/core/delivery-ack.ts
+        symbol: classifyDeliveryItemVersion
+    failure_behavior: Explicit rejection with no body, no event write, no acknowledgement and no reply on behalf of the supervisor
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the read-only question thread requires an active window, the action and an exact current item
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the question action never grants acknowledgement and the acknowledgement action never grants questions
+      - path: tests/delivery-question-loop.test.ts
+        symbol: a second item in the same delivery keeps its own question thread and is not hidden by the first item
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: a supervisor-confirmed CHANGE entry is questionable and answerable, and evidence drift fails closed
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: an exact question read re-verifies its item beyond the bounded display catalogue instead of calling it unverifiable
+  A8:
+    kind: action
+    description: Return the question and reply bodies read-only with each question's current/historical/unverifiable version relation and the accepting supervisor's current reachability
+    code:
+      - path: src/gui/owner-control.ts
+        symbol: readQuestions
+      - path: src/gui/owner-ui.ts
+        symbol: renderQuestions
+      - path: src/core/delivery-ack.ts
+        symbol: classifyDeliveryReplyAccess
+      - path: src/core/delivery-ack.ts
+        symbol: classifyDeliveryItemVersion
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: snapshots, task detail, recent events and event polling never expose the question or reply body
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: the question panel labels every card and a slow older read never overwrites a faster re-selection
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: the question panel labels real current and historical cards from Core without promising a reachability it never shows
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: the question panel keeps keyboard focus on the newer pager button or the last revealed record
+  A9:
+    kind: action
+    description: List the in-scope items that already have question records, including items that left the current delivery catalogue, as a read-only Owner entry point
+    code:
+      - path: src/core/owner-window.ts
+        symbol: deliveryQuestionHistory
+      - path: src/core/delivery-ack.ts
+        symbol: listDeliveryQuestionHistory
+      - path: src/gui/owner-ui.ts
+        symbol: renderQuestionHistory
+      - path: src/gui/owner-ui.ts
+        symbol: renderQuestions
+    failure_behavior: The list is scope- and delivery.item.question-gated and carries no question or reply bodies; its entries can never become a new question target (prepare still re-derives the exact task/item), and opening one only issues the existing read-only GET without any write; a fresh failed read writes the failure into the thread panel and moves focus and the viewport to that very message, while a stale earlier failure never overwrites the newer thread or steals focus
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: an old question whose item left the current catalogue stays discoverable, read-only and is not a new question target
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: a history click hands focus and the viewport to the fresh real thread, and a stale earlier read never steals them
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: a fresh history read failure lands in the current viewport, and a stale earlier failure never covers or refocuses the newer thread
+  X11:
+    kind: outcome
+    description: Question read refused
+    result: No body returned; the page explains the mismatch and neither writes nor acknowledges anything
+  G8:
+    kind: safeguard
+    description: Questions and replies are isolated conversation facts with a fixed recipient
+    safeguard_type: integrity
+    guarantee: A question writes only its own fact, is addressed to the accepting supervisor binding frozen at write time (actor_id and reviewer_binding_id must both be non-empty and equal), is answered at most once with a reply event id determined only by the question id inside BEGIN IMMEDIATE, and never writes acknowledgement, Task/Claim, ACCEPT, Owner acceptance or release facts
+    protects: [T8, A8]
+    failure_behavior: Retired, re-sessioned or re-bound recipients are reported as unreachable with no automatic handoff; wrong supervisors, cross-territory callers, forged ids and conflicting replies write nothing; a failed BEGIN writes no reply, and a CHANGE-entry reply whose accepted evidence no longer re-derives the exact itemId/contentHash is refused
+    code:
+      - path: src/core/delivery-ack.ts
+        symbol: recordDeliveryQuestion
+      - path: src/core/delivery-ack.ts
+        symbol: replyToDeliveryQuestion
+      - path: src/core/delivery-ack.ts
+        symbol: recordDeliveryReply
+      - path: src/core/delivery-ack.ts
+        symbol: classifyDeliveryReplyAccess
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the bound supervisor reads only its own questions from the authoritative ledger and replies exactly once
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the supervisor entry is session-bound by default: declarative, wrong session, other binding and forged ids all write nothing
+      - path: tests/delivery-question-loop.test.ts
+        symbol: a retired, re-sessioned or re-bound reviewer keeps the question visible but unreachable, and never hands it to a successor
+      - path: tests/delivery-question-loop.test.ts
+        symbol: two live connections on one database cannot write two different replies, and a failed BEGIN writes nothing
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: a supervisor-confirmed CHANGE entry is questionable and answerable, and evidence drift fails closed
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the session inbox enumerates every ACTIVE supervisor binding instead of silently dropping the later one

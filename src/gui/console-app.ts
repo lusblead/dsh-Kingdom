@@ -2420,7 +2420,13 @@ export function renderConsoleApp(options: ConsoleCommandOptions = {}): string {
     .replace('__CONSOLE_DESIGN_CSS__', designCss)
     .replace('__WORKBENCH_CSS__', WORKBENCH_CSS)
     .replace('__WORKBENCH_HTML__', WORKBENCH_HTML)
-    .replace('__WORKBENCH_SCRIPT__', WORKBENCH_SCRIPT)
+    // Workbench icon tokens are compiled static SVG assets; no business value enters them.
+    .replace('__WORKBENCH_SCRIPT__', WORKBENCH_SCRIPT
+      .replaceAll('__DELIVERY_ICON_CHANGE__', GUI_ICONS.change)
+      .replaceAll('__DELIVERY_ICON_UNLOCATED__', GUI_ICONS.unlocated)
+      .replaceAll('__DELIVERY_ICON_ACK__', GUI_ICONS.acknowledge)
+      .replaceAll('__DELIVERY_ICON_COPY__', GUI_ICONS.copy)
+      .replaceAll('__DELIVERY_ICON_ASK__', GUI_ICONS.ask))
     .replace('__KINGDOM_BRAND__', KINGDOM_BRAND_SVG)
     .replaceAll('__ICON_MAP__', GUI_ICONS.map)
     .replaceAll('__ICON_MANAGEMENT__', GUI_ICONS.management)

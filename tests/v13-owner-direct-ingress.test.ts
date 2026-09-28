@@ -43,14 +43,27 @@ test('canonical command reaches independent Owner HTTP and atomic bootstrap with
   const bootstrap = { kingdomId: null, actions: ['init'], scope, ttlMs: 600_000 }
   const malformed = await slash.handler({ rawInput: 'owner.gui {"actions":["init"],"principal":"self"}' })
   assert.equal(malformed.kind, 'error'); assert.equal(launchUrl, '')
+  // 非授权 hint 只接受字符串，且重复字段在严格 JSON 层就被拒绝；两种失败都不激活任何窗口。
+  const badHintType = await slash.handler({ rawInput: 'owner.gui {"kingdomId":null,"actions":["init"],"scope":' + JSON.stringify(scope) + ',"ttlMs":600000,"taskHint":7}' })
+  assert.equal(badHintType.kind, 'error'); assert.equal(badHintType.text.includes('taskHint'), true); assert.equal(launchUrl, '')
+  const duplicateHint = await slash.handler({ rawInput: 'owner.gui {"kingdomId":null,"actions":["init"],"scope":' + JSON.stringify(scope) + ',"ttlMs":600000,"taskHint":"a","taskHint":"b"}' })
+  assert.equal(duplicateHint.kind, 'error'); assert.equal(duplicateHint.text.includes('重复字段'), true); assert.equal(launchUrl, '')
+  const unknownHint = await slash.handler({ rawInput: 'owner.gui {"kingdomId":null,"actions":["init"],"scope":' + JSON.stringify(scope) + ',"ttlMs":600000,"unknownHint":"a"}' })
+  assert.equal(unknownHint.kind, 'error'); assert.equal(unknownHint.text.includes('不允许的字段'), true, unknownHint.text)
+  assert.equal(launchUrl, '')
   const started = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify(bootstrap) })
   assert.equal(started.kind, 'success', started.text)
   assert.ok(!started.text.includes('ticket=')); assert.ok(!started.text.includes(new URL(launchUrl).searchParams.get('ticket')))
   const origin = new URL(launchUrl).origin
   let cookie = ''; let csrf = ''
-  const redeem = async () => {
+  // 兑换 launchUrl 指向的票据；成功时返回 303 后浏览器地址栏里的 Location。
+  // 不携带定位提示时必须精确落在 /owner：不附加任何 ack_*、ticket 或兜底参数。
+  const redeem = async (expectedLocation = '/owner') => {
     const response = await fetch(launchUrl, { redirect: 'manual' })
-    assert.equal(response.status, 303); assert.equal(response.headers.get('location'), '/owner')
+    assert.equal(response.status, 303)
+    const location = response.headers.get('location') || ''
+    assert.equal(location, expectedLocation, 'the redirect lands on the exact Owner URL for this launch')
+    assert.equal(location.includes('ticket'), false, 'the redirect never carries the one-time ticket')
     cookie = (response.headers.get('set-cookie') || '').split(';', 1)[0]
     assert.ok(cookie.startsWith('dsh_kingdom_owner='))
     const replay = await fetch(launchUrl, { redirect: 'manual' }); assert.notEqual(replay.status, 303)
@@ -58,7 +71,7 @@ test('canonical command reaches independent Owner HTTP and atomic bootstrap with
     assert.equal(control.status, 200)
     const view = await control.json() as any; csrf = view.csrfToken
     assert.equal(view.decision.state, 'ACTIVE'); assert.equal(typeof csrf, 'string')
-    return view
+    return { view, location }
   }
   await redeem()
   const request = async (path: string, payload: unknown, headers: Record<string, string> = {}) => {
@@ -103,4 +116,34 @@ test('canonical command reaches independent Owner HTTP and atomic bootstrap with
   const afterRevoke = await request('prepare', { action: 'territory.create', parameters: { name: 'Denied', workspace_path: testRoot } })
   assert.notEqual(afterRevoke.status, 200)
   assert.equal(store.listTerritories(kingdom.kingdom_id).length, 1); assert.equal(modelLookups, 0)
+
+  // 定位提示必须三字段完整：只带一个 hint 的命令在激活前被拒绝，不产生任何窗口或票据 URL。
+  const startUrl = launchUrl
+  const partialHint = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify({ kingdomId: kingdom.kingdom_id, actions: ['territory.create'],
+    scope: activeScope, ttlMs: 600_000, itemHint: 'item:' + 'a'.repeat(32) }) })
+  assert.equal(partialHint.kind, 'error', partialHint.text)
+  assert.equal(partialHint.text.includes('contentHashHint'), true, partialHint.text)
+  assert.equal(launchUrl, startUrl, 'a rejected hint never opens a new window')
+  // 三字段完整且格式有效时激活成功；票据兑换后 303 到只带这三个提示的无票据地址。
+  const hints = { taskHint: 'task-fixture', itemHint: 'item:' + 'b'.repeat(32), contentHashHint: 'c'.repeat(64) }
+  const hinted = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify({ kingdomId: kingdom.kingdom_id, actions: ['territory.create'],
+    scope: activeScope, ttlMs: 600_000, ...hints }) })
+  assert.equal(hinted.kind, 'success', hinted.text)
+  assert.ok(launchUrl !== startUrl, 'a complete hint still activates with a fresh one-time ticket')
+  assert.equal(launchUrl.includes('ack_'), false, 'the copied launch URL carries no ack query before redemption')
+  const hintedRedemption = await redeem('/owner?ack_task=task-fixture&ack_item=' + encodeURIComponent(hints.itemHint) + '&ack_hash=' + hints.contentHashHint)
+  assert.equal(hintedRedemption.location, '/owner?ack_task=task-fixture&ack_item=' + encodeURIComponent(hints.itemHint) + '&ack_hash=' + hints.contentHashHint)
+  // hintAction 随 direct 命令透传：提问命令兑换后 303 到 ask_*，不会退化成知悉入口。
+  const askedHints = { ...hints, hintAction: 'ask' }
+  const asked = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify({ kingdomId: kingdom.kingdom_id, actions: ['delivery.item.question'],
+    scope: activeScope, ttlMs: 600_000, ...askedHints }) })
+  assert.equal(asked.kind, 'success', asked.text)
+  await redeem('/owner?ask_task=task-fixture&ask_item=' + encodeURIComponent(hints.itemHint) + '&ask_hash=' + hints.contentHashHint)
+  // 非法 hintAction 在激活前整体拒绝，不打开任何窗口。
+  const beforeBadAction = launchUrl
+  const badAction = await slash.handler({ rawInput: 'owner.gui ' + JSON.stringify({ kingdomId: kingdom.kingdom_id, actions: ['delivery.item.question'],
+    scope: activeScope, ttlMs: 600_000, ...hints, hintAction: 'delete' }) })
+  assert.equal(badAction.kind, 'error', badAction.text)
+  assert.equal(badAction.text.includes('hintAction'), true, badAction.text)
+  assert.equal(launchUrl, beforeBadAction, 'a rejected hintAction never opens a new window')
 })

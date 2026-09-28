@@ -239,7 +239,7 @@ nodes:
     safeguard_type: observability
     guarantee: Missing reports and truncated rows never imply complete or zero-cost totals; shared costs are not allocated and assembly bytes do not imply Token savings
     protects: [A2, A7]
-    failure_behavior: Return coverage counts, unknowns and truncation with partial summaries; keep current runtime mode distinct from historic observations
+    failure_behavior: Return coverage counts, unresolved items and truncation with partial summaries; keep current runtime mode distinct from historic observations
     code:
       - path: src/gui/workbench.ts
         symbol: buildPersonalWorkbench
@@ -265,3 +265,435 @@ nodes:
     tests:
       - path: tests/gui-personal-workbench.test.ts
         symbol: workbench projection is read only and task history is scoped before its bound
+  E4:
+    kind: entry
+    description: Click the acknowledgement icon of one confirmed delivery item
+    trigger: Explicit icon activation inside the layered delivery list
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbenchDelivery
+      - path: src/gui/workbench-ui.ts
+        symbol: addAcknowledgeControl
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench acknowledgement hands the exact task/item/contentHash to the Owner window without writing
+  D5:
+    kind: decision
+    description: The item has an exact task/item/contentHash and belongs to a supervisor-ACCEPTed delivery
+    condition: Delivery layer exists only for the same Task/attempt supervisor ACCEPT; the exact triple is present
+    code:
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+      - path: src/gui/workbench-ui.ts
+        symbol: addAcknowledgeControl
+    failure_behavior: No item layer or a disabled icon; zero acknowledgement facts
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench exposes the summary → module → evidence hierarchy only after supervisor ACCEPT
+  A8:
+    kind: action
+    description: Hand the exact triple to the canonical Owner window as an exact URL
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerAckHref
+      - path: src/gui/workbench-ui.ts
+        symbol: addAcknowledgeControl
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench acknowledgement hands the exact task/item/contentHash to the Owner window without writing
+  X7:
+    kind: outcome
+    description: Unconfirmed delivery
+    result: No item layer and no operable acknowledgement icon; Worker Claim never becomes a delivery
+  D6:
+    kind: decision
+    description: The active Owner window scope includes delivery.item.ack and the exact item is in the catalog
+    condition: Canonical OwnerDecision is ACTIVE, the action is in scope, and task/item/contentHash all match one catalog entry
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ackTargetFromLocation
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+    failure_behavior: Explain the mismatch, keep no alternative selection, and issue no request
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window preselects only an exact task/item/contentHash triple and never writes by itself
+  X8:
+    kind: outcome
+    description: Target cannot be located in the current authorization
+    result: No fallback selection and zero writes; the Owner must re-read or reactivate the correct scope
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window refuses an out-of-scope acknowledgement target instead of widening authority
+  A9:
+    kind: action
+    description: Owner authorizes, previews and commits inside the canonical window
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: "el('commit').addEventListener"
+      - path: src/core/owner-window.ts
+        symbol: commit
+  D10:
+    kind: decision
+    description: The Supervisor explicitly selects the bounded change entries in the same ACCEPT transaction
+    condition: Explicit change fields are present, the caller is a live same-territory ACTIVE Supervisor session, the snapshot result reference matches the current Claim, the manifest re-verifies, the manifest territory id equals the Task territory (two territories may share one canonical workspace) and every selected entry is a proven change
+    code:
+      - path: src/core/task-service.ts
+        symbol: resolveChangeSelection
+      - path: src/index.ts
+        symbol: changeEvidenceContext
+    failure_behavior: Reject with no TASK_ACCEPTED write; an empty or blank selection never degrades to a plain ACCEPT and a missing result reference is never skipped
+    tests:
+      - path: tests/delivery-change-tool-entry.test.ts
+        symbol: the default declarative configuration still requires a live session-bound supervisor for explicit change selection
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a change snapshot without a result reference can never be confirmed against the current Claim
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a concurrently re-bound territory supervisor cannot sign change evidence with the stale pre-read identity
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: a snapshot bound to another territory of the same workspace can never be confirmed for this task
+  T6:
+    kind: transition
+    description: Canonical Owner transaction appends the acknowledgement fact and receipt
+    entity: OwnerDeliveryItemAcknowledgement
+    from: Absent
+    to: ACKNOWLEDGED
+    trigger: Owner commits the prepared delivery.item.ack operation
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/delivery-ack.ts
+        symbol: recordDeliveryAcknowledgement
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window acknowledgement is scoped, idempotent and never touches task or review state
+  G5:
+    kind: safeguard
+    description: The workbench handoff neither grants authority nor writes facts
+    safeguard_type: authorization
+    guarantee: The icon only navigates with the exact triple; prepare/commit still require the canonical Owner window
+    protects: [A8, A9]
+    failure_behavior: Preselect nothing, explain the mismatch, and never issue a mutation from the workbench
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: addAcknowledgeControl
+      - path: src/gui/workbench-ui.ts
+        symbol: addChangeControl
+      - path: src/gui/workbench-ui.ts
+        symbol: markControlAvailable
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window preselects only an exact task/item/contentHash triple and never writes by itself
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: unconfirmed or unimplemented change sources are explicitly not locatable in the projection
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: the workbench copy icon produces the exact minimal direct owner.gui command and really copies it on click
+  E5:
+    kind: entry
+    description: Click the question icon of one confirmed delivery item
+    trigger: Explicit icon activation inside the layered delivery list
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderWorkbenchDelivery
+      - path: src/gui/workbench-ui.ts
+        symbol: addAskControl
+    failure_behavior: No question control for an unconfirmed delivery; a missing exact triple disables the icon with a visible reason
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench question control stays an exact-triple handoff and never writes by itself
+  D11:
+    kind: decision
+    description: The item has an exact task/item/contentHash and belongs to a supervisor-ACCEPTed delivery
+    condition: The delivery layer exists only for the same Task/attempt supervisor ACCEPT, and the exact triple is present
+    code:
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+      - path: src/gui/workbench-ui.ts
+        symbol: addAskControl
+    failure_behavior: No item layer or a disabled icon; zero question facts
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: delivery GUI keeps layered evidence text, accessible icon controls and the authorized question control
+  A11:
+    kind: action
+    description: Project question metadata only, then hand the exact triple to the canonical Owner window as an exact URL
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildWorkbenchDeliveryLayers
+      - path: src/gui/workbench.ts
+        symbol: deliveryQuestionSummary
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerAskHref
+      - path: src/gui/workbench-ui.ts
+        symbol: addAskControl
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: workbench question control stays an exact-triple handoff and never writes by itself
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the workbench question projection is metadata only and counts unreachable questions explicitly
+  X15:
+    kind: outcome
+    description: Unconfirmed delivery or missing exact reference
+    result: No item layer or a disabled question icon; zero question facts
+  D12:
+    kind: decision
+    description: The active Owner window includes delivery.item.question and the exact item is in the catalog
+    condition: Canonical OwnerDecision is ACTIVE, the action is in scope, and task/item/contentHash all match one catalog entry
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: askTargetFromLocation
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+    failure_behavior: Explain the mismatch, keep no alternative selection, and issue no request
+    tests:
+      - path: tests/owner-delivery-ack.test.ts
+        symbol: Owner window exposes the separate question action, preselects only the exact item and reports an illegal hint
+  X16:
+    kind: outcome
+    description: Question target cannot be located in the current authorization
+    result: No fallback selection and zero writes; the Owner must re-read or reactivate the correct scope
+  A12:
+    kind: action
+    description: Owner writes the question text, previews and commits inside the canonical window
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: payload
+      - path: src/core/owner-window.ts
+        symbol: commit
+  T8:
+    kind: transition
+    description: Canonical Owner transaction appends one question fact addressed to the accepting supervisor binding
+    entity: OwnerDeliveryItemQuestion
+    from: Absent
+    to: QUESTIONED
+    trigger: Owner commits the prepared delivery.item.question operation
+    code:
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/delivery-ack.ts
+        symbol: recordDeliveryQuestion
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the canonical Owner window records exactly one bounded question fact and is idempotent on retry
+  X17:
+    kind: outcome
+    description: Bounded conversation record
+    result: The bound supervisor reads and answers once through a session-bound Agent Tool, and the Owner reads it back read-only; the workbench keeps metadata only
+  E10:
+    kind: entry
+    description: Read one delivery item's question metadata and the accepting supervisor's current reachability
+    trigger: Existing workbench projection request
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildWorkbenchDeliveryLayers
+      - path: src/gui/workbench.ts
+        symbol: buildPersonalWorkbench
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the workbench question projection is metadata only and counts unreachable questions explicitly
+  X18:
+    kind: outcome
+    description: Metadata stays body-free
+    result: Only counts, timestamps and reachability are projected; question and reply bodies remain in Core behind the authorized Owner window or the bound supervisor's session-bound Agent Tool
+  G8:
+    kind: safeguard
+    description: Questions and replies stay out of every general projection and never become acknowledgement
+    safeguard_type: audit
+    guarantee: The workbench projects only counts, timestamps and reachability; question and reply bodies leave Core only through the authorized Owner window or the bound supervisor's session-bound Agent Tool, and a question never writes an acknowledgement
+    protects: [T8, A11]
+    failure_behavior: Event projections replace both bodies with a redacted marker; a recipient that is retired, re-sessioned or re-bound is reported as unreachable instead of being silently reassigned
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: toEventView
+      - path: src/core/delivery-ack.ts
+        symbol: toDeliveryQuestionEventPayload
+      - path: src/gui/workbench.ts
+        symbol: deliveryQuestionSummary
+    tests:
+      - path: tests/delivery-question-loop.test.ts
+        symbol: snapshots, task detail, recent events and event polling never expose the question or reply body
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the question action never grants acknowledgement and the acknowledgement action never grants questions
+      - path: tests/delivery-question-loop.test.ts
+        symbol: the workbench question projection stays empty for a delivery with no questions
+  E6:
+    kind: entry
+    description: Click the change icon of a supervisor-confirmed change item
+    trigger: Explicit icon activation inside the delivery evidence layer
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: addChangeControl
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner page renders a strict read-only change view and the real HTTP read route enforces window, scope and exact ids
+  D7:
+    kind: decision
+    description: The item carries an exact evidenceId/entryId inside the same Task/attempt supervisor confirmation
+    condition: TASK_ACCEPTED bound delivery_change_evidence exists and the local content-addressed manifest re-verifies
+    code:
+      - path: src/gui/snapshot.ts
+        symbol: buildWorkbenchDeliveryLayers
+      - path: src/gui/workbench-ui.ts
+        symbol: addChangeControl
+    failure_behavior: Disabled icon with an explicit not-locatable note; no diff body is read
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: declarative mode, wrong session, unrecognized entries, drifted evidence and duplicate ACCEPT all fail closed with zero writes
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: gitignored private content is never a candidate, never read into evidence, and is reported as partial coverage
+  X10:
+    kind: outcome
+    description: Change cannot be located
+    result: Change icon stays disabled; worker self-report, absolute paths and SourceRef never become links
+  A10:
+    kind: action
+    description: Open the canonical Owner window read-only change entry with the exact triple
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: ownerChangeHref
+      - path: src/gui/owner-ui.ts
+        symbol: renderChange
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner page renders a strict read-only change view and the real HTTP read route enforces window, scope and exact ids
+  D8:
+    kind: decision
+    description: The Owner window is ACTIVE, its scope covers the delivery and the evidence hash re-verifies
+    condition: readDeliveryChange requires an active window, delivery scope and exact task/evidence/entry match
+    code:
+      - path: src/core/owner-window.ts
+        symbol: readDeliveryChange
+      - path: src/gui/owner-control.ts
+        symbol: readChange
+    failure_behavior: Explicit rejection or unavailable note; zero facts written and no acknowledgement recorded
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: the Owner read path refuses unstarted windows, out-of-scope deliveries, unrecognized entries and path traversal
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an Owner window without delivery.item.ack cannot read change bodies even inside the same territory scope
+  X11:
+    kind: outcome
+    description: Change read refused
+    result: No diff body returned; the page explains the mismatch and never writes or acknowledges
+  X12:
+    kind: outcome
+    description: Bounded change detail
+    result: Repo-relative path, status, evidence level, coverage note and bounded hunks are shown read-only
+  G6:
+    kind: safeguard
+    description: Change evidence claims no authorship and writes nothing
+    safeguard_type: integrity
+    guarantee: The snapshot only proves bounded window observation confirmed by the Supervisor; reading never mutates Task, Claim or acknowledgement
+    protects: [D7, A10]
+    failure_behavior: Label as bounded observation plus supervisor confirmation, mark partial coverage, and return no body on drift
+    code:
+      - path: src/core/delivery-change.ts
+        symbol: buildDeliveryChangeManifest
+      - path: src/core/task-service.ts
+        symbol: resolveChangeSelection
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: a real uncommitted change in a temp git repo is frozen, supervisor-confirmed in the ACCEPT transaction and read back by hash
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: pre-existing dirty, untracked, binary and oversize files are labelled honestly and never claimed as full coverage
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an unchanged oversize file produces no change entry and no coverage claim
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: An explicit empty or blank change selection is rejected instead of degrading to a plain ACCEPT
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: ordinary directories are never silently skipped, and the evidence root inside the workspace is excluded
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a Territory that is a repository subdirectory still detects the real change inside it
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a tracked file whose only change is its tail byte is never mistaken for an unchanged file
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a file too large to hash completely stays unproven instead of silently equal or silently missing
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a file merely omitted by the enumeration budget is never reported as deleted
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a tracked PEM file never has its key body persisted into the evidence directory
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: two identical symlink observations are never reported as a confirmable modification
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an ignored file is outside the candidate set rather than an enumeration truncation, so a real new file is still confirmable
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an in-workspace evidence root is an intentional exclusion and never blocks proving a real creation
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: removing an ignore rule never turns an unchanged ignored file into a confirmable addition
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: adding an ignore rule never turns an unchanged file into a confirmable deletion
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an ignore list that cannot be fully confirmed never defaults to not ignored
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a repository-root ignore rule is still detected for a subdirectory territory
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a nested workspace ignore rule is enumerated, so removing it never turns an unchanged file into a confirmable addition
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a newly added nested workspace ignore rule never turns an unchanged file into a confirmable deletion
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: the runtime cwd fallback is preserved while diff capture only ever uses the canonical workspace
+  E7:
+    kind: entry
+    description: Supervisor explicitly selects the bounded change entries of this delivery during ACCEPT
+    trigger: Explicit change_evidence_id and change_entry_ids on the review command
+    code:
+      - path: src/index.ts
+        symbol: changeEvidenceContext
+    tests:
+      - path: tests/delivery-change-tool-entry.test.ts
+        symbol: the default declarative configuration still requires a live session-bound supervisor for explicit change selection
+  T7:
+    kind: transition
+    description: Canonical ACCEPT transaction binds the selected change references
+    entity: TaskAcceptanceChangeEvidence
+    from: Unbound
+    to: ACCEPTED_WITH_CHANGE_EVIDENCE
+    trigger: Supervisor ACCEPT with an explicit non-empty change selection
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/delivery-change.ts
+        symbol: validateChangeSelection
+    tests:
+      - path: tests/delivery-change-evidence.test.ts
+        symbol: a real uncommitted change in a temp git repo is frozen, supervisor-confirmed in the ACCEPT transaction and read back by hash
+  X13:
+    kind: outcome
+    description: Change selection refused
+    result: No TASK_ACCEPTED write and the Task stays in REVIEW; the refusal names the failed condition
+    tests:
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a concurrently re-bound territory supervisor cannot sign change evidence with the stale pre-read identity
+  G7:
+    kind: safeguard
+    description: Change selection is authorized and provable inside the locked transaction
+    safeguard_type: authorization
+    guarantee: The locked-in Territory Supervisor identity signs, the snapshot result reference equals the current Claim, and every selected entry is a proven change
+    protects: [D10, T7]
+    failure_behavior: Reject with zero writes; an empty or blank selection never degrades to a plain ACCEPT and an unprovable entry is never confirmable
+    code:
+      - path: src/core/task-service.ts
+        symbol: resolveChangeSelection
+      - path: src/core/delivery-change.ts
+        symbol: validateChangeSelection
+    tests:
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a change snapshot without a result reference can never be confirmed against the current Claim
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a selection that includes an unproven entry is rejected by validateChangeSelection
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a rebind injected between the outer pre-read and the ACCEPT transaction is answered with the locked-in identity
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a file merely omitted by the enumeration budget is never reported as deleted
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a complete enumeration still proves a file created inside the window
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: removing an ignore rule never turns an unchanged ignored file into a confirmable addition
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: adding an ignore rule never turns an unchanged file into a confirmable deletion
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: an ignore list that cannot be fully confirmed never defaults to not ignored
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a nested workspace ignore rule is enumerated, so removing it never turns an unchanged file into a confirmable addition
+      - path: tests/delivery-change-boundary.test.ts
+        symbol: a newly added nested workspace ignore rule never turns an unchanged file into a confirmable deletion

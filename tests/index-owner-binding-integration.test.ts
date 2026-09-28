@@ -32,8 +32,9 @@ interface CapturedCommand {
   handler(input: { rawInput: string }): Promise<{ kind: string; text: string }>
 }
 
-function makeHarness(options: { includeRegistry?: boolean } = {}) {
+function makeHarness(options: { includeRegistry?: boolean; durableSessions?: readonly string[] } = {}) {
   const includeRegistry = options.includeRegistry ?? true
+  const durableSessions = options.durableSessions
   const root = mkdtempSync(join(tmpdir(), 'dsh-kingdom-index-owner-binding-'))
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = root
@@ -54,6 +55,20 @@ function makeHarness(options: { includeRegistry?: boolean } = {}) {
     get: (id: string) => sessions.get(id),
   }
 
+  /**
+   * v3.1：可选的持久会话观察通道。只有显式给出 durableSessions 时才挂载；
+   * 未给出时 `ctx.get('sessionQuery')` 返回 undefined，复现“宿主无此通道”的 fail-closed 情形。
+   */
+  const durable = new Set<string>(durableSessions ?? [])
+  const sessionQueryService = {
+    async observeSession(id: string): Promise<unknown> {
+      if (!durable.has(id)) {
+        throw Object.assign(new Error(`session ${id} not found`), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+      }
+      return { header: { id }, [Symbol.dispose]: () => undefined }
+    },
+  }
+
   const context = {
     tools: {
       register(tool: CapturedTool): () => void {
@@ -72,6 +87,7 @@ function makeHarness(options: { includeRegistry?: boolean } = {}) {
       if (typeof disposer === 'function') disposers.push(disposer as () => void)
     },
     get(name: string): unknown {
+      if (name === 'sessionQuery') return durableSessions === undefined ? undefined : sessionQueryService
       if (!includeRegistry) return undefined
       if (name === 'agents') return agentsService
       if (name === 'sessions') return sessionsService
@@ -353,6 +369,76 @@ test('kingdom_bind_session Tool accepts binding_id-only and returns zero-write c
     assert.equal(expired.ambiguity.code, 'SESSION_EXPIRED')
     assert.equal(expired.write_effect, 'ZERO_WRITE')
     target.status = 'running'
+  } finally {
+    store.close()
+  }
+})
+
+test('v3.1：只在持久会话存储中登记（无 live Agent）的会话可以绑定席位，并落 DURABLE_SESSION 证据', async (t) => {
+  const harness = makeHarness({ durableSessions: ['unstarted-session'] })
+  t.after(harness.close)
+  const command = harness.commands.get('kingdom')!
+  assert.equal((await command.handler({ rawInput: 'init' })).kind, 'success')
+
+  const store = new KingdomStore(join(harness.root, 'kingdom', 'kingdom.db'), { allowSchemaV4: true })
+  try {
+    const kingdom = store.getDefaultKingdom()!
+    const bound = await command.handler({
+      rawInput: 'role.bind {"role_type":"SUPERVISOR","role_name":"Sup-Taisu","session_id":"unstarted-session"}',
+    })
+    assert.equal(bound.kind, 'success', bound.text)
+    const supervisor = store.getBindingByRole(kingdom.kingdom_id, 'SUPERVISOR')!
+    assert.equal(supervisor.session_id, 'unstarted-session')
+
+    const boundEvents = store.listEvents(kingdom.kingdom_id, 100).filter(event => event.event_type === 'ROLE_BOUND')
+    assert.equal(JSON.parse(boundEvents[boundEvents.length - 1]!.payload_json).session_evidence, 'DURABLE_SESSION')
+
+    const eventsBefore = store.listEvents(kingdom.kingdom_id, 100).length
+    const absent = await command.handler({
+      rawInput: 'role.bind {"role_type":"WORKER","role_name":"NoSuchSession","session_id":"ghost-session"}',
+    })
+    assert.equal(absent.kind, 'error')
+    assert.match(absent.text, /SESSION_ABSENT/u)
+    assert.equal(store.listEvents(kingdom.kingdom_id, 100).length, eventsBefore)
+    assert.equal(store.getBindingsByRole(kingdom.kingdom_id, 'WORKER').length, 0)
+
+    const rebound = await command.handler({
+      rawInput: `role.session ${JSON.stringify({ binding_id: supervisor.binding_id, session_id: 'unstarted-session' })}`,
+    })
+    assert.equal(rebound.kind, 'success', rebound.text)
+    const profileEvents = store.listEvents(kingdom.kingdom_id, 100)
+      .filter(event => event.event_type === 'BINDING_PROFILE_UPDATED')
+    assert.equal(JSON.parse(profileEvents[profileEvents.length - 1]!.payload_json).session_evidence, 'DURABLE_SESSION')
+  } finally {
+    store.close()
+  }
+})
+
+test('v3.1：live 目标仍记 LIVE_AGENT；宿主无持久观察通道时保持原 fail-closed 拒绝', async (t) => {
+  const harness = makeHarness()
+  t.after(harness.close)
+  const command = harness.commands.get('kingdom')!
+  assert.equal((await command.handler({ rawInput: 'init' })).kind, 'success')
+  harness.addAgent('live-target-session', 'idle')
+
+  const store = new KingdomStore(join(harness.root, 'kingdom', 'kingdom.db'), { allowSchemaV4: true })
+  try {
+    const kingdom = store.getDefaultKingdom()!
+    const bound = await command.handler({
+      rawInput: 'role.bind {"role_type":"WORKER","role_name":"W-live","session_id":"live-target-session"}',
+    })
+    assert.equal(bound.kind, 'success', bound.text)
+    const boundEvents = store.listEvents(kingdom.kingdom_id, 100).filter(event => event.event_type === 'ROLE_BOUND')
+    assert.equal(JSON.parse(boundEvents[boundEvents.length - 1]!.payload_json).session_evidence, 'LIVE_AGENT')
+
+    const eventsBefore = store.listEvents(kingdom.kingdom_id, 100).length
+    const rejected = await command.handler({
+      rawInput: 'role.bind {"role_type":"WORKER","role_name":"W-unobservable","session_id":"persisted-but-unobservable"}',
+    })
+    assert.equal(rejected.kind, 'error')
+    assert.match(rejected.text, /SESSION_ABSENT/u)
+    assert.match(rejected.text, /未提供持久会话观察通道/u)
+    assert.equal(store.listEvents(kingdom.kingdom_id, 100).length, eventsBefore)
   } finally {
     store.close()
   }

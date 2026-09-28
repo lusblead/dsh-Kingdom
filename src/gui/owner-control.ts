@@ -23,7 +23,84 @@ export interface OwnerLocalControlOptions {
   now?: () => number
 }
 
-interface Ticket { handle: OwnerDecisionHandle; expiresAt: number }
+/**
+ * 非授权启动定位提示（launch hint）。
+ *
+ * 只描述人类刚点的那一条交付，用于在新标签页里预选；它不进入
+ * `OwnerDecisionInput`、不改变授权含义，也不产生任何写入。
+ */
+export interface OwnerLaunchHintInput {
+  task?: unknown
+  item?: unknown
+  contentHash?: unknown
+  /** 提示指向的动作：知悉（`ack`）还是提问（`ask`）。只决定兑换后预选哪个动作，不参与授权。 */
+  action?: unknown
+}
+
+export interface OwnerLaunchAckHint {
+  task: string
+  item: string
+  contentHash: string
+  /** `ack` = 预选逐条知悉；`ask` = 预选交付条目提问。 */
+  action: 'ack' | 'ask'
+}
+
+/** `task` 与工作台公开引用 ID 同形（`src/gui/snapshot.ts` 的 `publicReferenceId`）。 */
+const HINT_TASK = /^[A-Za-z0-9_.:@-]{1,96}$/u
+/** `item` 的格式由 core 唯一决定：`item:` + 32 位小写十六进制（`deliveryItemId`）。 */
+const HINT_ITEM = /^item:[0-9a-f]{32}$/u
+const HINT_CONTENT_HASH = /^[0-9a-f]{64}$/u
+
+/**
+ * 按格式校验定位提示。三个字段要么全部合法，要么整体不成立：不部分采用。
+ *
+ * `input` 是拆分后的 direct 命令参数，因此能区分「未携带」（三个字段都
+ * `undefined`）与「携带了但不完整/非法」。调用方必须把后者当作输入错误在激活前
+ * 拒绝，而不是丢掉提示后照常激活——否则人类会以为新标签页仍会预选该条。
+ */
+export function validateLaunchAckHint(input: OwnerLaunchHintInput | undefined): { ok: true; hint: OwnerLaunchAckHint | null } | { ok: false; message: string } {
+  if (!input) return { ok: true, hint: null }
+  const provided = (['task', 'item', 'contentHash'] as const).filter(key => input[key] !== undefined)
+  if (!provided.length) {
+    if (input.action !== undefined) return { ok: false, message: 'hintAction 必须与 taskHint/itemHint/contentHashHint 同时提供。' }
+    return { ok: true, hint: null }
+  }
+  if (provided.length < 3) {
+    const missing = (['task', 'item', 'contentHash'] as const).filter(key => input[key] === undefined)
+    return { ok: false, message: `taskHint/itemHint/contentHashHint 必须同时提供；缺少 ${missing.map(key => key + 'Hint').join('、')}。` }
+  }
+  for (const key of provided) {
+    if (typeof input[key] !== 'string') return { ok: false, message: `${key}Hint 必须是 string。` }
+  }
+  // hintAction 只决定兑换后预选哪个动作，不改变授权；默认（未携带）是知悉。
+  // 显式提供的 null/非法值不被当作「未携带」，与三个定位字段同样整体拒绝。
+  const action = input.action === undefined ? 'ack' : input.action
+  if (action !== 'ack' && action !== 'ask') return { ok: false, message: 'hintAction 只接受 ack 或 ask。' }
+  const { task, item, contentHash } = input as { task: string; item: string; contentHash: string }
+  if (!HINT_TASK.test(task)) return { ok: false, message: 'taskHint 不是合法的任务引用 ID。' }
+  if (!HINT_ITEM.test(item)) return { ok: false, message: 'itemHint 不是合法的条目 ID（item: 加 32 位小写十六进制）。' }
+  if (!HINT_CONTENT_HASH.test(contentHash)) return { ok: false, message: 'contentHashHint 不是合法的内容版本（64 位小写十六进制）。' }
+  return { ok: true, hint: { task, item, contentHash, action } }
+}
+
+/** 三者同时存在且各自合法时返回提示，否则返回 null（不部分采用）。 */
+export function normalizeLaunchAckHint(input: OwnerLaunchHintInput | undefined): OwnerLaunchAckHint | null {
+  const checked = validateLaunchAckHint(input)
+  return checked.ok ? checked.hint : null
+}
+
+/** 兑换成功后跳转的无票据地址；只带非授权提示字段，绝不带 ticket。 */
+export function launchRedirectPath(hint: OwnerLaunchAckHint | null): string {
+  if (!hint) return '/owner'
+  // 动作意图必须随兑换一起交还：只写 ack_* 会让「提问」入口在被复制的 direct 命令
+  // 走完后丢失提问动作与目标。
+  const prefix = hint.action === 'ask' ? 'ask' : 'ack'
+  return `/owner?${prefix}_task=` + encodeURIComponent(hint.task)
+    + `&${prefix}_item=` + encodeURIComponent(hint.item)
+    + `&${prefix}_hash=` + encodeURIComponent(hint.contentHash)
+}
+
+interface Ticket { handle: OwnerDecisionHandle; expiresAt: number; hint: OwnerLaunchAckHint | null }
 interface BrowserWindow {
   handle: OwnerDecisionHandle
   csrf: string
@@ -67,10 +144,14 @@ export class OwnerLocalControlManager {
     }
   }
 
-  activate(capability: OwnerControlCapability, input: OwnerDecisionInput): {
+  activate(capability: OwnerControlCapability, input: OwnerDecisionInput, hintInput?: OwnerLaunchHintInput): {
     launchTicket: string; launchPath: '/owner'; decisionId: string; expiresAt: string; ttlMs: number
   } {
     if (this.closed) throw new OwnerTransportError('OWNER_WINDOW_CLOSED', '管理通道已关闭。', 410)
+    // 携带了却不完整/非法的定位提示在激活前整体拒绝：既不激活窗口，也不退化成
+    // 「丢掉提示照常激活」，否则人类会以为新标签页仍会预选该条。
+    const checked = validateLaunchAckHint(hintInput)
+    if (!checked.ok) throw new OwnerTransportError('OWNER_LAUNCH_HINT_INVALID', `启动定位提示无效：${checked.message}`, 400)
     const activation = this.options.controller.activate(capability, input)
     for (const ticket of this.tickets.values()) this.options.controller.revoke(ticket.handle)
     this.tickets.clear()
@@ -79,13 +160,14 @@ export class OwnerLocalControlManager {
     while (this.windows.size > 15) this.windows.delete(this.windows.keys().next().value!)
     const launchTicket = secret()
     const expiresAt = Math.min(this.now() + 30_000, Date.parse(activation.decision.expiresAt))
-    this.tickets.set(launchTicket, { handle: activation.handle, expiresAt })
+    // 提示只随一次性票据保存，兑换后立即丢弃；它不参与任何授权判断。
+    this.tickets.set(launchTicket, { handle: activation.handle, expiresAt, hint: checked.hint })
     return { launchTicket, launchPath: '/owner', decisionId: activation.decision.decisionId,
       expiresAt: activation.decision.expiresAt,
       ttlMs: Math.max(0, Date.parse(activation.decision.expiresAt) - this.now()) }
   }
 
-  redeem(ticket: string, meta: GuiControlRequestMeta): { cookie: string; maxAgeSeconds: number } {
+  redeem(ticket: string, meta: GuiControlRequestMeta): { cookie: string; maxAgeSeconds: number; redirectPath: string } {
     this.checkTransport(meta, false, true)
     const record = ticket.length <= 512 ? this.tickets.get(ticket) : undefined
     if (!record || this.now() >= record.expiresAt) {
@@ -102,7 +184,7 @@ export class OwnerLocalControlManager {
     window.timer = setTimeout(() => this.invalidate(window), ttl + 1)
     window.timer.unref?.()
     this.windows.set(cookie, window)
-    return { cookie, maxAgeSeconds: Math.max(1, Math.ceil((ttl + RECEIPT_GRACE_MS) / 1000)) }
+    return { cookie, maxAgeSeconds: Math.max(1, Math.ceil((ttl + RECEIPT_GRACE_MS) / 1000)), redirectPath: launchRedirectPath(record.hint) }
   }
 
   private window(cookie: string | null, meta: GuiControlRequestMeta): BrowserWindow {
@@ -115,6 +197,28 @@ export class OwnerLocalControlManager {
       throw new OwnerTransportError('OWNER_RECEIPT_WINDOW_EXPIRED', '结果查询宽限期已结束，请保留操作编号并重新核对。', 410)
     }
     return window
+  }
+
+  /**
+   * 只读返回一条已由主管确认的改动条目详情。
+   *
+   * 不消耗 CSRF、不写任何事实、不产生知悉；有效性完全由 Core 的
+   * `readDeliveryChange` 依据当前 ACTIVE 窗口、scope 与证据 hash 判定。
+   */
+  readChange(cookie: string | null, meta: GuiControlRequestMeta, params: { taskId: string; evidenceId: string; entryId: string }): unknown {
+    const window = this.window(cookie, meta)
+    return { ok: true, change: this.options.controller.readDeliveryChange(window.handle, params) }
+  }
+
+  /**
+   * 只读返回一条已确认交付条目的问答线程。
+   *
+   * 不消耗 CSRF、不写任何事实、不产生知悉、也不替主管回复；有效性完全由 Core 的
+   * `readDeliveryQuestions` 依据当前 ACTIVE 窗口、动作授权、scope 与精确条目判定。
+   */
+  readQuestions(cookie: string | null, meta: GuiControlRequestMeta, params: { taskId: string; itemId: string }): unknown {
+    const window = this.window(cookie, meta)
+    return { ok: true, questions: this.options.controller.readDeliveryQuestions(window.handle, params) }
   }
 
   async inspect(cookie: string | null, meta: GuiControlRequestMeta): Promise<unknown> {
@@ -241,12 +345,35 @@ export async function handleOwnerRequest(req: IncomingMessage, res: ServerRespon
           throw new OwnerTransportError('OWNER_TICKET_INVALID', '启动链接无效。', 410)
         }
         const redeemed = manager.redeem(url.searchParams.get('ticket')!, requestMeta)
-        res.writeHead(303, { Location: '/owner', 'Set-Cookie': `${OWNER_CONTROL_COOKIE}=${encodeURIComponent(redeemed.cookie)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${redeemed.maxAgeSeconds}` })
+        // 303 到不含 ticket 的地址；只可能带上一次性票据里保存的非授权定位提示。
+        res.writeHead(303, { Location: redeemed.redirectPath, 'Set-Cookie': `${OWNER_CONTROL_COOKIE}=${encodeURIComponent(redeemed.cookie)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${redeemed.maxAgeSeconds}` })
         res.end(); return true
       }
       const html = renderOwnerApp(nonce)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) })
       res.end(html); return true
+    }
+    // 已确认改动证据的只读读取：必须精确给出 task/evidence/item 三个参数，
+    // 不接受多余字段、重复字段或任意路径；正文只从内容寻址证据目录重验后返回。
+    if (req.method === 'GET' && path === '/api/owner/delivery-change') {
+      const keys = [...url.searchParams.keys()]
+      const allowed = ['task', 'evidence', 'item']
+      if (keys.length !== allowed.length || new Set(keys).size !== allowed.length || keys.some(key => !allowed.includes(key))) {
+        throw new OwnerTransportError('INVALID_BODY', '改动读取需要且只接受 task、evidence、item 三个精确参数。', 400)
+      }
+      const params = { taskId: url.searchParams.get('task') ?? '', evidenceId: url.searchParams.get('evidence') ?? '', entryId: url.searchParams.get('item') ?? '' }
+      json(res, 200, manager.readChange(cookie(req), requestMeta, params)); return true
+    }
+    // 交付条目问答线程的只读读取：同样只接受 task、item 两个精确参数，
+    // 正文只从权威 events 账本按精确条目读取，不作为通用事件投影暴露。
+    if (req.method === 'GET' && path === '/api/owner/delivery-questions') {
+      const keys = [...url.searchParams.keys()]
+      const allowed = ['task', 'item']
+      if (keys.length !== allowed.length || new Set(keys).size !== allowed.length || keys.some(key => !allowed.includes(key))) {
+        throw new OwnerTransportError('INVALID_BODY', '问答读取需要且只接受 task、item 两个精确参数。', 400)
+      }
+      const params = { taskId: url.searchParams.get('task') ?? '', itemId: url.searchParams.get('item') ?? '' }
+      json(res, 200, manager.readQuestions(cookie(req), requestMeta, params)); return true
     }
     if (url.search) throw new OwnerTransportError('INVALID_BODY', '管理接口不接受查询参数。', 400)
     if (req.method === 'GET' && path === '/api/owner/control') {

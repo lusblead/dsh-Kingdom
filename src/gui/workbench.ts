@@ -1,14 +1,62 @@
 import type {
-  ActionAvailability, ExecutionView, PersonalWorkbenchData, RuntimeGovernanceView,
-  SourceRef, SupervisorDecisionView, TaskView, WorkbenchActionItem, WorkbenchDeliveryItem,
-  WorkbenchQueue, WorkbenchRoleItem, WorkbenchUsageSummary, WorkbenchCostSummary, WorkbenchCollaborationView,
+  ActionAvailability, DeliveryItemQuestionState, DeliveryItemView, DeliveryModuleView, ExecutionView, PersonalWorkbenchData,
+  RuntimeGovernanceView, SourceRef, SupervisorDecisionView, TaskView, WorkbenchAcceptanceEvidence,
+  WorkbenchActionItem, WorkbenchDeliveryItem, WorkbenchQueue, WorkbenchRoleItem, WorkbenchUsageSummary,
+  WorkbenchCostSummary, WorkbenchCollaborationView,
 } from './contract.js'
+import type { DeliveryAcceptanceEvidenceKind, DeliveryItemAcknowledgementView } from '../core/delivery-ack.js'
 
 export const WORKBENCH_ITEM_LIMIT = 40
+
+/**
+ * 已确认交付的条目层输入。
+ *
+ * 由只读投影（`snapshot.ts`）用 core 的纯函数构造好后传入；本模块保持
+ * 「无 Store、无命令、无 model」的性质，也自带终态知悉视图（不再二次推导版本）。
+ */
+export interface WorkbenchDeliverySource {
+  deliveryId: string
+  attemptNo: number
+  /**
+   * 主管 ACCEPT 实际依据的接受证据强度。
+   * `LEGACY_ATTEMPT_ONLY` 时界面必须可见地标注「历史接受证据较弱」。
+   */
+  acceptanceEvidenceKind: DeliveryAcceptanceEvidenceKind
+  /** 弱证据的固定标注文案；强证据为 null。 */
+  acceptanceEvidenceNote: string | null
+  /** 成果摘要层条目（执行者自述摘要），自身也有独立 ID 与内容版本。 */
+  summary: WorkbenchSummaryItemProjection
+  /** 成果摘要层的提问元数据（不含正文）；与 `deliveryQuestions` 汇总不重复计数。 */
+  summaryQuestions: DeliveryItemQuestionState | null
+  /** 证据层条目；顺序稳定，ID 与内容版本由 core 定义。 */
+  evidence: WorkbenchDeliveryItemProjection[]
+}
+
+/** legacy 弱证据的界面回退文案（core 未给 note 时使用，措辞与 core 一致）。 */
+const LEGACY_ACCEPTANCE_FALLBACK_NOTE = '历史接受证据较弱：该 Task/attempt 的 TASK_ACCEPTED 是 v1.0.0 旧格式，只有尝试编号，缺少被审查结果 ID 与内容摘要；本条按真实事件字段与同 Task/attempt 的唯一 WorkerResult 判定，不构成 exact result-bound 证据。'
+
+/** 条目层的公开、有界投影；不含 store/runtime/session 引用。 */
+export interface WorkbenchDeliveryItemProjection {
+  itemId: string
+  contentHash: string
+  label: string
+  detail: string
+  change: DeliveryItemView['change']
+  acknowledgement: DeliveryItemAcknowledgementView
+  /** 提问元数据（计数与可达性），绝不含问题或回复正文。 */
+  questions: DeliveryItemQuestionState | null
+}
+
+/** 后果摘要在交付区的首条呈现；它自身也是一条有独立版本的可知悉条目。 */
+export interface WorkbenchSummaryItemProjection extends WorkbenchDeliveryItemProjection {
+  layer: 'SUMMARY'
+}
 
 /** All inputs are public projections. This module has no Store, command or model access. */
 export interface PersonalWorkbenchInput {
   kingdomPresent: boolean
+  /** 已投影的王国 ID；只用于工作台生成准确的 Owner 激活命令，不授予任何权限。 */
+  kingdomId?: string | null
   bindings: { bindingId: string; roleType: string; roleName: string; status: string; sessionBound: boolean }[]
   territories: { territoryId: string; name: string; status: string; supervisorBindingId: string | null }[]
   tasks: {
@@ -21,12 +69,87 @@ export interface PersonalWorkbenchInput {
   governance: RuntimeGovernanceView
   cost?: WorkbenchCostSummary
   collaboration?: WorkbenchCollaborationView
+  /**
+   * 已确认交付的三层结构，按 taskId 索引；仅同一 Task/attempt 主管 ACCEPT 后存在。
+   * 缺失时交付仍然显示，但明确标注尚未确认，且不给出条目层。
+   */
+  deliveryLayers?: Record<string, WorkbenchDeliverySource>
 }
 
 const source = (entityType: string, entityId: string | null): SourceRef => ({ sourceType: 'table-row', entityType, entityId })
 const rule = (ruleCode: string): SourceRef => ({ sourceType: 'derived-rule', entityType: 'projection-rule', entityId: null, ruleCode })
 const live = (state: string): boolean => ['STARTING', 'RUNNING', 'PAUSED', 'RECOVERING'].includes(state)
 const queue = <T>(items: T[]): WorkbenchQueue<T> => ({ totalCount: items.length, items: items.slice(0, WORKBENCH_ITEM_LIMIT), truncated: items.length > WORKBENCH_ITEM_LIMIT })
+
+/** 证据层条目的模块归属；顺序固定，未归入已知分组的条目自成模块且不丢失。 */
+const DELIVERY_MODULE_LABELS: readonly { match: (label: string) => boolean; moduleId: string; label: string; detail: string }[] = [
+  { match: label => label.startsWith('产物引用'), moduleId: 'artifacts', label: '模块 · 产物引用',
+    detail: '执行者自述提出的产物引用文本；是 Claim，不是独立验证结果，也不构成仓库路径。' },
+  { match: label => label.startsWith('执行者报告的风险'), moduleId: 'risks', label: '模块 · 执行者报告的风险',
+    detail: '执行者自述的风险；未经核验，不代表已接受或已消除。' },
+]
+
+function buildDeliveryModules(sourceInput: WorkbenchDeliverySource | undefined): DeliveryModuleView[] {
+  if (!sourceInput) return []
+  const module = (moduleId: string, label: string, detail: string, items: WorkbenchDeliveryItemProjection[]): DeliveryModuleView => ({
+    moduleId: sourceInput.deliveryId + ':' + moduleId, label, detail,
+    items: items.map(item => ({ ...item, layer: 'EVIDENCE' as const })),
+  })
+  const evidence = sourceInput.evidence
+  const modules: DeliveryModuleView[] = []
+  const claimed = new Set<string>()
+  for (const definition of DELIVERY_MODULE_LABELS) {
+    const matched = evidence.filter(item => definition.match(item.label))
+    for (const item of matched) claimed.add(item.itemId)
+    if (matched.length) modules.push(module(definition.moduleId, definition.label, definition.detail, matched))
+  }
+  const rest = evidence.filter(item => !claimed.has(item.itemId))
+  if (rest.length) modules.push(module('other-evidence', '模块 · 其他证据条目', '未归入已知证据分组的条目仍逐条列出。', rest))
+  if (!modules.length) {
+    modules.push(module('no-evidence', '模块 · 无证据条目',
+      '本次已确认交付没有执行者提供的产物引用或风险条目；这不是「无风险」或「已验证」的证明。', []))
+  }
+  return modules
+}
+
+/**
+ * 汇总条目知悉状态。
+ *
+ * 外层摘要与子条各自计数：摘要已知悉不等于子条已知悉，反之亦然。
+ * 旧版本知悉只计入 `pendingRevisionCount` 的历史，不使当前版本显示为已知悉。
+ *
+ * `acceptanceEvidence` 为 legacy 弱证据时，弱证据标注拼进同一条 note：
+ * Owner 无论读到哪一处都会看到「历史接受证据较弱」，不会把该交付误当成
+ * exact result-bound。
+ */
+function deliveryAcknowledgementSummary(
+  modules: DeliveryModuleView[],
+  summaryItem: WorkbenchSummaryItemProjection | null,
+  acceptanceEvidence: WorkbenchAcceptanceEvidence | null = null,
+): WorkbenchDeliveryItem['acknowledgement'] {
+  const items = modules.flatMap(module => module.items)
+  const acknowledgedSubItems = items.filter(item => item.acknowledgement.acknowledged)
+  const acknowledgedCount = acknowledgedSubItems.length + (summaryItem?.acknowledgement.acknowledged ? 1 : 0)
+  const totalItems = items.length + (summaryItem ? 1 : 0)
+  const pendingCount = items.filter(item => item.acknowledgement.state === 'PENDING').length
+    + (summaryItem && summaryItem.acknowledgement.state === 'PENDING' ? 1 : 0)
+  const pendingRevisionCount = items.filter(item => item.acknowledgement.state === 'PENDING_REVISION').length
+    + (summaryItem && summaryItem.acknowledgement.state === 'PENDING_REVISION' ? 1 : 0)
+  const times = [...(summaryItem?.acknowledgement.acknowledgedAt ? [summaryItem.acknowledgement.acknowledgedAt] : []),
+    ...acknowledgedSubItems.map(item => item.acknowledgement.acknowledgedAt ?? '').filter(Boolean)].sort()
+  const whole = totalItems > 0 && acknowledgedCount === totalItems
+  const base = whole
+    ? '外层摘要与全部子条均已逐条知悉；这不等于人类验收、Task DONE 或发布授权。'
+    : '逐条知悉只表示已知悉该条当前版本，不代表理解、质量认可、人类验收、Task DONE 或发布授权；外层摘要知悉不覆盖子条。'
+  const legacy = acceptanceEvidence?.kind === 'LEGACY_ATTEMPT_ONLY'
+  return {
+    acknowledgedCount,
+    pendingCount,
+    pendingRevisionCount,
+    lastAcknowledgedAt: times.length ? times[times.length - 1]! : null,
+    note: legacy ? `${acceptanceEvidence.note} ${base}` : base,
+  }
+}
 
 /** Sum only provider reports whose identity and numeric shape match this Dispatch. */
 export function buildWorkbenchUsage(input: Pick<PersonalWorkbenchInput, 'governance' | 'executions'>): WorkbenchUsageSummary {
@@ -152,8 +275,40 @@ export function buildPersonalWorkbench(input: PersonalWorkbenchInput): PersonalW
     if (task.latestClaim || task.status === 'DONE') {
       const accepted = task.status === 'DONE' && item.latestReview?.decision === 'ACCEPT'
         && item.latestReview.reviewedAttemptNo === task.latestClaim?.attemptNo
+      const layer = accepted ? input.deliveryLayers?.[task.taskId] ?? null : null
+      const modules = buildDeliveryModules(layer ?? undefined)
+      const summaryItem: WorkbenchSummaryItemProjection | null = layer
+        ? { ...layer.summary, layer: 'SUMMARY' }
+        : null
+      // 问答元数据只做计数汇总：正文既不进工作台，也不进任何通用投影。
+      // 摘要层由 `summaryQuestions` 单独承载，因此这里的 `deliveryQuestions` 只含
+      // 证据层条目，汇总时也不会把同一条提问计两次。
+      const questionStates: DeliveryItemQuestionState[] = modules.flatMap(module => module.items)
+        .map(entry => entry.questions)
+        .filter((state): state is DeliveryItemQuestionState => Boolean(state))
+      const acceptanceEvidence: WorkbenchAcceptanceEvidence | null = layer
+        ? { kind: layer.acceptanceEvidenceKind, exactResultBound: layer.acceptanceEvidenceKind === 'EXACT_RESULT_BOUND',
+          note: layer.acceptanceEvidenceKind === 'LEGACY_ATTEMPT_ONLY'
+            ? layer.acceptanceEvidenceNote ?? LEGACY_ACCEPTANCE_FALLBACK_NOTE
+            : null }
+        : null
       deliveries.push({ taskId: task.taskId, title: task.title, status: task.status, claim: task.latestClaim,
         supervisorAccepted: accepted, supervisorDecision: item.latestReview, humanAcceptance: 'NOT_RECORDED', updatedAt: task.updatedAt,
+        deliveryConfirmed: accepted, acceptanceEvidence,
+        deliveryId: accepted ? layer?.deliveryId ?? null : null, attemptNo: accepted ? layer?.attemptNo ?? null : null,
+        kingdomId: input.kingdomId ?? null, territoryId: task.territoryId, territoryName: territory?.name ?? null,
+        supervisorBindingId: territory?.supervisorBindingId ?? null,
+        summary: summaryItem ? summaryItem.detail : null,
+        summaryItemId: summaryItem ? summaryItem.itemId : null,
+        summaryContentHash: summaryItem ? summaryItem.contentHash : null,
+        summaryAcknowledgement: summaryItem ? summaryItem.acknowledgement : null,
+        summaryQuestions: layer?.summaryQuestions ?? null,
+        modules,
+        deliveryQuestions: questionStates,
+        acknowledgement: layer
+          ? deliveryAcknowledgementSummary(modules, summaryItem, acceptanceEvidence)
+          : { acknowledgedCount: 0, pendingCount: 0, pendingRevisionCount: 0, lastAcknowledgedAt: null,
+            note: '交付尚未由主管 ACCEPT 确认，条目层与知悉不适用；执行者自述不构成交付。' },
         sourceRefs: [...taskRefs, ...(task.latestClaim ? [source('worker_results', task.latestClaim.resultId)] : []), ...(item.latestReview?.sourceRefs ?? [])].slice(0, 8) })
     }
   }
@@ -182,5 +337,29 @@ export function buildPersonalWorkbench(input: PersonalWorkbenchInput): PersonalW
   ownerQueue.totalCount += omittedAdoptions; ownerQueue.truncated ||= omittedAdoptions > 0
   return { ownerActions: ownerQueue, internalActions: queue(internalActions), exceptions: queue(exceptions), deliveries: queue(deliveries), roles: queue(roles), usage: buildWorkbenchUsage(input),
     collaboration: input.collaboration ?? { plans: queue([]), resources: queue([]), pendingAdoptionCount: 0 },
+    deliveryQuestions: deliveryQuestionSummary(deliveries),
     cost: input.cost ?? { additionalRoles: null, budget: null, prompts: queue([]), runtime: { toolDisclosureMode: 'UNKNOWN', observerAvailable: null } } }
+}
+
+/**
+ * 交付条目提问的最小元数据汇总。
+ *
+ * 只做计数与事实陈述：不声称主管已读取、不生成待办、不改变任何任务状态。
+ * 接收主管已退任、换 session 或领地改绑时，问题保持可见但计入不可达，绝不改投继任者。
+ */
+function deliveryQuestionSummary(deliveries: WorkbenchDeliveryItem[]): PersonalWorkbenchData['deliveryQuestions'] {
+  const states = deliveries.flatMap(delivery => [...(delivery.summaryQuestions ? [delivery.summaryQuestions] : []), ...delivery.deliveryQuestions])
+  const totalQuestions = states.reduce((total, state) => total + state.totalCount, 0)
+  // `pendingCount` 已排除历史版：旧版未答问题只留历史，既不冒充当前待办，
+  // 也不被算成「当前可回复但不可达」。
+  const pendingQuestions = states.reduce((total, state) => total + state.pendingCount, 0)
+  const answeredQuestions = states.reduce((total, state) => total + state.answeredCount, 0)
+  const unreachableQuestions = states.filter(state => state.latestReplyState !== null && state.latestReplyState !== 'REPLY_ACCESSIBLE'
+    && state.latestItemVersion === 'CURRENT')
+    .reduce((total, state) => total + state.pendingCount, 0)
+  const historicalQuestions = states.reduce((total, state) => total + state.historyCount, 0)
+  return { totalQuestions, pendingQuestions, answeredQuestions, unreachableQuestions, historicalQuestions,
+    note: totalQuestions
+      ? `条目提问只记录对话事实。未回复的问题在主管实际读取前只显示「待领取」：这不表示已通知或已阅读，也不代表知悉、人类验收、Task DONE 或发布授权。${historicalQuestions ? `其中 ${historicalQuestions} 条属于旧内容版本，仅留历史，不计当前待办。` : ''}问答正文只经有效人类管理窗口或当前责任主管的 session-bound Agent Tool 读取。`
+      : '当前没有条目提问记录。该汇总不含正文，也不构成待办或通知。' }
 }

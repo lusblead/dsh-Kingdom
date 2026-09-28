@@ -22,6 +22,11 @@ import { resolveGovernedWorkerRuntime } from './executor-factory.js'
 import { reserveBudgetAdmission, cancelBudgetAdmissionIfSafe, finishBudgetAdmissionInvocation, BudgetError, type BudgetAdmissionHandle } from '../core/budget.js'
 import { reserveWorkspaceAdmission, cancelWorkspaceAdmissionIfSafe, finishWorkspaceAdmissionInvocation, WorkspaceAdmissionError, type WorkspaceAdmissionHandle } from '../core/workspace-admission.js'
 import { readCollaborationReadiness, readCollaborationPlan, readPlanBudgetView } from '../core/collaboration.js'
+import {
+  capturePostAndBuildChangeManifest,
+  capturePreChangeSnapshot,
+  type DeliveryChangeManifest,
+} from '../core/delivery-change.js'
 
 export interface GovernedTaskInput {
   /** Internal current-principal check; never supplied by a model or browser. */
@@ -33,6 +38,15 @@ export interface GovernedTaskInput {
   territoryId: string
   /** Territory 工作区路径（createSession 的 meta.cwd）。 */
   cwd: string
+  /**
+   * 改动证据采集专用的 Territory canonical workspace。
+   *
+   * 与 `cwd` 严格分离：`cwd` 是既有 Runtime 输入（无 workspace 的旧 Territory 允许
+   * `process.cwd()` 回退），而差异采集**只**接受真实领地工作区。为 `null`/缺失时
+   * 本次 attempt 的改动证据记为 `NOT_SUPPORTED`（不采集、不产生链接），绝不把
+   * Runtime 的回退目录当成领地工作区。
+   */
+  changeWorkspacePath?: string | null
   taskId: string
   attemptNo: number
   supervisorBindingId: string | null
@@ -65,6 +79,11 @@ export type GovernedTaskResult =
       cleanupReceipt: CleanupReceipt
       /** Same opaque fence consumed by dispatch and settlement. */
       trustFence: RuntimeTrustFence
+      /**
+       * 本 attempt 的有界前后快照差异（实际执行副作用前 PRE，terminal 后 POST）。
+       * 采集失败时为 null：调用方不得伪造改动证据。
+       */
+      changeManifest: DeliveryChangeManifest | null
       /**
        * Owner V0.8 FINAL RELEASE BLOCKER：已由 terminal 证据验证的终态 outcome。
        * 工具层据此收敛 Claim outcome（COMPLETED/FAILED/ABORTED），**禁止 hardcode COMPLETED**。
@@ -343,6 +362,18 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     }
   }
   const text = buildWorkerPrompt(workerContext)
+  // 实际执行副作用前的有界基线：Capability Gate 已 materialize，dispatch 尚未发生。
+  //
+  // 采集只认 Territory 的 canonical workspace：`cwd` 可能因为无 workspace 的旧
+  // Territory 而回退到 `process.cwd()`，那不是领地工作区，不能签发「领地改动」。
+  // 没有可用工作区时本次 attempt 如实 `NOT_SUPPORTED`（不采集、不产生链接）。
+  const changeWorkspacePath = input.changeWorkspacePath ?? null
+  const changePre = changeWorkspacePath
+    ? capturePreChangeSnapshot({
+      workspacePath: changeWorkspacePath, taskId, attemptNo, territoryId,
+      executionId: null, leaseId: gate.lease.lease_id,
+    })
+    : null
   const run = await runGovernedDispatch({
     store, adapter, kingdomId, taskId, attemptNo, workerBindingId,
     leaseId: gate.lease.lease_id, capabilityDecisionId: gate.decision.decision_id,
@@ -373,6 +404,13 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     reason: 'governed dispatch returned no cleanup receipt',
   }
   const summary = readDshDispatchSummary(session.handle.session, run.receipt.refs.runtimeDispatchRef ?? '') || '(无最终消息文本；以 terminal 证据为准)'
+  // terminal 已确认、WorkerResult 尚未落账：此处冻结 POST 并生成有界差异。
+  const changeManifest = changePre && changeWorkspacePath
+    ? capturePostAndBuildChangeManifest({
+      workspacePath: changeWorkspacePath, pre: changePre, taskId, attemptNo, territoryId,
+      executionId: run.execution.execution_id, leaseId: gate.lease.lease_id, dispatchId: run.intent.dispatch_id,
+    })
+    : null
   //    terminalOutcome = 已由 terminal 证据验证的终态（execution 终态由 recordTerminalEvidence 落账）。
   const terminalOutcome = run.terminal.execution.state as 'COMPLETED' | 'FAILED' | 'ABORTED'
   return {
@@ -385,6 +423,7 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
     summary,
     cleanupReceipt,
     trustFence: run.trustFence,
+    changeManifest,
     terminalOutcome,
   }
   } finally {

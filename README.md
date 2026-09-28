@@ -5,7 +5,7 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/lusblead/dsh-Kingdom/releases)
+[![Version](https://img.shields.io/badge/version-3.0.0%20local%20candidate-blue)](docs/V3.0-RELEASE-NOTES.md)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.5--rc-orange)](#1-前置要求)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#1-前置要求)
@@ -16,7 +16,7 @@
 
 ## 这是什么？
 
-2.0 提供围绕任务和交付的个人工作台、独立人类管理窗口、按需小团队协作、用量与软预算。查看 [2.0 使用指南](docs/V2.0-USER-GUIDE.md) 和 [版本说明及验证范围](docs/V2.0-RELEASE-NOTES.md)。默认单执行者；工具按需展示关闭，协作须明确采纳。
+3.0.0 在已有 2.0 个人工作台之上，加入 Owner 交付清单：逐条查看、知悉、核对主管确认的改动证据，并就具体条目向接受交付的主管提问。交付由 Owner 主动查看，宰相目前不会自动上报。查看 [3.0 使用指南](docs/V3.0-USER-GUIDE.md)、[版本说明与验证范围](docs/V3.0-RELEASE-NOTES.md) 和 [功能介绍](docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md)。这轮功能曾在仍标为 2.0.0 的本地开发包中提前安装验证；3.0.0 候选尚未在 npm/GitHub Releases 发布。已有任务、协作、用量与软预算能力见 [2.0 指南](docs/V2.0-USER-GUIDE.md)。
 
 **dsh-Kingdom 是一个 DeepSeek Harness（DSH）插件**：产品目标是在不另行部署外部服务、独立数据库或单独 GUI 前端的前提下，在 DSH 中**创建并运行一个属于自己的最小王国**——
 
@@ -45,6 +45,8 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 | 🏛 **完整角色体系** | Owner / Chancellor / Supervisor / Worker，角色与 Session / 模型解耦 |
 | 📋 **治理闭环语义** | 规划 → 分配 → 独立执行 → 验收，任务状态全程留痕 |
 | ⚖️ **Claim ≠ Fact** | **Worker 说自己完成了 ≠ 任务完成**——完成权只在 Supervisor，代码强制，不是口头约定 |
+| 👁️ **Owner 逐条知悉与提问**（3.0） | 交付摘要和细项独立呈现；知悉只记录 Owner 声明已知道该内容版本，不代替质量认可或任务完成；问题记在接受该交付的主管名下，待其主动读取并回复 |
+| 🧾 **改动证据**（3.0） | 主管确认属于本交付的文件改动可展开查看，包括有界的未提交差异快照；标明证据级别，不把 Git 时间窗口误称为 Worker 作者证明 |
 | 👷 **Persistent Governed Worker** | 候选源码的 canonical headless 路径使用 `kingdom_start_task_governed`：Worker 绑定长期 DSH Session，结果结构化返回并经 Capability/Lease 治理 |
 | 🔁 **返工留痕** | governed REWORK 复用同一 Worker Persistent Session；每次尝试（attempt）都有独立 Lease/Execution 记录 |
 | 💾 **持久化与恢复语义** | 状态写入本地 SQLite；真实 DSH 重启恢复与正式数据库本轮未验证（`NOT_RUN`） |
@@ -61,25 +63,19 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 1. 前置要求
 
-- **DeepSeek Harness（dsh）** `0.1.5-rc` 系列；本版验证 CLI `0.1.5-rc.1` 和主要组件 `0.1.5-rc.2`，旧宿主请继续使用对应旧版插件
+- **DeepSeek Harness（dsh）**：本版 peer 声明覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成，`0.1.7-rc` 的实机加载验证另记（见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）。旧宿主请继续使用对应旧版插件
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
-### 2. 安装 v2.0.0
+### 2. 安装 v3.1.0 本地候选
 
-**方式 A：npm**
-
-```bash
-dsh plugin --profile web add dsh-kingdom@2.0.0 --registry=https://registry.npmjs.org
-```
-
-**方式 B：从 GitHub Releases 下载 tgz**
-
-从 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 下载 `dsh-kingdom-2.0.0.tgz`，然后：
+本候选尚未公开发布；先从当前源码构建并取得准确的 `dsh-kingdom-3.1.0.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-2.0.0.tgz
+dsh plugin --profile web add ./dsh-kingdom-3.1.0.tgz
 ```
+
+安装后重启 Web profile 才会加载新包。不要将本地候选的版本号当作 npm 或 GitHub Releases 已可下载的证据。
 
 内置 GUI 随 `lib/**` 包含在 tgz 中，不需要额外 GUI zip：
 
@@ -201,7 +197,8 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 0.8.0 | Persistent Governed Worker、Capability/Lease/Dispatch/Recovery | ✅ 已发布 |
 | 0.9.0-alpha.1 | 内置可操作 GUI 最小闭环 | 本地源码阶段，尚未发布 |
 | 1.0.0 | 王国地图、管理中心、王国账本、移交、沙箱与诚实的执行控制投影 | ✅ 已发布 |
-| 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 当前版本；收益测量见版本说明 |
+| 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 上一版本；发布状态以 Releases 为准 |
+| 3.0.0 | Owner 交付清单、逐条知悉、主管确认的改动证据、条目问答 | 当前本地候选；尚未公开发布 |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 
@@ -209,8 +206,10 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 
 ## 📖 文档
 
-- [2.0 使用指南](docs/V2.0-USER-GUIDE.md) — 安装、首次配置、日常任务、协作与恢复
-- [2.0 版本说明](docs/V2.0-RELEASE-NOTES.md) — 新功能、修复及实际验证范围
+- [3.0 使用指南](docs/V3.0-USER-GUIDE.md) — 交付清单、知悉、查看改动与条目问答
+- [3.0 版本说明](docs/V3.0-RELEASE-NOTES.md) — 新增内容及实际验证范围
+- [3.0 功能介绍](docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md) — 面向使用者的文章草稿
+- [2.0 使用指南](docs/V2.0-USER-GUIDE.md) — 上一版本的日常任务、协作与恢复
 - [v1.0 GUI 快速开始](docs/v1.0/GUI_QUICK_START.md) — 历史版本参考
 - [LICENSE](LICENSE) — AGPL-3.0-or-later
 

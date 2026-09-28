@@ -12,7 +12,13 @@ import { readAdditionalRoleCost, readLatestPromptCosts } from '../core/cost.js'
 import { readBudgetView } from '../core/budget.js'
 import { listCollaborationPlans, readCollaborationReadiness, readPlanBudgetView, type CollaborationReadiness } from '../core/collaboration.js'
 import { readWorkspaceReservations } from '../core/workspace-admission.js'
-import { buildPersonalWorkbench, type PersonalWorkbenchInput } from './workbench.js'
+import {
+  buildPersonalWorkbench,
+  type PersonalWorkbenchInput,
+  type WorkbenchDeliverySource,
+  type WorkbenchDeliveryItemProjection,
+  type WorkbenchSummaryItemProjection,
+} from './workbench.js'
 import type {
   AffinityView,
   AllowedAction,
@@ -32,6 +38,7 @@ import type {
   ExecutionProjectionData,
   ExecutionProjectionSummary,
   ExecutionView,
+  DeliveryItemQuestionState,
   LeaseView,
   OrganizationProjectionData,
   OrganizationRoleSummary,
@@ -73,6 +80,23 @@ import {
 import { asExecutionState, isLiveExecutionState, isTerminalExecutionState } from '../core/execution.js'
 import { asTaskStatus } from '../core/task.js'
 import { parseExecutionProfile } from '../core/binding.js'
+import {
+  CHANGE_EVIDENCE_LABEL,
+  DELIVERY_QUESTION_EVENT_TYPES,
+  classifyAcceptedDelivery,
+  deliveryAcknowledgementView,
+  deliveryIdFor,
+  deliveryQuestionThreadForItem,
+  deriveDeliveryItems,
+  readDeliveryAcknowledgements,
+  readDeliveryQuestionThread,
+  readLatestReviewEvent,
+  redactCredentialText,
+  toDeliveryQuestionEventPayload,
+  type DeliveryAcceptanceEvidenceKind,
+  type DeliveryChangeEvidenceInput,
+} from '../core/delivery-ack.js'
+import { readAcceptedChangeEvidence, resolveChangeEvidenceForDelivery } from '../core/delivery-change.js'
 
 // ── 行 → 视图 ───────────────────────────────────────────────────
 
@@ -132,8 +156,7 @@ function sanitizePublicJsonString(
   sensitivity: 'public-content' | 'private-config' = 'public-content',
 ): string {
   if (sensitivity === 'private-config') return REDACTED_JSON_VALUE
-  const redacted = value
-    .replace(/(?:authorization|bearer|session(?:[_ .-]?id)?|principal(?:[_ .-]?id)?|private(?:[_ .-]?config)?|token|cookie|credential|secret|password|api[_ .-]?key|access[_ .-]?key|client[_ .-]?secret|connection[_ .-]?string|csrf)\b(?:\s*["']?\s*(?:=|:)\s*["']?\s*|\s+)[^\s,;&}]+/giu, REDACTED_JSON_VALUE)
+  const redacted = redactCredentialText(value)
     .replace(/[A-Za-z]:[\\/][^\s<>"']*/gu, '[redacted-path]')
     .replace(/\\\\[^\s<>"']*/gu, '[redacted-path]')
     .replace(/(^|[\s("'=])\/[^\s<>"']*/gu, '$1[redacted-path]')
@@ -501,6 +524,14 @@ export function buildActionAvailability(
   })
 }
 
+/**
+ * 事件 → 公开投影。
+ *
+ * 交付问答事件的正文**只**经受权入口返回：Owner 窗口走
+ * `OwnerDecisionController.readDeliveryQuestions`，主管走 session-bound Agent Tool
+ * 的账本读取。因此快照、TaskDetail.relatedEvents、recentEvents 与任何事件轮询/SSE
+ * 都只保留不含正文的最小元数据，绝不透传 `questionText`/`replyText`。
+ */
 export function toEventView(row: EventRow): EventView {
   return {
     seq: row.seq,
@@ -510,7 +541,9 @@ export function toEventView(row: EventRow): EventView {
     actorId: row.actor_id,
     targetType: row.target_type,
     targetId: row.target_id,
-    payload: sanitizePublicJsonObject(parseJson(row.payload_json)),
+    payload: DELIVERY_QUESTION_EVENT_TYPES.includes(row.event_type)
+      ? sanitizePublicJsonObject(toDeliveryQuestionEventPayload(row))
+      : sanitizePublicJsonObject(parseJson(row.payload_json)),
     createdAt: row.created_at,
   }
 }
@@ -1753,6 +1786,116 @@ function readTaskReviewEvents(store: KingdomStore, kingdomId: string, taskId: st
     .all(kingdomId, taskId, limit) as unknown as EventRow[]
 }
 
+/**
+ * 已确认交付的条目层投影。
+ *
+ * 只有同一 Task/attempt 主管 ACCEPT（`acceptedDelivery`）后才生成条目层；
+ * Worker Claim 永远不会让这里产生条目。本函数只读取既有事件与 Claim，
+ * 不写入任何事实，也不创建新的验收状态库。
+ */
+function buildWorkbenchDeliveryLayers(
+  store: KingdomStore,
+  kingdomId: string,
+  tasks: TaskRow[],
+  present: boolean,
+): Record<string, WorkbenchDeliverySource> {
+  const layers: Record<string, WorkbenchDeliverySource> = {}
+  if (!present) return layers
+  const ownerId = store.getDefaultKingdom()?.owner_id ?? ''
+  const publicId = (id: string): string => publicReferenceId(id) ?? 'redacted'
+  /** 当前 Task 的条目提问元数据；每个 Task 重新填充，不跨交付混用。 */  const itemQuestions = new Map<string, DeliveryItemQuestionState | null>()
+  /**
+   * 已由主管确认、且本地内容寻址证据 hash 重验通过的改动证据。
+   * 缺失或漂移一律返回 null：投影显示「不可定位」，不退回执行者自述。
+   */
+  const changeEvidenceFor = (taskId: string): DeliveryChangeEvidenceInput | null => {
+    const ref = readAcceptedChangeEvidence(readLatestReviewEvent(store, kingdomId, taskId))
+    return ref ? resolveChangeEvidenceForDelivery(undefined, ref) : null
+  }
+  const project = (item: import('../core/delivery-ack.js').DeliveryItem, acknowledgements: import('../core/delivery-ack.js').DeliveryAcknowledgement[]): WorkbenchDeliveryItemProjection => {
+    const view = deliveryAcknowledgementView(acknowledgements, item, ownerId)
+    const change = item.content.change
+    return {
+      itemId: item.itemId,
+      contentHash: item.contentHash,
+      label: boundedText(item.content.label),
+      detail: boundedText(item.content.detail),
+      change: {
+        kind: change.kind,
+        repoPath: change.repoPath,
+        revision: change.revision,
+        reasonCode: boundedText(change.reasonCode) || null,
+        note: boundedText(change.note),
+        // 只投影精确引用与固定标注；差异正文永远不进入工作台投影。
+        evidenceId: change.evidenceId ?? null,
+        entryId: change.entryId ?? null,
+        evidenceLabel: change.kind === 'REPO_RELATIVE_VERIFIED' ? CHANGE_EVIDENCE_LABEL : null,
+        coverageNote: boundedText(change.coverageNote) || null,
+      },
+      acknowledgement: { ...view, acknowledgedByOwnerId: view.acknowledgedByOwnerId ? publicId(view.acknowledgedByOwnerId) : null },
+      // 问答只投影计数与接收主管可达性；问题与回复正文永不进入工作台或通用投影。
+      questions: itemQuestions.get(item.itemId) ?? null,
+    }
+  }
+  for (const task of tasks) {
+    const claim = store.latestWorkerResult(task.task_id)
+    if (!claim) continue
+    const review = readLatestReviewEvent(store, kingdomId, task.task_id)
+    const classification = classifyAcceptedDelivery(store, claim, review)
+    if (!classification) continue
+    const deliveryId = deliveryIdFor(task.task_id)
+    const acknowledgements = readDeliveryAcknowledgements(store, kingdomId, deliveryId)
+    const derived = deriveDeliveryItems(task.task_id, claim, changeEvidenceFor(task.task_id))
+    const summary = derived.find(item => item.content.layer === 'SUMMARY')
+    if (!summary) continue
+    const thread = readDeliveryQuestionThread(store, kingdomId, deliveryId)
+    itemQuestions.clear()
+    for (const item of derived) {
+      const state = deliveryItemQuestionState(deliveryQuestionThreadForItem(thread, item.itemId, item.contentHash))
+      if (state) itemQuestions.set(item.itemId, state)
+    }
+    // 摘要层的提问单独投影到 `summaryQuestions`；内部的 `questions` 置空，避免
+    // 同一条提问在卡片层与 `deliveryQuestions` 汇总里被重复计数。
+    const summaryQuestions = itemQuestions.get(summary.itemId) ?? null
+    itemQuestions.set(summary.itemId, null)
+    layers[publicId(task.task_id)] = {
+      deliveryId,
+      attemptNo: claim.attempt_no,
+      acceptanceEvidenceKind: classification.kind,
+      acceptanceEvidenceNote: classification.legacyNote,
+      summaryQuestions,
+      summary: { ...project(summary, acknowledgements), questions: null, layer: 'SUMMARY' } as WorkbenchSummaryItemProjection,
+      evidence: derived.filter(item => item.content.layer === 'EVIDENCE').map(item => project(item, acknowledgements)),
+    }
+  }
+  return layers
+}
+
+/**
+ * 条目提问元数据投影。
+ *
+ * 只保留计数、时间与最近一条问题的接收主管可达性；正文留在 Core 内，只有有效
+ * Owner 窗口或当前责任主管的 session-bound Agent Tool 能读到。
+ */
+function deliveryItemQuestionState(thread: import('../core/delivery-ack.js').DeliveryItemQuestionThread | null): DeliveryItemQuestionState | null {
+  if (!thread || !thread.questions.length) return null
+  const asked = thread.questions.map(question => question.askedAt).sort()
+  const replied = thread.questions.filter(question => question.reply).map(question => question.reply!.repliedAt).sort()
+  const latest = thread.questions[thread.questions.length - 1]!
+  return {
+    threadId: thread.deliveryId + ':' + thread.itemId,
+    totalCount: thread.questions.length,
+    pendingCount: thread.pendingCount,
+    answeredCount: thread.answeredCount,
+    historyCount: thread.historyCount,
+    lastAskedAt: asked[asked.length - 1] ?? null,
+    lastRepliedAt: replied.length ? replied[replied.length - 1]! : null,
+    latestReplyState: latest.replyState,
+    latestItemVersion: latest.itemVersion,
+    currentContentHash: thread.currentContentHash,
+  }
+}
+
 /** Canonical reads remain here; the workbench builder only receives public projection values. */
 function buildWorkbenchCollaboration(store: KingdomStore, kingdomId: string, present: boolean): WorkbenchCollaborationView {
   const publicId = (id: string): string => publicReferenceId(id) ?? 'redacted'
@@ -1825,6 +1968,8 @@ function buildWorkbenchData(
   governance.leases = governance.leases.map(lease => ({ ...lease, leaseId: publicId(lease.leaseId), taskId: publicId(lease.taskId) }))
   return buildPersonalWorkbench({
     kingdomPresent: present,
+    // 只投影可与 Owner 授权输入比较的同一 ID；非法形式返回 null，工作台不生成兜底范围。
+    kingdomId: present ? publicReferenceId(kingdomId) : null,
     bindings: bindings.map(binding => ({ bindingId: publicId(binding.binding_id), roleType: boundedText(binding.role_type), roleName: boundedText(binding.role_name),
       status: boundedText(binding.status), sessionBound: binding.session_id !== null })),
     territories: territories.map(territory => ({ territoryId: publicId(territory.territory_id), name: boundedText(territory.name), status: boundedText(territory.status),
@@ -1835,6 +1980,7 @@ function buildWorkbenchData(
     governance,
     cost: buildWorkbenchCost(store, kingdomId, present, costRuntime),
     collaboration: buildWorkbenchCollaboration(store, kingdomId, present),
+    deliveryLayers: buildWorkbenchDeliveryLayers(store, kingdomId, tasks, present),
   })
 }
 

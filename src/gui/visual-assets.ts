@@ -26,6 +26,22 @@ export const GUI_ICONS = Object.freeze({
   idle: ICON_OPEN + '<circle cx="12" cy="12" r="10" />' + ICON_CLOSE,
   unknown: ICON_OPEN + '<circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" />' + ICON_CLOSE,
   empty: ICON_OPEN + '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />' + ICON_CLOSE,
+  /** 交付条目「查看改动」：无可见文字时必须有 aria-label 或 title。 */
+  change: ICON_OPEN + '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M9 15h6" /><path d="M9 11h3" />' + ICON_CLOSE,
+  /** 「查看改动」可信度：不可定位（不可当作安全链接）。 */
+  unlocated: ICON_OPEN + '<circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" />' + ICON_CLOSE,
+  /** 交付知悉状态：已知悉。 */
+  known: ICON_OPEN + '<circle cx="12" cy="12" r="10" /><path d="m16 9-5.5 5.5L8 12" />' + ICON_CLOSE,
+  /** 交付知悉状态：待知悉（当前版本）。 */
+  pending: ICON_OPEN + '<circle cx="12" cy="12" r="10" /><path d="M12 8v4" /><path d="M12 16h.01" />' + ICON_CLOSE,
+  /** 交付知悉状态：已有旧版本知悉，当前版本待知悉。 */
+  revised: ICON_OPEN + '<circle cx="12" cy="12" r="10" /><path d="M12 7v5l3 3" />' + ICON_CLOSE,
+  /** 逐条知悉：一次只记当前版本。 */
+  acknowledge: ICON_OPEN + '<path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />' + ICON_CLOSE,
+  /** 复制本条 Owner 激活命令：只复制 direct 命令文本，不授权也不写入。 */
+  copy: ICON_OPEN + '<rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />' + ICON_CLOSE,
+  /** 就交付条目提问：打开 canonical Owner 窗口并预选该条；提问与回复各记一条事实。 */
+  ask: ICON_OPEN + '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" />' + ICON_CLOSE,
 });
 
 /** Original gate-and-organization brand mark; the adjacent wordmark supplies its name. */

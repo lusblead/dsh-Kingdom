@@ -1,7 +1,7 @@
 {
   "name": "dsh-kingdom",
-  "version": "2.0.0",
-  "description": "个人 Agent 工作台：任务与交付、独立人类管理窗口、有界协作、权限与资源约束、用量和软预算；Worker Claim 经过主管审查才成为事实。",
+  "version": "3.1.0",
+  "description": "个人 Agent 工作台：任务交付可逐条查看、知悉与提问，改动证据可追溯；Worker Claim 仍须主管审查才成为事实。",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -20,7 +20,11 @@
     "THIRD_PARTY_NOTICES.md",
     "ASSETS_NOTICE.md",
     "docs/V2.0-USER-GUIDE.md",
-    "docs/V2.0-RELEASE-NOTES.md"
+    "docs/V2.0-RELEASE-NOTES.md",
+    "docs/V3.0-USER-GUIDE.md",
+    "docs/V3.0-RELEASE-NOTES.md",
+    "docs/V3.1-RELEASE-NOTES.md",
+    "docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md"
   ],
   "license": "AGPL-3.0-or-later",
   "publishConfig": {
@@ -52,10 +56,10 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.1 <0.1.5",
-    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.1.5",
-    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.1 <0.1.5",
-    "@deepseek-ai/dsh-token-meter": ">=0.1.5-rc.2 <0.1.5",
+    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.1 <0.1.6-0 || >=0.1.7-0 <0.1.8-0",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1 <0.1.6-0 || >=0.1.7-0 <0.1.8-0",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.1 <0.1.6-0 || >=0.1.7-0 <0.1.8-0",
+    "@deepseek-ai/dsh-token-meter": ">=0.1.5-rc.2 <0.1.6-0 || >=0.1.7-0 <0.1.8-0",
     "@deepseek-ai/cordis": ">=4.0.0-rc <5",
     "@deepseek-ai/schemastery": "^3.18.0"
   },

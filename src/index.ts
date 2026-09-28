@@ -65,6 +65,7 @@ import { createTerritory, deleteTerritory, listTerritories, setTerritorySupervis
 import {
   abortExecution,
   assignTask,
+  describeTaskChangeCandidates,
   listTasks,
   pauseExecution,
   planTask,
@@ -76,6 +77,21 @@ import {
   type CommandContext,
   type Principal,
 } from './core/task-service.js'
+import {
+  DELIVERY_CHANGE_SNAPSHOT_EVENT_TYPE,
+  changeSnapshotEventId,
+  changeSnapshotEventPayload,
+  readAcceptedChangeEvidence,
+  resolveChangeEvidenceForDelivery,
+} from './core/delivery-change.js'
+import {
+  DELIVERY_QUESTION_UNCLAIMED,
+  readDeliveryQuestionInboxForSession,
+  readLatestReviewEvent,
+  readQuestionById,
+  replyToDeliveryQuestion,
+  type DeliveryChangeEvidenceInput,
+} from './core/delivery-ack.js'
 import { buildSnapshot, buildTaskDetail, toEventView } from './gui/snapshot.js'
 import { startGuiServer, type GuiServerAddress } from './gui/server.js'
 import {
@@ -93,7 +109,7 @@ import {
   parseStrictJsonObject,
 } from './gui/control-contract.js'
 import { LOCAL_CONTROL_LAUNCH_PATH, LocalControlManager } from './gui/local-control.js'
-import { OwnerLocalControlManager } from './gui/owner-control.js'
+import { OwnerLocalControlManager, validateLaunchAckHint } from './gui/owner-control.js'
 import { OwnerDecisionController, type OwnerDecisionInput } from './core/owner-window.js'
 import type { SubagentsLike } from './worker/dsh-subagent.js'
 import { resolveWorkerExecution } from './worker/executor-factory.js'
@@ -168,6 +184,106 @@ export interface KingdomDshSessionRegistryLike {
 export interface KingdomDshRegistrySeam {
   agents?: KingdomDshAgentRegistryLike | null
   sessions?: KingdomDshSessionRegistryLike | null
+}
+
+/**
+ * v3.1：direct Owner 写入的**目标会话**存在性证明通道。
+ *
+ * `agents`/`sessions` 注册表只能证明“此刻存在 live Agent”。Owner 常需要先把席位
+ * 绑给一个刚创建、尚未产生任何消息的会话——它的 Agent 可能已被宿主回收（disposal
+ * 会把 Agent 移出注册表，`AgentStatus` 本身只有 idle|running），于是旧写法只能报
+ * SESSION_ABSENT。本 seam 用 DSH 持久会话观察补充“该 session_id 属于本机 DSH”这
+ * 一更弱但真实的证明。
+ *
+ * 它不产生 Role Authority，也不放宽调用者身份校验（`resolveTrustedToolSession`
+ * 仍然要求 live Agent）。
+ */
+export interface KingdomDurableSessionProbe {
+  /** `notFound` 与“无法判定”必须区分：前者可判 ABSENT，后者只能 UNKNOWN 并 fail-closed。 */
+  observe(sessionId: string): Promise<
+    | { readonly ok: true }
+    | { readonly ok: false; readonly notFound: boolean; readonly reason: string }
+  >
+}
+
+export type DirectTargetSessionClassification = 'LIVE' | 'REGISTERED_UNSTARTED'
+
+export type DirectTargetSessionResolution =
+  | {
+      readonly ok: true
+      readonly classification: 'LIVE'
+      readonly sessionId: string
+      readonly agent: KingdomDshAgentLike
+      readonly session: { readonly id?: unknown }
+    }
+  | {
+      readonly ok: true
+      readonly classification: 'REGISTERED_UNSTARTED'
+      readonly sessionId: string
+      readonly detail: string
+    }
+  | {
+      readonly ok: false
+      readonly classification: Exclude<TargetSessionClassification, 'ACTIVE'>
+      readonly reason: string
+    }
+
+/**
+ * 解析 direct `/kingdom role.bind|role.session` 的**目标**会话。
+ *
+ * live Agent 优先；**只有** ABSENT（注册表里没有这条 live Agent）才回退到持久会话
+ * 存在性证明。FOREIGN / MULTIPLE / EXPIRED / UNKNOWN 表示身份不一致或无法判定，
+ * 一律保持 fail-closed，绝不因为“可能是它”而放行。
+ */
+export async function resolveDirectTargetSession(
+  sessionId: string,
+  seam: KingdomDshRegistrySeam,
+  probe: KingdomDurableSessionProbe | null,
+): Promise<DirectTargetSessionResolution> {
+  if (!exactRuntimeToken(sessionId)) {
+    return { ok: false, classification: 'ABSENT', reason: 'session_id 必须是非空 exact token。' }
+  }
+  const live = validateLiveDirectSession(sessionId, seam)
+  if (live.ok) {
+    return {
+      ok: true,
+      classification: 'LIVE',
+      sessionId: live.sessionId,
+      agent: live.agent,
+      session: live.session,
+    }
+  }
+  if (live.classification !== 'ABSENT') {
+    return { ok: false, classification: live.classification, reason: live.reason }
+  }
+  if (probe === null) {
+    return {
+      ok: false,
+      classification: 'ABSENT',
+      reason: `${live.reason}；宿主未提供持久会话观察通道，无法证明该会话属于本机 DSH。`,
+    }
+  }
+  const durable = await probe.observe(sessionId)
+  if (durable.ok) {
+    return {
+      ok: true,
+      classification: 'REGISTERED_UNSTARTED',
+      sessionId,
+      detail: '该会话已在本机 DSH 持久会话存储中登记，但当前没有 live Agent；席位写入后，该会话真正启动前不能执行。',
+    }
+  }
+  if (durable.notFound) {
+    return {
+      ok: false,
+      classification: 'ABSENT',
+      reason: `${live.reason}；本机持久会话存储中也没有该 session_id。`,
+    }
+  }
+  return {
+    ok: false,
+    classification: 'UNKNOWN',
+    reason: `${live.reason}；持久会话存在性无法判定：${durable.reason}`,
+  }
 }
 
 export interface KingdomToolExecutionLike {
@@ -583,10 +699,93 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
   const commandContext = (kingdomId: string, principal?: Principal): CommandContext =>
     ({ kingdomId, auth: authView, ...principal ? { principal } : {} })
 
+  /**
+   * 改动证据专用上下文：只对**显式改动选择**与候选查看入口强制 session-bound。
+   *
+   * 默认产品配置是 `declarative`，此时 `commandContext` 只确认存在角色绑定；改动
+   * 证据要求「真实、当前、同领地 Supervisor session」，若继续用弱鉴权，任何本地
+   * 调用者都能签发「主管确认的改动证据」。这里只把这两个入口升级为 session-bound
+   * （身份仍由既有 `resolveTaskSupervisor` 在 Core 内核对），不顺手修改全局 P0-D
+   * 鉴权策略，普通 review/ACCEPT 语义完全不变。取不到 ACTIVE session 时不放行。
+   */
+  const sessionBoundAuthView: AuthView = {
+    mode: 'session-bound',
+    trustLevel: 'session-verified',
+    note: '命令调用方的 session 必须与角色 binding 的 session_id 一致。',
+  }
+  const changeEvidenceContext = (kingdomId: string, exec: KingdomToolExecutionLike): CommandContext => {
+    const principal = trustedToolPrincipal(exec)
+    return { kingdomId, auth: sessionBoundAuthView, ...principal ? { principal } : {} }
+  }
+
+  /**
+   * 交付问答专用上下文：与改动证据同款，**默认 declarative 配置下也必须**由真实、
+   * 当前、可信的 ACTIVE session 证明主管身份，再由 Core 核对它是否正是该交付的接收者。
+   *
+   * 绝不从 caller 自报的 session_id 授权：`trustedToolPrincipal` 只接受 DSH Runtime
+   * 注册表可核对的 ACTIVE session；取不到时不放行（Core 侧 fail-closed）。
+   */
+  const deliveryQuestionContext = (kingdomId: string, exec: KingdomToolExecutionLike): CommandContext => {
+    const principal = trustedToolPrincipal(exec)
+    return { kingdomId, auth: sessionBoundAuthView, ...principal ? { principal } : {} }
+  }
+
   const dshRegistrySeam = (): KingdomDshRegistrySeam => ({
     agents: ctx.get('agents') as KingdomDshAgentRegistryLike | undefined,
     sessions: ctx.get('sessions') as KingdomDshSessionRegistryLike | undefined,
   })
+
+  /**
+   * v3.1：持久会话存在性证明。DSH 未挂载 `sessionQuery` 时返回 null，
+   * 此时目标会话解析退化为原来的 live Agent 单一路径（fail-closed 不变）。
+   */
+  const durableSessionProbe = (): KingdomDurableSessionProbe | null => {
+    const query = ctx.get('sessionQuery') as
+      | { observeSession?: (sessionId: string, options?: { projectionMode?: 'all' | 'none' }) => Promise<unknown> }
+      | undefined
+    if (!query || typeof query.observeSession !== 'function') return null
+    const observeSession = query.observeSession.bind(query)
+    return {
+      observe: async (sessionId: string) => {
+        let observation: unknown
+        try {
+          observation = await observeSession(sessionId, { projectionMode: 'none' })
+        } catch (error: unknown) {
+          const code = (error as { code?: unknown } | null | undefined)?.code
+          if (code === 'SESSION_QUERY_SESSION_NOT_FOUND') {
+            return { ok: false as const, notFound: true, reason: '持久会话存储中没有该 session_id' }
+          }
+          return {
+            ok: false as const,
+            notFound: false,
+            reason: error instanceof Error ? error.message : String(error),
+          }
+        }
+        try {
+          const header = (observation as { header?: { id?: unknown } } | null | undefined)?.header
+          const headerId = header?.id
+          if (typeof headerId !== 'string' || headerId !== sessionId) {
+            return {
+              ok: false as const,
+              notFound: false,
+              reason: 'observation header.id 与请求的 session_id 不一致',
+            }
+          }
+          return { ok: true as const }
+        } finally {
+          const lease = observation as { [Symbol.dispose]?: () => void } | null | undefined
+          const dispose = lease?.[Symbol.dispose]
+          if (typeof dispose === 'function') {
+            try {
+              dispose.call(observation)
+            } catch {
+              // 观察租约释放失败不影响本次存在性判定
+            }
+          }
+        }
+      },
+    }
+  }
 
   const trustedToolPrincipal = (exec: KingdomToolExecutionLike): Principal | undefined => {
     const resolved = resolveTrustedToolSession(exec, dshRegistrySeam())
@@ -833,7 +1032,12 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     try {
       result = await runGovernedTask({
         store, adapter, kingdomId, workerBindingId: worker,
+        // R4 范围回退：Runtime 输入保持既有行为——无 workspace 的旧 Territory 仍以
+        // `process.cwd()` 作为 createSession 的 cwd，执行/错误路径不变。
         territoryId: loadedTask.territory_id, cwd: territory.workspace_path ?? process.cwd(),
+        // 差异采集**不复用**该回退值：单独传入 Territory 的 canonical workspace；
+        // 缺失时采集端如实 `NOT_SUPPORTED`，绝不把插件安装目录当成领地工作区。
+        changeWorkspacePath: territory.workspace_path ?? null,
         taskId: loadedTask.task_id, attemptNo, supervisorBindingId: supervisor.binding.binding_id,
         grant: parsedGrant.grant, requirementJson: store.getTaskCapabilityRequirement(loadedTask.task_id),
         sandboxMode,
@@ -922,6 +1126,24 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     const outcome = result.terminalOutcome
     const summary = result.summary
     submitGovernedClaim(store, result.dispatchId, summary)
+    // 改动快照事件：只记 task/attempt/result、manifest/hash 与有界元数据。
+    // 仓库正文留在专用本地证据目录；这里不写任何正文。
+    if (result.changeManifest) {
+      const claimRow = store.latestWorkerResult(loadedTask.task_id)
+      if (claimRow && claimRow.attempt_no === attemptNo && !store.getEventById(changeSnapshotEventId(kingdomId, loadedTask.task_id, attemptNo, result.executionId))) {
+        store.appendEvent({
+          event_id: changeSnapshotEventId(kingdomId, loadedTask.task_id, attemptNo, result.executionId),
+          kingdom_id: kingdomId,
+          event_type: DELIVERY_CHANGE_SNAPSHOT_EVENT_TYPE,
+          actor_role: 'SUPERVISOR',
+          actor_id: supervisor.binding.binding_id,
+          target_type: 'task',
+          target_id: loadedTask.task_id,
+          payload_json: JSON.stringify(changeSnapshotEventPayload(result.changeManifest, claimRow.result_id)),
+          created_at: new Date().toISOString(),
+        })
+      }
+    }
     await collectDispatchUsage(result.dispatchId)
     const recoveryNotice = settledLease?.state === 'RECOVERING'
       ? result.cleanupReceipt.status === 'CONFIRMED'
@@ -1486,22 +1708,131 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       decision: { type: 'string', required: true, description: 'ACCEPT / REWORK / FAIL / HANDOFF' },
       reason: { type: 'string', description: '裁定理由；REWORK/FAIL/HANDOFF 必填' },
       to_binding_id: { type: 'string', description: 'HANDOFF 专用：目标 Worker binding id（ACTIVE）' },
+      change_evidence_id: { type: 'string', description: 'ACCEPT 专用：主管显式选择改动证据时的 evidence id（先用 kingdom_delivery_changes 查看候选）' },
+      change_entry_ids: { type: 'array', items: { type: 'string' }, description: 'ACCEPT 专用：显式选择属于本次交付的改动条目 id；与 change_evidence_id 同时给出，普通 ACCEPT 不自动确认全部差异' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
-    async execute(args: { task_id: string; decision: string; reason?: string; to_binding_id?: string }, exec: { agent?: { session?: { id?: string } } | null }) {
+    async execute(args: { task_id: string; decision: string; reason?: string; to_binding_id?: string; change_evidence_id?: string; change_entry_ids?: string[] }, exec: { agent?: { session?: { id?: string } } | null }) {
       const kingdomId = requireKingdom()
       if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
-      return reviewTask(store, commandContext(kingdomId, trustedToolPrincipal(exec)), {
+      if (args.change_entry_ids !== undefined && (!Array.isArray(args.change_entry_ids) || args.change_entry_ids.some(id => typeof id !== 'string'))) {
+        return 'INPUT_DENIED [CHANGE_SELECTION_INVALID]: change_entry_ids 必须是字符串数组。'
+      }
+      // 只有显式改动选择才切换到 session-bound 上下文；普通 ACCEPT/REWORK/FAIL/HANDOFF
+      // 继续使用既有（可能 declarative）上下文，语义不变。
+      const selectingChange = args.change_evidence_id !== undefined || args.change_entry_ids !== undefined
+      const context = selectingChange
+        ? changeEvidenceContext(kingdomId, exec)
+        : commandContext(kingdomId, trustedToolPrincipal(exec))
+      return reviewTask(store, context, {
         taskId: args.task_id,
         decision: args.decision,
         reason: args.reason,
         to_binding_id: args.to_binding_id,
+        change_evidence_id: args.change_evidence_id,
+        change_entry_ids: args.change_entry_ids,
       }).message
     },
   })), 'dsh-kingdom: review-task tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_delivery_changes',
+    description: '只读列出当前 Task/attempt 的有界改动候选（真实 session-bound 主管专用）：改动证据来自执行前后有界快照与主管确认，不证明 Git 作者身份。只读，不写任何事实，也不能替代 ACCEPT。',
+    parameters: {
+      task_id: { type: 'string', required: true, description: '当前主管管辖的任务 id' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { task_id: string }, exec: { agent?: { session?: { id?: string } } | null }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      const result = describeTaskChangeCandidates(store, changeEvidenceContext(kingdomId, exec), args.task_id)
+      return result.ok ? result.text : result.message
+    },
+  })), 'dsh-kingdom: delivery change candidates tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_delivery_questions',
+    description: '读取**只属于当前 session-bound 主管本人**的交付条目提问（含问题正文与已有回复）：按权威 events 账本逐条精确读取，不是有界的最近事件投影。只接受真实、当前、可信的 ACTIVE 主管 session；默认 declarative 配置下同样拒绝。只读，不写任何事实；未回复的问题只表示「待领取」，不代表已通知或已阅读。',
+    parameters: {
+      pending_only: { type: 'boolean', description: 'true 时只列出尚无回复的问题；省略/false 列出全部（含已回复）' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { pending_only?: boolean }, exec: { agent?: { session?: { id?: string } } | null }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      const principal = trustedToolPrincipal(exec)
+      if (!principal) return 'AUTHZ_DENIED [UNAUTHORIZED_PRINCIPAL]: 无法从 DSH Runtime 证明当前调用方的唯一活动 session。'
+      // 一个 session 可以合法持有多个 ACTIVE SUPERVISOR binding：必须枚举并精确核对
+      // **全部**该 session 可证明的 binding，不能只取第一个而静默遗漏其余绑定的问题。
+      const inbox = readDeliveryQuestionInboxForSession(store, kingdomId, principal.sessionId)
+      if (!inbox.bindings.length) return 'AUTHZ_DENIED [UNAUTHORIZED_PRINCIPAL]: 当前 session 没有匹配的 ACTIVE SUPERVISOR binding。'
+      // 每条问题事实只有一个接收主管，逐 binding 读取再合并因此不会重复；每个 binding
+      // 仍只看到写给自己的问题。旧内容版本与无法重验的问题仍列出，但明确标出：它们不计
+      // 当前待办，也不能被说成「当前可回复」。
+      const entries = inbox.entries.filter(entry => args.pending_only === true
+        ? entry.question.reply === null && entry.question.itemVersion === 'CURRENT' : true)
+      const bindingLabel = inbox.bindings.map(candidate => `${candidate.role_name}（${candidate.binding_id}）`).join('、')
+      if (!entries.length) {
+        return args.pending_only === true
+          ? `主管 ${bindingLabel} 当前没有待回复的交付条目提问。`
+          : `主管 ${bindingLabel} 当前没有被提问的交付条目。`
+      }
+      const lines = [
+        `主管 ${bindingLabel} 的交付条目提问共 ${entries.length} 条${args.pending_only === true ? `（仅当前版待回复）` : ''}。`,
+        '这些正文只由此 session-bound Tool 返回，不进入工作台、快照或通用事件投影。',
+        '回复请用 kingdom_delivery_reply(question_id, reply_text)；回复只记一条对话事实，不写知悉、Task/Claim、ACCEPT、Owner acceptance 或发布。',
+      ]
+      for (const entry of entries) {
+        const question = entry.question
+        const versionLabel = question.itemVersion === 'CURRENT' ? '当前版'
+          : question.itemVersion === 'HISTORICAL' ? '历史版（旧内容版本；不计当前待办，也不能回复）'
+            : '无法重验版本（当前 ACCEPT/证据无法重验该条目；不计当前待办，也不能回复）'
+        lines.push('', `- 问题 ${question.questionId} · ${question.reply ? '已回复' : '待领取'} · ${versionLabel} · ${question.itemLabel || question.itemId}`)
+        lines.push(`  任务：${entry.taskTitle}（${question.taskId}）· 领地：${entry.territoryName} · 已接受尝试第 ${question.attemptNo} 次`)
+        lines.push(`  条目：${question.itemId} · 问题内容版本 ${question.contentHash}${question.currentItemContentHash ? ` · 当前内容版本 ${question.currentItemContentHash}` : ''}`)
+        lines.push(`  提问时间：${question.askedAt} · 接收主管：${question.reviewerBindingId}`)
+        lines.push(`  问题：${question.questionText}`)
+        if (question.reply) lines.push(`  回复（${question.reply.repliedAt}）：${question.reply.replyText}`)
+        else if (question.itemVersion === 'HISTORICAL') lines.push('  状态：该问题属于旧内容版本，仅留历史，不能回复。')
+        else if (question.itemVersion === 'UNVERIFIABLE') lines.push('  状态：当前无法重验该条目的内容版本（例如主管确认的改动证据已丢失或被替换），不能作为当前待办，也不能回复。问题正文仍可读。')
+        else lines.push(`  状态：${DELIVERY_QUESTION_UNCLAIMED}；${question.replyState === 'REPLY_ACCESSIBLE' ? '该主管当前仍可回复。' : '该问题当前不可达：' + question.replyState + '，不会改投继任主管。'}`)
+      }
+      return lines.join('\n')
+    },
+  })), 'dsh-kingdom: delivery questions inbox tool')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'kingdom_delivery_reply',
+    description: '以当前 session-bound 主管身份回复一条写给他的交付条目提问（被提问的只能是接受该交付的主管本人）。一问最多一个当前回复：同一文本重试幂等，冲突回复被拒绝。只写一条对话事实，不写知悉、Task/Claim、主管 ACCEPT、Owner acceptance 或发布，也不自动派发或唤醒。',
+    parameters: {
+      question_id: { type: 'string', required: true, description: '先用 kingdom_delivery_questions 读取到的 question id' },
+      reply_text: { type: 'string', required: true, description: '给 Owner 的回复正文；非空且长度受限，写入前统一脱敏' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { question_id: string; reply_text: string }, exec: { agent?: { session?: { id?: string } } | null }) {
+      const kingdomId = requireKingdom()
+      if (!kingdomId) return '尚未初始化王国。请先 /kingdom init。'
+      // CHANGE 条目的回复不再在调用边界预先解析证据：Core 会在同一个写锁事务内按
+      // 当前 ACCEPT 引用重新读取并重验 exact evidence/item/hash，证据漂移即 fail-closed。
+      const result = replyToDeliveryQuestion(store, deliveryQuestionContext(kingdomId, exec), {
+        questionId: args.question_id,
+        replyText: args.reply_text,
+      })
+      return result.ok ? result.text : `${result.code}: ${result.message}`
+    },
+  })), 'dsh-kingdom: delivery question reply tool')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_list_tasks',
@@ -1664,13 +1995,24 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       const ownerController = new OwnerDecisionController(store, {
         validateTargetSession: async ({ sessionId, signal }) => {
           if (signal.aborted) return { ok: false, code: 'OWNER_VALIDATION_ABORTED', message: '管理窗口已撤销或校验超时。' }
-          const checked = validateLiveDirectSession(sessionId, dshRegistrySeam())
-          return checked.ok ? { ok: true } : { ok: false, code: 'OWNER_SESSION_UNAVAILABLE', message: '目标会话不是当前唯一、有效的 DSH 会话；请刷新后重新选择。' }
+          const resolved = await resolveDirectTargetSession(sessionId, dshRegistrySeam(), durableSessionProbe())
+          if (resolved.ok) return { ok: true }
+          return {
+            ok: false,
+            code: 'OWNER_SESSION_UNAVAILABLE',
+            message: resolved.classification === 'ABSENT'
+              ? '目标会话既不是当前有效的 DSH 会话，也不在本机持久会话存储中；请刷新后重新选择。'
+              : '目标会话不是当前唯一、有效的 DSH 会话；请刷新后重新选择。',
+          }
         },
         listTargetSessions: async ({ sessionIds, signal }) => {
+          if (signal.aborted) return []
           const seam = dshRegistrySeam()
-          return signal.aborted ? [] : sessionIds.filter(id => validateLiveDirectSession(id, seam).ok)
-            .map(id => ({ id, label: `DSH 会话 ${id}` }))
+          const probe = durableSessionProbe()
+          const resolved = await Promise.all(
+            sessionIds.map(async id => ({ id, ok: (await resolveDirectTargetSession(id, seam, probe)).ok })),
+          )
+          return resolved.filter(item => item.ok).map(item => ({ id: item.id, label: `DSH 会话 ${item.id}` }))
         },
         validateExecutionProfile: async ({ profile, signal }) => {
           const provider = profile?.provider?.trim() || config.workerProvider
@@ -2005,13 +2347,31 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
     }
   }
 
-  const validateDirectSessionPayload = (operation: string, value: unknown): string | null => {
-    if (value === undefined || value === null) return null
-    if (typeof value !== 'string') return `INPUT_DENIED [${operation}]: session_id 必须是 string 或 null。`
-    const seam = dshRegistrySeam()
-    const live = validateLiveDirectSession(value, seam)
-    if (live.ok) return null
-    return `INPUT_DENIED [SESSION_${live.classification}]: ${live.reason}；direct /kingdom ${operation} 未写入。`
+  /**
+   * direct Owner 目标会话校验（v3.1：异步，返回值携带证明强度）。
+   *
+   * `evidence` 只描述“写入当时怎么证明这条会话属于本机 DSH”，会记进事件 payload；
+   * 它既不是 Role Authority，也不承诺该会话将来可执行。
+   */
+  const validateDirectSessionPayload = async (
+    operation: string,
+    value: unknown,
+  ): Promise<
+    | { readonly ok: true; readonly evidence: 'LIVE_AGENT' | 'DURABLE_SESSION' | null }
+    | { readonly ok: false; readonly message: string }
+  > => {
+    if (value === undefined || value === null) return { ok: true, evidence: null }
+    if (typeof value !== 'string') {
+      return { ok: false, message: `INPUT_DENIED [${operation}]: session_id 必须是 string 或 null。` }
+    }
+    const resolved = await resolveDirectTargetSession(value, dshRegistrySeam(), durableSessionProbe())
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        message: `INPUT_DENIED [SESSION_${resolved.classification}]: ${resolved.reason}；direct /kingdom ${operation} 未写入。`,
+      }
+    }
+    return { ok: true, evidence: resolved.classification === 'LIVE' ? 'LIVE_AGENT' : 'DURABLE_SESSION' }
   }
 
   const ownerAuth = () => ownerControlAuth(issueOwnerControlCapability())
@@ -2025,11 +2385,26 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       const auth = ownerAuth()
       switch (sub) {
         case 'owner.gui': {
-          const parsed = parseJsonEnvelope(rest, ['kingdomId', 'actions', 'scope', 'ttlMs'])
+          // taskHint/itemHint/contentHashHint 只用于在新标签页预选人类刚点的那一条；
+          // 它们不进入 OwnerDecisionInput，也不改变授权含义。
+          const parsed = parseJsonEnvelope(rest, ['kingdomId', 'actions', 'scope', 'ttlMs',
+            'taskHint', 'itemHint', 'contentHashHint', 'hintAction'])
           if (!parsed.ok) return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${parsed.message}` }
+          const envelope = parsed.value
+          for (const key of ['taskHint', 'itemHint', 'contentHashHint', 'hintAction'] as const) {
+            if (envelope[key] !== undefined && typeof envelope[key] !== 'string') {
+              return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${key} 必须是 string。` }
+            }
+          }
+          const { taskHint, itemHint, contentHashHint, hintAction, ...authorization } = envelope
+          // 三个 hint 必须同时提供且格式有效；hintAction 只决定兑换后预选知悉还是提问，
+          // 不参与授权。任一不合法都在激活前整体拒绝，不做「丢掉提示照常激活」。
+          const hint = validateLaunchAckHint({ task: taskHint, item: itemHint, contentHash: contentHashHint, action: hintAction })
+          if (!hint.ok) return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${hint.message}` }
           try {
             const runtime = await ensureGuiServer()
-            const activation = runtime.ownerControl.activate(issueOwnerControlCapability(), parsed.value as unknown as OwnerDecisionInput)
+            const activation = runtime.ownerControl.activate(issueOwnerControlCapability(),
+              authorization as unknown as OwnerDecisionInput, hint.hint ?? undefined)
             const opened = openLocalConsole(`${runtime.address.origin}${activation.launchPath}?ticket=${encodeURIComponent(activation.launchTicket)}`)
             return {
               kind: opened ? 'success' : 'error',
@@ -2139,9 +2514,9 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
           for (const key of ['role_name', 'session_id', 'model_name', 'agent_name', 'session_meta'] as const) {
             if (value[key] !== undefined && typeof value[key] !== 'string') return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${key} 必须是 string。` }
           }
-          const liveSessionError = validateDirectSessionPayload('role.bind', value.session_id)
-          if (liveSessionError) return { kind: 'error', text: liveSessionError }
-          const text = ownerWrite('role.bind', () => bindRole(store, { kingdomId: requireKingdom()!, roleType: value.role_type as string, roleName: value.role_name as string | undefined, sessionId: value.session_id as string | undefined, modelName: value.model_name as string | undefined, agentName: value.agent_name as string | undefined, sessionMeta: value.session_meta as string | undefined }, auth))
+          const sessionCheck = await validateDirectSessionPayload('role.bind', value.session_id)
+          if (!sessionCheck.ok) return { kind: 'error', text: sessionCheck.message }
+          const text = ownerWrite('role.bind', () => bindRole(store, { kingdomId: requireKingdom()!, roleType: value.role_type as string, roleName: value.role_name as string | undefined, sessionId: value.session_id as string | undefined, modelName: value.model_name as string | undefined, agentName: value.agent_name as string | undefined, sessionMeta: value.session_meta as string | undefined, sessionEvidence: sessionCheck.evidence }, auth))
           return { kind: text.startsWith('UNKNOWN/') || text.startsWith('错误：') || text.startsWith('角色 ') && text.includes('已有绑定') ? 'error' : 'success', text }
         }
         case 'role.unbind': {
@@ -2178,9 +2553,9 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
           for (const key of ['role_type', 'binding_id', 'session_id', 'model_name', 'agent_name', 'session_meta'] as const) {
             if (value[key] !== undefined && value[key] !== null && typeof value[key] !== 'string') return { kind: 'error', text: `INPUT_DENIED [OWNER_COMMAND_GRAMMAR]: ${key} 必须是 string 或 null。` }
           }
-          const liveSessionError = validateDirectSessionPayload('role.session', value.session_id)
-          if (liveSessionError) return { kind: 'error', text: liveSessionError }
-          const text = ownerWrite('role.session', () => rebindSession(store, { kingdomId: requireKingdom()!, roleType: value.role_type as string | undefined, bindingId: value.binding_id as string | undefined, sessionId: value.session_id as string | null | undefined, modelName: value.model_name as string | null | undefined, agentName: value.agent_name as string | null | undefined, sessionMeta: value.session_meta as string | null | undefined }, auth))
+          const sessionCheck = await validateDirectSessionPayload('role.session', value.session_id)
+          if (!sessionCheck.ok) return { kind: 'error', text: sessionCheck.message }
+          const text = ownerWrite('role.session', () => rebindSession(store, { kingdomId: requireKingdom()!, roleType: value.role_type as string | undefined, bindingId: value.binding_id as string | undefined, sessionId: value.session_id as string | null | undefined, modelName: value.model_name as string | null | undefined, agentName: value.agent_name as string | null | undefined, sessionMeta: value.session_meta as string | null | undefined, sessionEvidence: sessionCheck.evidence }, auth))
           return { kind: text.startsWith('UNKNOWN/') || text.startsWith('错误：') ? 'error' : 'success', text }
         }
         case 'execution-profile': {
@@ -2206,6 +2581,7 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
               '/kingdom init    原子初始化/接入；OWNER.session_id 永远为 null',
               '/kingdom status  查看真实状态（只读）',
               '/kingdom owner.gui <严格 JSON>  激活具体动作/资源范围的短期人类管理窗口；/owner 页面提供激活格式说明',
+              'owner.gui 可选携带非授权的 taskHint/itemHint/contentHashHint（仅用于预选刚点的那一条，不授予权限）；工作台条目图标可一键复制该命令',
               '/kingdom ceiling {"ceiling":{"tool:pwsh":true}} | {"clear":true}',
               '/kingdom territory.create {"name":"研发领","workspace_path":"C:/work"}',
               '/kingdom territory.delete {"territory_id":"...","force":false}',
