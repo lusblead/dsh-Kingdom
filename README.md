@@ -16,7 +16,9 @@
 
 ## 这是什么？
 
-3.0.0 在已有 2.0 个人工作台之上，加入 Owner 交付清单：逐条查看、知悉、核对主管确认的改动证据，并就具体条目向接受交付的主管提问。交付由 Owner 主动查看，宰相目前不会自动上报。查看 [3.0 使用指南](docs/V3.0-USER-GUIDE.md)、[版本说明与验证范围](docs/V3.0-RELEASE-NOTES.md) 和 [功能介绍](docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md)。这轮功能曾在仍标为 2.0.0 的本地开发包中提前安装验证；3.0.0 候选尚未在 npm/GitHub Releases 发布。已有任务、协作、用量与软预算能力见 [2.0 指南](docs/V2.0-USER-GUIDE.md)。
+3.2.0 把**主管与领地完全绑定**：任命主管时必须同时指定它的领地，席位与领地主理在同一事务里原子写入（不再可能留下"有主管、没领地"的中间态）；一个领地至多一个在任主理，一个主管席位只主理一个领地；退任主管时同时解除其领地主理。同一版还修掉了交付记录区的版面塌陷。查看 [3.2 版本说明](docs/V3.2-RELEASE-NOTES.md)。
+
+更早的 3.0.0 在 2.0 个人工作台之上加入 Owner 交付清单：逐条查看、知悉、核对主管确认的改动证据，并就具体条目向接受交付的主管提问。交付由 Owner 主动查看，宰相目前不会自动上报。查看 [3.0 使用指南](docs/V3.0-USER-GUIDE.md)、[版本说明与验证范围](docs/V3.0-RELEASE-NOTES.md) 和 [功能介绍](docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md)——3.0.0 的功能是随 3.1.0 一并发布的。已有任务、协作、用量与软预算能力见 [2.0 指南](docs/V2.0-USER-GUIDE.md)。
 
 **dsh-Kingdom 是一个 DeepSeek Harness（DSH）插件**：产品目标是在不另行部署外部服务、独立数据库或单独 GUI 前端的前提下，在 DSH 中**创建并运行一个属于自己的最小王国**——
 
@@ -45,6 +47,7 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 | 🏛 **完整角色体系** | Owner / Chancellor / Supervisor / Worker，角色与 Session / 模型解耦 |
 | 📋 **治理闭环语义** | 规划 → 分配 → 独立执行 → 验收，任务状态全程留痕 |
 | ⚖️ **Claim ≠ Fact** | **Worker 说自己完成了 ≠ 任务完成**——完成权只在 Supervisor，代码强制，不是口头约定 |
+| 🧭 **主管与领地完全绑定**（3.2） | 任命主管必须同时指定它的领地，席位与领地主理**同一事务**原子写入；一个领地至多一个在任主理，一个主管只主理一个领地；退任主管时同时解除其领地主理。存量"未隶属领地"的席位不会被自动归属，只在界面上标注待处理 |
 | 👁️ **Owner 逐条知悉与提问**（3.0） | 交付摘要和细项独立呈现；知悉只记录 Owner 声明已知道该内容版本，不代替质量认可或任务完成；问题记在接受该交付的主管名下，待其主动读取并回复 |
 | 🧾 **改动证据**（3.0） | 主管确认属于本交付的文件改动可展开查看，包括有界的未提交差异快照；标明证据级别，不把 Git 时间窗口误称为 Worker 作者证明 |
 | 👷 **Persistent Governed Worker** | 候选源码的 canonical headless 路径使用 `kingdom_start_task_governed`：Worker 绑定长期 DSH Session，结果结构化返回并经 Capability/Lease 治理 |
@@ -63,7 +66,7 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 1. 前置要求
 
-- **DeepSeek Harness（dsh）**：本版 peer 声明覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成，`0.1.7-rc.2` 的实机加载已于 2026-09-28 验证（无 bundle 跳过，见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）。旧宿主请继续使用对应旧版插件
+- **DeepSeek Harness（dsh）**：本版 peer 声明与 3.1.0 相同，覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成。`0.1.7-rc.2` 的实机加载在 3.1.0 已验证（无 bundle 跳过，见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）；**3.2.0 自身的实机加载尚未执行**（peer 声明未变，但不要把它当作已验证）。旧宿主请继续使用对应旧版插件
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
@@ -199,8 +202,8 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 1.0.0 | 王国地图、管理中心、王国账本、移交、沙箱与诚实的执行控制投影 | ✅ 已发布 |
 | 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 上一版本；发布状态以 Releases 为准 |
 | 3.0.0 | Owner 交付清单、逐条知悉、主管确认的改动证据、条目问答 | 随 3.1.0 一并发布 |
-| 3.1.0 | DSH 0.1.7 兼容（peer 分线声明）、无 live Agent 会话可绑定席位、`session_evidence` 证据字段 | 上一版本；发布状态以 Releases 为准 |
-| 3.2.0 | 主管与领地完全绑定（任命即指定领地、席位与主理同一事务、退任同时解除主理）、交付区版面修复 | 当前版本；发布状态以 Releases 为准 |
+| 3.1.0 | DSH 0.1.7 兼容（peer 分线声明）、无 live Agent 会话可绑定席位、`session_evidence` 证据字段 | ✅ 已发布，然后是 3.2.0 |
+| 3.2.0 | 主管与领地完全绑定（任命即指定领地、席位与主理同一事务、1:1、退任同时解除主理；管理窗口也可解除）、交付区版面修复 | 当前版本：已发布到 npm（`latest`）；GitHub 侧以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准 |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 
