@@ -32,7 +32,9 @@ async function fixture(options: { cleanup?: 'false' | 'throw'; onCleanup?: () =>
     followup(message: { id: string }) { followups++; events.push({ type: 'user/message', data: { id: message.id } }, { type: 'turn/start', data: { turn: 1 } }) },
     runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> { return job(new AbortController().signal) },
   }
-  const adapter = new DshRuntimeAdapter({ runtimeInstanceRef: 'instance', provider: 'spawn', model: null,
+  const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true }, runtimeInstanceRef: 'instance', provider: 'spawn', model: null,
     agents: { agents: new Map([[agent.id, agent]]), get: id => id === agent.id ? agent : undefined, list: () => [agent],
       create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') } },
     sandboxPolicy: { setSandboxMode: (_session: unknown, mode: string) => events.push({ type: 'sandbox/mode', data: { mode } }) },

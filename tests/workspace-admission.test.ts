@@ -12,7 +12,7 @@ import type { WorkerExecutionOutcome } from '../lib/worker/executor.js'
 import {
   canonicalWorkspaceKey, workspaceKeysOverlap, reserveWorkspaceAdmission, bindWorkspaceAdmissionInTransaction,
   cancelWorkspaceAdmissionIfSafe, finishWorkspaceAdmissionInvocation, readWorkspaceReservations,
-  type WorkspaceAdmissionHandle, type WorkspaceAdmissionInput,
+  WorkspaceAdmissionError, type WorkspaceAdmissionHandle, type WorkspaceAdmissionInput,
 } from '../lib/core/workspace-admission.js'
 import { reserveBudgetAdmission, finishBudgetAdmissionInvocation, type BudgetAdmissionHandle } from '../lib/core/budget.js'
 import {
@@ -100,7 +100,14 @@ test('workspace Legacy and governed admission exclude each other before any exec
     const running = runner.start()
     assert.equal(runner.calls, 1)
     const before = f.store.eventSequence()
-    assert.throws(() => f.reserve(second), { code: 'WORKSPACE_LEGACY_EXECUTION_BUSY' })
+    assert.throws(() => f.reserve(second), error => {
+      assert.ok(error instanceof WorkspaceAdmissionError); assert.equal(error.code, 'WORKSPACE_LEGACY_EXECUTION_BUSY')
+      assert.equal(error.occupancy[0]!.source, 'LEGACY_EXECUTION'); assert.equal(error.occupancy[0]!.taskId, first.taskId)
+      assert.equal(error.occupancy[0]!.attemptNo, 1); assert.equal(error.occupancy[0]!.state, 'RUNNING')
+      assert.equal(error.occupancy[0]!.executionId, f.store.listExecutions(first.taskId)[0]!.execution_id)
+      assert.match(error.message, /重新请求/u); assert.ok(!error.message.includes(paths[0]!))
+      return true
+    })
     assert.equal(f.store.eventSequence(), before)
     runner.release(); assert.equal((await running).ok, true)
     const held = f.reserve(second)
@@ -143,11 +150,63 @@ test('workspace rejects a second writer or reader in the same reserved directory
   assert.equal(readWorkspaceReservations(f.store, f.kingdomId).length, 1)
 })
 
-test('workspace admits concurrent read-only access but queues a writer', t => {
+test('workspace admits concurrent read-only access but blocks a writer pending a new request', t => {
   const f = fixture(t), path = f.directory('shared')
   f.reserve(f.task(path, 'READ_ONLY')); f.reserve(f.task(path, 'READ_ONLY'))
   assert.throws(() => f.reserve(f.task(path, 'WRITE')), { code: 'WORKSPACE_BUSY' })
   assert.equal(readWorkspaceReservations(f.store, f.kingdomId).length, 2)
+})
+
+test('workspace reservation diagnostics are bounded and require a new request without changing occupancy', t => {
+  const f = fixture(t), path = f.directory('shared'), readers = Array.from({ length: 4 }, () => f.task(path, 'READ_ONLY'))
+  readers.forEach(input => f.reserve(input))
+  const writer = f.task(path), before = { seq: f.store.eventSequence(), held: readWorkspaceReservations(f.store, f.kingdomId) }
+  assert.throws(() => f.reserve(writer), error => {
+    assert.ok(error instanceof WorkspaceAdmissionError)
+    assert.equal(error.code, 'WORKSPACE_BUSY'); assert.equal(error.occupancyCount, 4); assert.equal(error.occupancy.length, 3)
+    assert.deepEqual(error.occupancy.map(item => item.taskId), readers.slice(0, 3).map(input => input.taskId))
+    assert.ok(error.occupancy.every(item => item.source === 'RESOURCE_RESERVATION' && item.state === 'RESERVED' && item.attemptNo === 1 && item.admissionId))
+    assert.match(error.message, /等待前序结束或对账后重新请求/u); assert.match(error.message, /不会自动排队/u)
+    assert.ok(!error.message.includes(path)); assert.ok(!error.message.includes(readers[3]!.taskId))
+    assert.ok(error.message.length < 1200)
+    return true
+  })
+  assert.equal(f.store.eventSequence(), before.seq); assert.deepEqual(readWorkspaceReservations(f.store, f.kingdomId), before.held)
+  assert.equal(f.store.listExecutions(writer.taskId).length, 0); assert.equal(f.store.listDispatchesForTaskAttempt(writer.taskId, 1).length, 0)
+})
+
+test('workspace bound recovering diagnostics identify the exact Lease and Dispatch without releasing them', t => {
+  const f = fixture(t), path = f.directory('bound-diagnostic'), input = f.task(path), handle = f.reserve(input)
+  const prepared = f.prepare(input, handle).invoke()
+  markGovernedDispatchRecovering(f.store, prepared.intent.dispatch_id, 'FIXTURE_INTERRUPTED')
+  const next = f.task(path), before = { seq: f.store.eventSequence(), lease: f.store.getLease(prepared.lease.lease_id), dispatch: f.store.getDispatch(prepared.intent.dispatch_id) }
+  assert.throws(() => f.reserve(next), error => {
+    assert.ok(error instanceof WorkspaceAdmissionError)
+    assert.equal(error.code, 'WORKSPACE_BUSY'); assert.equal(error.occupancyCount, 1)
+    assert.equal(error.occupancy[0]!.source, 'RESOURCE_RESERVATION'); assert.equal(error.occupancy[0]!.state, 'BOUND')
+    assert.equal(error.occupancy[0]!.taskId, input.taskId); assert.equal(error.occupancy[0]!.leaseId, prepared.lease.lease_id)
+    assert.equal(error.occupancy[0]!.dispatchId, prepared.intent.dispatch_id); assert.ok(error.occupancy[0]!.admissionId)
+    assert.ok(!error.message.includes(path)); assert.match(error.message, /对账后重新请求/u)
+    return true
+  })
+  assert.deepEqual({ seq: f.store.eventSequence(), lease: f.store.getLease(prepared.lease.lease_id), dispatch: f.store.getDispatch(prepared.intent.dispatch_id) }, before)
+  assert.equal(readWorkspaceReservations(f.store, f.kingdomId)[0]!.recovery, true)
+})
+
+test('workspace diagnostic references redact malformed or oversized identifiers while retaining the block', t => {
+  const f = fixture(t), path = f.directory('diagnostic-redaction'), input = f.task(path)
+  f.store.appendEvent({ event_id: randomUUID(), kingdom_id: f.kingdomId, event_type: 'WORKSPACE_ADMISSION_RESERVED',
+    actor_role: 'SYSTEM', actor_id: 'workspace-fixture', target_type: 'workspace-admission', target_id: randomUUID(),
+    payload_json: JSON.stringify({ type: 'KingdomWorkspaceAdmission/v1', ...input, admissionId: 'x'.repeat(81), taskId: path,
+      workspaceKey: canonicalWorkspaceKey(path), state: 'RESERVED', leaseId: null, dispatchId: null }), created_at: now() })
+  const next = f.task(path), before = f.store.eventSequence()
+  assert.throws(() => f.reserve(next), error => {
+    assert.ok(error instanceof WorkspaceAdmissionError); assert.equal(error.code, 'WORKSPACE_BUSY')
+    assert.equal(error.occupancy[0]!.taskId, 'REDACTED'); assert.equal(error.occupancy[0]!.admissionId, 'REDACTED')
+    assert.ok(!error.message.includes(path)); assert.ok(!error.message.includes('x'.repeat(81)))
+    return true
+  })
+  assert.equal(f.store.eventSequence(), before); assert.equal(readWorkspaceReservations(f.store, f.kingdomId).length, 1)
 })
 
 test('workspace ancestor descendant and junction aliases conflict while distinct directories remain independent', t => {
@@ -224,11 +283,38 @@ test('workspace terminal evidence alone cannot release the resource before Lease
 
 test('workspace excludes unresolved legacy Leases and budget-only preparation in an overlapping directory', t => {
   const f = fixture(t), firstPath = f.directory('legacy-lease'), secondPath = f.directory('legacy-budget')
-  f.lease(f.task(firstPath))
-  assert.throws(() => f.reserve(f.task(firstPath, 'READ_ONLY')), { code: 'WORKSPACE_LEGACY_LEASE_BUSY' })
+  const input = f.task(firstPath), leased = f.lease(input), second = f.task(firstPath, 'READ_ONLY'), before = f.store.eventSequence()
+  assert.throws(() => f.reserve(second), error => {
+    assert.ok(error instanceof WorkspaceAdmissionError); assert.equal(error.code, 'WORKSPACE_LEGACY_LEASE_BUSY')
+    assert.deepEqual(error.occupancy, [{ source: 'LEGACY_LEASE', taskId: input.taskId, attemptNo: 1, state: 'ACQUIRED', leaseId: leased.row.lease_id }])
+    assert.match(error.message, /重新请求/u); assert.ok(!error.message.includes(firstPath))
+    return true
+  })
+  assert.equal(f.store.eventSequence(), before); assert.equal(f.store.getLease(leased.row.lease_id)!.state, 'ACQUIRED')
   const pending = f.task(secondPath); f.budget(pending)
-  assert.throws(() => f.reserve(f.task(secondPath)), { code: 'WORKSPACE_LEGACY_PREPARATION_BUSY' })
+  const third = f.task(secondPath), beforeBudget = f.store.eventSequence(), budgetEvents = f.store.listBudgetEvents(f.kingdomId)
+  assert.throws(() => f.reserve(third), error => {
+    assert.ok(error instanceof WorkspaceAdmissionError); assert.equal(error.code, 'WORKSPACE_LEGACY_PREPARATION_BUSY')
+    assert.deepEqual(error.occupancy, [{ source: 'BUDGET_PREPARATION', taskId: pending.taskId, attemptNo: 1, state: 'RESERVED', admissionId: budgetEvents.at(-1)!.target_id }])
+    assert.match(error.message, /对账后重新请求/u); assert.ok(!error.message.includes(secondPath))
+    return true
+  })
+  assert.equal(f.store.eventSequence(), beforeBudget); assert.deepEqual(f.store.listBudgetEvents(f.kingdomId), budgetEvents)
   f.reserve(f.task(f.directory('unrelated')))
+})
+
+test('workspace unresolved legacy directory remains conservatively exclusive after diagnostic reads', t => {
+  const f = fixture(t), input = f.task(''), leased = f.lease(input), next = f.task(f.directory('unrelated'))
+  const before = { seq: f.store.eventSequence(), lease: f.store.getLease(leased.row.lease_id) }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.throws(() => f.reserve(next), error => {
+      assert.ok(error instanceof WorkspaceAdmissionError); assert.equal(error.code, 'WORKSPACE_LEGACY_LEASE_BUSY')
+      assert.equal(error.occupancy[0]!.leaseId, leased.row.lease_id); assert.match(error.message, /不会自动排队/u)
+      return true
+    })
+    assert.deepEqual({ seq: f.store.eventSequence(), lease: f.store.getLease(leased.row.lease_id) }, before)
+    assert.equal(f.store.listExecutions(next.taskId).length, 0)
+  }
 })
 
 test('workspace and budget reservations roll back together when budget admission fails', t => {

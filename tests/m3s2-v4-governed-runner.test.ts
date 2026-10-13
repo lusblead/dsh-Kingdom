@@ -160,6 +160,7 @@ function makeAdapterWithAutoTerminal(options?: AutoTerminalOptions): {
   const createdOptions: Record<string, unknown>[] = []
   const adapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
+    sessions: { flush: async () => true }, // explicit fake durability fixture
     agents: {
       agents,
       create: async (options: { sessionId: string; meta?: { cwd?: string }; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown) => unknown }) => {
@@ -731,6 +732,7 @@ test('CLOSURE B: gone / cannot recover → fail closed（不新建第二个 sess
   const agentsMap = new Map<string, { id: string; status: 'idle'; session: { header: { cwd: string }; events: { type: string; data?: Record<string, unknown> }[] }; ctx: { tools: unknown }; followup(msg: { id: string }): void; runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> }>()
   const adapter = new DshRuntimeAdapter({
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
+    sessions: { flush: async () => true }, // explicit fake durability fixture
     agents: {
       agents: agentsMap,
       create: async (options: { sessionId: string; meta?: { cwd?: string }; setup?: (ctx: unknown) => unknown }) => {

@@ -147,9 +147,23 @@ export interface CleanupResult {
   readonly evidenceJson: string | null
 }
 
+/** Pure preparation; issuing this token must not mutate the Runtime. */
+export interface PrepareDispatchInput {
+  readonly kingdomDispatchId: string
+  readonly sessionRef: string
+  readonly text: string
+}
+
+/** Original Adapter-issued object; its visible reference is not dispatch evidence. */
+export interface PreparedRuntimeDispatch {
+  readonly runtimeDispatchRef: string
+}
+
 export interface DispatchInput {
   readonly sessionRef: string
   readonly text: string
+  readonly kingdomDispatchId?: string
+  readonly preparedDispatch?: PreparedRuntimeDispatch
 }
 
 /** RuntimeAdapter 接口（M3-S3 Thin Spec §1）。 */
@@ -208,6 +222,8 @@ export interface RuntimeAdapter {
   ): RuntimeTrustFenceCheck
 
   // ── Dispatch / Evidence / Reconcile ──
+  /** Optional pure preparation before Kingdom COMMIT; never constitutes acceptance. */
+  prepareDispatch?(input: PrepareDispatchInput): Promise<PreparedRuntimeDispatch>
   dispatch(input: DispatchInput): Promise<DispatchReceipt>
   observeExecution(refs: RuntimeRefs, session: unknown): Promise<ExecutionObservation>
   reconcile(kingdomDispatchId: string, refs: RuntimeRefs): Promise<ReconcileResult>
@@ -224,6 +240,10 @@ export interface DshBackendDeps {
   agents: unknown
   /** ctx.get('sessionPersistence')（可选；reconcile 判定 GONE/AVAILABLE）。 */
   sessionPersistence?: unknown
+  /** Public ctx.sessions durability barrier; prepared dispatch requires true. */
+  sessions?: { flush(session: unknown): Promise<boolean> }
+  /** Internal bounded durability wait; defaults to 5000ms, injectable for tests. */
+  dispatchFlushTimeoutMs?: number
   /** ctx.agentPresets（可选；setup 装配 preset 用）。 */
   presets?: unknown
   /** ctx.get('permission')（S4：permissionPresets.set(session, name)）。 */

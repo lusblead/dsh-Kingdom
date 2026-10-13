@@ -185,6 +185,8 @@ function makeCrashEnv(): { store: KingdomStore; kingdomId: string; worker: strin
 function makeFakePolicyAdapter(): DshRuntimeAdapter {
   const append = (s: { events: { type: string; data?: Record<string, unknown> }[] }, type: string, data?: Record<string, unknown>) => s.events.push({ type, ...(data ? { data } : {}) })
   return new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: { agents: new Map(), create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: () => undefined, list: () => [] },
     permission: { set: (s: never, name: string) => { append(s, 'permission/preset', { preset: name }); append(s, 'sandbox/mode', { mode: 'workspace-write' }); append(s, 'approval/policy', { policy: 'never' }) } },
@@ -262,6 +264,8 @@ async function makeTx3FaultFixture() {
   }
   const agents = new Map<string, typeof fakeAgent>([['s-1', fakeAgent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1',
     provider: 'spawn',
     model: null,
@@ -489,6 +493,8 @@ test('S5 crash: 完整 TX-3..TX-5 派发 + settle release 前置', async () => {
   }
   agents.set('s-1', fakeAgent)
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: {
       agents, create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') },
@@ -551,6 +557,8 @@ test('G14/G17 trust fence unrecognized/tainted token 在 check、cleanup、relea
   }
   const agents = new Map([[agent.id, agent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-fence',
     provider: 'spawn',
     model: null,
@@ -606,6 +614,8 @@ test('R5 G14 exact fence binding: cross-adapter/cross-lease/cross-session 均 fa
   const agentB = makeAgent('s-r5-b')
   const agentsA = new Map([[agentA.id, agentA], [agentB.id, agentB]])
   const makeAdapter = (runtimeInstanceRef: string, agents: Map<string, ReturnType<typeof makeAgent>>) => new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef,
     provider: 'spawn',
     model: null,
@@ -688,6 +698,8 @@ test('R5 settlement target binding: cross-lease/cross-session explicit settlemen
   const agentC = makeAgent('s-r5-settle-c')
   const agents = new Map([[agentA.id, agentA], [agentB.id, agentB], [agentC.id, agentC]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-r5-settle',
     provider: 'spawn',
     model: null,
@@ -793,6 +805,8 @@ test('R5 settlement target binding: cross-lease/cross-session explicit settlemen
     baselineEvents: agentC.session.events,
   })
   const otherAdapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-r5-other',
     provider: 'spawn',
     model: null,
@@ -860,6 +874,8 @@ test('S5 dispatch: session.events 是 getter（真实 DSH 每次访问返回新�
   const agents = new Map<string, typeof fakeAgent>()
   agents.set('s-1', fakeAgent)
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: { agents, create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: (id: string) => agents.get(id) as never, list: () => [...agents.values()] as never[] },
   })
@@ -904,6 +920,8 @@ test('S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先
   }
   const agents = new Map<string, typeof fakeAgent>([['s-1', fakeAgent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1',
     provider: 'spawn',
     model: null,
@@ -978,6 +996,8 @@ test('S5 dispatch: late correlation 写入异常后原子进入三层 RECOVERING
   }
   const agents = new Map<string, typeof fakeAgent>([['s-1', fakeAgent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1',
     provider: 'spawn',
     model: null,
@@ -1063,6 +1083,8 @@ test('S5 dispatch: terminal poll exhaustion atomically returns all three current
   }
   const agents = new Map<string, typeof fakeAgent>([['s-1', fakeAgent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1',
     provider: 'spawn',
     model: null,
@@ -1152,6 +1174,8 @@ test('G14/G17 terminal evidence 后的 fence check 发现 late foreign 时不进
   }
   const agents = new Map([[fakeAgent.id, fakeAgent]])
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1',
     provider: 'spawn',
     model: null,
@@ -1297,6 +1321,8 @@ async function runDispatchWithTurnReason(reasonKind: string, assistant: boolean)
   }
   agents.set('s-1', fakeAgent)
   const adapter = new DshRuntimeAdapter({
+    // Explicit fake durability barrier; this fixture is not real persistence evidence.
+    sessions: { flush: async () => true },
     runtimeInstanceRef: 'inst-1', provider: 'spawn', model: null,
     agents: { agents, create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') }, get: (id: string) => agents.get(id), list: () => [...agents.values()] },
   })

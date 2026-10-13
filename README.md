@@ -5,7 +5,7 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-3.2.0%20local%20candidate-blue)](docs/V3.2-RELEASE-NOTES.md)
+[![Version](https://img.shields.io/badge/version-3.2.1-blue)](docs/V3.2.1-RELEASE-NOTES.md)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.5--rc%20%7C%200.1.7--rc-orange)](#1-前置要求)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#1-前置要求)
@@ -15,6 +15,8 @@
 ---
 
 ## 这是什么？
+
+3.2.1 修复派发前关联、可靠接受回执与只读恢复对账，收紧受理/验收的换绑窗口，并明确资源占用后的重新请求要求。输入缺失仍为 UNKNOWN，不提供安全作废或自动重发。查看 [3.2.1 版本说明](docs/V3.2.1-RELEASE-NOTES.md)。
 
 3.2.0 把**主管与领地完全绑定**：任命主管时必须同时指定它的领地，席位与领地主理在同一事务里原子写入（不再可能留下"有主管、没领地"的中间态）；一个领地至多一个在任主理，一个主管席位只主理一个领地；退任主管时同时解除其领地主理。同一版还修掉了交付记录区的版面塌陷。查看 [3.2 版本说明](docs/V3.2-RELEASE-NOTES.md)。
 
@@ -66,16 +68,16 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 ### 1. 前置要求
 
-- **DeepSeek Harness（dsh）**：本版 peer 声明与 3.1.0 相同，覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成。`0.1.7-rc.2` 的实机加载在 3.1.0 已验证（无 bundle 跳过，见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）；**3.2.0 自身的实机加载尚未执行**（peer 声明未变，但不要把它当作已验证）。旧宿主请继续使用对应旧版插件
+- **DeepSeek Harness（dsh）**：本版 peer 声明与 3.1.0 相同，覆盖 `0.1.5-rc` 与 `0.1.7-0` 两条线；构建与回归在 CLI `0.1.5-rc.1` / 主要组件 `0.1.5-rc.2` 上完成。`0.1.7-rc.2` 的实机加载在 3.1.0 已验证（无 bundle 跳过，见 [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md)）；**完整宿主和真人交互验收须以各版记录为准**（peer 声明未变，但不要把它当作已验证）。旧宿主请继续使用对应旧版插件
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
-### 2. 安装 v3.2.0
+### 2. 安装 v3.2.1
 
-本版以 GitHub [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm 为公开入口；若当前环境还取不到已发布包，可从源码构建取得准确的 `dsh-kingdom-3.2.0.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
+本版以 GitHub [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm 为公开入口；若当前环境还取不到已发布包，可从源码构建取得准确的 `dsh-kingdom-3.2.1.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-3.2.0.tgz
+dsh plugin --profile web add ./dsh-kingdom-3.2.1.tgz
 ```
 
 安装后重启 Web profile 才会加载新包。不要将本地候选的版本号当作 npm 或 GitHub Releases 已可下载的证据。
@@ -203,7 +205,8 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 2.0.0 | 个人工作台、人类管理窗口、有界协作、用量与软预算、恢复约束 | 上一版本；发布状态以 Releases 为准 |
 | 3.0.0 | Owner 交付清单、逐条知悉、主管确认的改动证据、条目问答 | 随 3.1.0 一并发布 |
 | 3.1.0 | DSH 0.1.7 兼容（peer 分线声明）、无 live Agent 会话可绑定席位、`session_evidence` 证据字段 | ✅ 已发布，然后是 3.2.0 |
-| 3.2.0 | 主管与领地完全绑定（任命即指定领地、席位与主理同一事务、1:1、退任同时解除主理；管理窗口也可解除）、交付区版面修复 | 当前版本：已发布到 npm（`latest`）；GitHub 侧以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准 |
+| 3.2.0 | 主管与领地完全绑定、交付区版面修复 | 已发布 |
+| 3.2.1 | 单次派发关联、可靠 Receipt、只读恢复对账、事务授权与占用诊断修复 | 发布状态见 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 

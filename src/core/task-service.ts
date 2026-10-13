@@ -1109,6 +1109,9 @@ export function reviewTask(
       // 过期 binding 记签名事件。
       const currentSupervisor = resolveTaskSupervisor(store, ctx, currentTask)
       if (!currentSupervisor.ok) return fail(store, ctx.kingdomId, currentSupervisor.code, currentSupervisor.message)
+      if (currentSupervisor.binding.binding_id !== role.binding.binding_id || currentTask.territory_id !== loaded.task.territory_id) {
+        return fail(store, ctx.kingdomId, 'TASK_OUT_OF_SCOPE', '错误：审查期间主理 Supervisor 或任务领地已变化，请重新请求。')
+      }
       const changeSelection = resolveChangeSelection(store, ctx, currentTask, currentClaim, input)
       if (!changeSelection.ok) return fail(store, ctx.kingdomId, changeSelection.code, changeSelection.message)
       const incident = currentClaim
@@ -1124,7 +1127,7 @@ export function reviewTask(
         )
       }
 
-      const task = store.transitionTask(currentTask, 'DONE')
+      const task = store.transitionTaskIfCurrent(currentTask, 'DONE')
       store.closeActiveAssignment(input.taskId, 'task-terminal')
       collector.emit('TASK_ACCEPTED',
         { role: 'SUPERVISOR', id: currentSupervisor.binding.binding_id },

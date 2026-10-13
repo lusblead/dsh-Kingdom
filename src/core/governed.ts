@@ -1131,6 +1131,8 @@ export interface CreateDispatchIntentInput {
   inputRefJson: string
   payloadHash: string
   dispatchId?: string
+  /** Pure Adapter preparation only: a planned reference is not dispatch evidence. */
+  preparedRuntimeDispatchRef?: string
   createdAt?: string
 }
 
@@ -1159,7 +1161,7 @@ function createDispatchIntentInTransaction(
     dispatch_request_snapshot: input.requestSnapshot,
     dispatch_input_ref_json: input.inputRefJson,
     dispatch_payload_hash: input.payloadHash,
-    runtime_dispatch_ref: null,
+    runtime_dispatch_ref: input.preparedRuntimeDispatchRef ?? null,
     runtime_execution_ref: null,
     receipt_json: null,
     terminal_evidence_json: null,
@@ -1204,6 +1206,9 @@ export interface PrepareGovernedDispatchInput {
   payloadHash: string
   executionId?: string
   dispatchId?: string
+  preparedRuntimeDispatchRef?: string
+  /** Recheck after BEGIN because Adapter preparation may have awaited. */
+  stillAuthorized?: () => boolean
   preparedAt?: string
   detail?: string | null
   budgetAdmission?: BudgetAdmissionHandle
@@ -1229,6 +1234,12 @@ export function prepareGovernedDispatch(
 ): PreparedGovernedDispatchRows {
   requireV4(store)
   return store.withImmediateTransaction(() => {
+    if (input.stillAuthorized && !input.stillAuthorized()) {
+      throw new GovernedApiError('AUTHORITY_CHANGED: 派发准备事务内当前调用者或范围已变化。')
+    }
+    if (input.preparedRuntimeDispatchRef !== undefined && !input.preparedRuntimeDispatchRef.trim()) {
+      throw new GovernedApiError('prepareGovernedDispatch: prepared Runtime dispatch reference 不能为空')
+    }
     const preparedAt = input.preparedAt ?? now()
     let currentPlan = readCollaborationReadiness(store, input.kingdomId, input.taskId, input.leaseId)
     if (currentPlan && readCollaborationPlan(store, input.kingdomId, currentPlan.planId)?.state !== 'ADOPTED') currentPlan = null
@@ -1299,6 +1310,7 @@ export function prepareGovernedDispatch(
       inputRefJson: input.inputRefJson,
       payloadHash: input.payloadHash,
       dispatchId: input.dispatchId,
+      preparedRuntimeDispatchRef: input.preparedRuntimeDispatchRef,
       createdAt: preparedAt,
     })
     const executingLease = advanceLeaseStateInTransaction(store, startingLease, 'EXECUTING', {}, preparedAt)
@@ -1332,11 +1344,17 @@ export interface ReceiptInput {
  */
 export function recordDispatchReceipt(store: KingdomStore, dispatchId: string, input: ReceiptInput): DispatchRecordRow {
   requireV4(store)
-  const dispatch = store.getDispatch(dispatchId)
-  if (!dispatch) throw new GovernedApiError(`recordDispatchReceipt: dispatch ${dispatchId} 不存在`)
-  if (dispatch.state === 'RECEIVED') return dispatch
   const at = input.at ?? now()
   return store.withImmediateTransaction(() => {
+    // The persisted INTENDED reference is planned, not a Receipt. Re-read under
+    // the same write transaction before every transition or idempotent replay.
+    const dispatch = store.getDispatch(dispatchId)
+    if (!dispatch) throw new GovernedApiError(`recordDispatchReceipt: dispatch ${dispatchId} 不存在`)
+    if (!input.runtimeDispatchRef.trim()) throw new GovernedApiError('recordDispatchReceipt: Runtime dispatch reference 不能为空')
+    if (dispatch.runtime_dispatch_ref !== null && dispatch.runtime_dispatch_ref !== input.runtimeDispatchRef) {
+      throw new GovernedApiError(`recordDispatchReceipt: dispatch ${dispatchId} Runtime reference 与已保存引用不一致`)
+    }
+    if (dispatch.state === 'RECEIVED') return dispatch
     let current = dispatch
     if (current.state === 'INTENDED') {
       current = store.updateDispatchState(dispatchId, 'INTENDED', 'DISPATCHED', {

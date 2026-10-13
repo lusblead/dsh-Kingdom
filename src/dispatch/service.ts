@@ -11,6 +11,7 @@
  * 硬纪律：COMMIT POINT 之前绝不调用 adapter.dispatch()；Receipt ≠ Terminal；
  * 外部证据（session 事件链）是 terminal 的唯一来源。
  */
+import { randomUUID } from 'node:crypto'
 import type {
   KingdomStore,
   ExecutionRow,
@@ -37,6 +38,7 @@ import type {
   RuntimeTrustFenceExpectation,
   SessionHandle,
   DispatchReceipt,
+  PreparedRuntimeDispatch,
 } from '../adapter/contract.js'
 import { reconstructDispatchEvidence } from './evidence.js'
 import { readDshSessionEvents, readDshDispatchSummary } from '../adapter/dsh-session-events.js'
@@ -160,6 +162,23 @@ export interface GovernedReconcileResult {
   dispatchId: string
   cleanupReceipt?: CleanupReceipt
   summary?: string
+  /** Cold observation must skip downstream usage/event collection writes too. */
+  readOnly?: boolean
+  /** Read-only positive/unknown observation; never a Receipt or terminal claim. */
+  runtimeObservation?: {
+    state: 'QUEUED' | 'RUNNING' | 'TERMINAL' | 'UNKNOWN'
+    runtimeType: string
+    runtimeInstanceRef: string
+    sessionRef: string
+    runtimeDispatchRef: string
+    evidence: {
+      source: 'LIVE' | 'PERSISTED' | 'NONE'
+      located: boolean
+      complete: boolean
+      eventsRead: number
+      reason: string
+    }
+  }
 }
 
 /** Plugin teardown drops process evidence, never releases a governance Lease. */
@@ -178,16 +197,109 @@ export function discardGovernedRecoveryContexts(store: KingdomStore): void {
 }
 
 /** Explicit, single-flight observation of an existing original dispatch; never calls dispatch/materialize. */
-export async function reconcileGovernedDispatch(store: KingdomStore, dispatchId: string, stillAuthorized: () => boolean): Promise<GovernedReconcileResult> {
+export async function reconcileGovernedDispatch(
+  store: KingdomStore,
+  dispatchId: string,
+  stillAuthorized: () => boolean,
+  observationAdapter?: RuntimeAdapter,
+): Promise<GovernedReconcileResult> {
   const result = (status: GovernedReconcileResult['status'], reason: string): GovernedReconcileResult => ({ status, reason, dispatchId })
   const dispatch = store.getDispatch(dispatchId)
   if (!dispatch) return result('RECOVERING', 'DISPATCH_MISSING')
-  if (!stillAuthorized()) return result('RECOVERING', 'AUTHORITY_REVOKED')
+  if (!stillAuthorized()) return { ...result('RECOVERING', 'AUTHORITY_REVOKED'), readOnly: true }
   if (dispatch.state === 'TERMINAL') return result('TERMINAL', 'TERMINAL_ALREADY_RECORDED; cleanup is not retried')
-  if (!dispatch.runtime_dispatch_ref || !dispatch.receipt_json) return result('RECOVERING', 'RECEIPT_UNAVAILABLE; no resend')
   const entries = retainedRecoveries.get(store)
   const retained = entries?.get(dispatchId)
-  if (!retained?.active) return result('RECOVERING', 'ORIGINAL_PROCESS_CONTEXT_UNAVAILABLE; restart or lost context cannot prove cleanup')
+  if (!dispatch.runtime_dispatch_ref || !dispatch.receipt_json || !retained?.active) {
+    const coldResult = (reason: string): GovernedReconcileResult => ({ ...result('RECOVERING', reason), readOnly: true })
+    // A fresh Adapter can observe the persisted planned reference, but cannot
+    // recreate the original RunnerContext, fence, cleanup or settlement power.
+    const unavailable = !dispatch.runtime_dispatch_ref || !dispatch.receipt_json
+      ? 'RECEIPT_UNAVAILABLE' : 'ORIGINAL_PROCESS_CONTEXT_UNAVAILABLE'
+    if (!dispatch.runtime_dispatch_ref) return coldResult(`${unavailable}; RUNTIME_REFERENCE_UNAVAILABLE; UNKNOWN; no resend`)
+    if (!observationAdapter) return coldResult(`${unavailable}; UNKNOWN; restart or lost context cannot prove cleanup`)
+    try {
+      // Freeze only the current scope and exact related identities for this
+      // observation. A historical Task reassignment is allowed; another change
+      // while the public Runtime read awaits must discard the positive result.
+      const readRelation = (): string | null => {
+        const task = store.getTask(dispatch.task_id)
+        const execution = store.getExecution(dispatch.execution_id)
+        const lease = store.getLease(dispatch.lease_id)
+        if (!task || !execution || !lease) return null
+        return JSON.stringify([
+          task.task_id, task.territory_id, task.assigned_binding_id, task.status,
+          execution.execution_id, execution.task_id, execution.attempt_no,
+          execution.worker_binding_id, execution.lease_id, execution.capability_decision_id,
+          execution.session_id, execution.execution_contract, execution.state,
+          lease.lease_id, lease.kingdom_id, lease.task_id, lease.attempt_no,
+          lease.worker_binding_id, lease.territory_id, lease.capability_decision_id,
+          lease.runtime_type, lease.runtime_instance_ref, lease.session_ref, lease.state,
+        ])
+      }
+      const relationBefore = readRelation()
+      if (relationBefore === null) return coldResult('OBSERVATION_RELATION_UNAVAILABLE; UNKNOWN')
+      if (!stillAuthorized()) return coldResult('AUTHORITY_REVOKED')
+      const identity = observationAdapter.identify()
+      if (observationAdapter.runtimeType !== dispatch.runtime_type
+        || identity.runtimeType !== dispatch.runtime_type
+        || identity.runtimeInstanceRef !== dispatch.runtime_instance_ref) {
+        return coldResult('OBSERVATION_ADAPTER_IDENTITY_MISMATCH; UNKNOWN')
+      }
+      if (!stillAuthorized()) return coldResult('AUTHORITY_REVOKED')
+      const observation = await observationAdapter.reconcile(dispatchId, {
+        runtimeType: dispatch.runtime_type,
+        runtimeInstanceRef: dispatch.runtime_instance_ref,
+        sessionRef: dispatch.session_ref,
+        runtimeDispatchRef: dispatch.runtime_dispatch_ref,
+        ...(dispatch.runtime_execution_ref ? { runtimeExecutionRef: dispatch.runtime_execution_ref } : {}),
+      })
+      if (!stillAuthorized()) return coldResult('AUTHORITY_REVOKED_DURING_OBSERVATION')
+      const current = store.getDispatch(dispatchId)
+      if (!current || current.kingdom_id !== dispatch.kingdom_id
+        || current.task_id !== dispatch.task_id
+        || current.execution_id !== dispatch.execution_id
+        || current.lease_id !== dispatch.lease_id
+        || current.attempt_no !== dispatch.attempt_no
+        || current.runtime_type !== dispatch.runtime_type
+        || current.runtime_instance_ref !== dispatch.runtime_instance_ref
+        || current.session_ref !== dispatch.session_ref
+        || current.runtime_dispatch_ref !== dispatch.runtime_dispatch_ref
+        || current.runtime_execution_ref !== dispatch.runtime_execution_ref
+        || current.state !== dispatch.state
+        || readRelation() !== relationBefore) {
+        return coldResult('OBSERVATION_RELATION_CHANGED; UNKNOWN')
+      }
+      const raw = observation.evidence && typeof observation.evidence === 'object'
+        ? observation.evidence as Record<string, unknown> : {}
+      const source = raw.source === 'LIVE' || raw.source === 'PERSISTED' ? raw.source : 'NONE'
+      const located = raw.located === true
+      const state = observation.sessionObservation === 'AVAILABLE' && located && source !== 'NONE' && raw.complete === true
+        && ['QUEUED', 'RUNNING', 'TERMINAL'].includes(observation.executionObservation)
+        ? observation.executionObservation : 'UNKNOWN'
+      const reason = typeof raw.reason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(raw.reason)
+        ? raw.reason : 'OBSERVATION_DETAIL_UNAVAILABLE'
+      return {
+        ...coldResult(`${unavailable}; RUNTIME_OBSERVATION_${state}; observation only; no resend or settlement`),
+        runtimeObservation: {
+          state,
+          runtimeType: boundedText(dispatch.runtime_type, 128),
+          runtimeInstanceRef: boundedText(dispatch.runtime_instance_ref, 256),
+          sessionRef: boundedText(dispatch.session_ref, 256),
+          runtimeDispatchRef: boundedText(dispatch.runtime_dispatch_ref, 256),
+          evidence: {
+            source, located, complete: raw.complete === true,
+            eventsRead: typeof raw.eventsRead === 'number' && Number.isSafeInteger(raw.eventsRead) && raw.eventsRead >= 0
+              ? Math.min(raw.eventsRead, 10_000) : 0,
+            reason,
+          },
+        },
+      }
+    } catch {
+      if (!stillAuthorized()) return coldResult('AUTHORITY_REVOKED_DURING_OBSERVATION')
+      return coldResult('OBSERVATION_UNAVAILABLE; UNKNOWN; no resend')
+    }
+  }
   if (retained.inFlight) return retained.inFlight
   const run = async (): Promise<GovernedReconcileResult> => {
     const { input, port, fence } = retained
@@ -284,6 +396,18 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
     throw new Error('runGovernedDispatch: Runtime identity 与 live SessionHandle 不一致')
   }
 
+  // Pure preparation allocates the exact Runtime input reference before TX-3.
+  // It must not send, enqueue, resume a Session, or claim Runtime acceptance.
+  const dispatchId = randomUUID()
+  const preparedDispatch: PreparedRuntimeDispatch | undefined = adapter.prepareDispatch
+    ? await adapter.prepareDispatch({ kingdomDispatchId: dispatchId, sessionRef: session.sessionRef, text: input.text })
+    : undefined
+  if (adapter.prepareDispatch && (!preparedDispatch || typeof preparedDispatch.runtimeDispatchRef !== 'string'
+    || !preparedDispatch.runtimeDispatchRef.trim())) {
+    throw new Error('runGovernedDispatch: prepared Runtime dispatch reference 不能为空')
+  }
+  if (input.stillAuthorized && !input.stillAuthorized()) throw new Error('AUTHORITY_CHANGED: 派发准备期间当前调用者或范围已变化。')
+
   // TX-3：Execution + Decision.execution_id + Dispatch INTENDED（COMMIT POINT）+
   // Lease DISPATCH_READY→EXECUTING 在一个真实事务内整体提交或整体回滚。
   const prepared = prepareGovernedDispatch(store, {
@@ -294,6 +418,9 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
     leaseId,
     capabilityDecisionId,
     session,
+    dispatchId,
+    preparedRuntimeDispatchRef: preparedDispatch?.runtimeDispatchRef,
+    stillAuthorized: input.stillAuthorized,
     requestSnapshot: input.requestSnapshot,
     inputRefJson: input.inputRefJson,
     payloadHash: input.payloadHash,
@@ -335,7 +462,18 @@ export async function runGovernedDispatch(input: GovernedDispatchInput): Promise
 
     // COMMIT POINT 之后才允许 Runtime side effect
     if (input.stillAuthorized && !input.stillAuthorized()) throw new Error('AUTHORITY_CHANGED: 准备期间调用者变化，未向 Runtime 派发。')
-    const receipt = await adapter.dispatch({ sessionRef: sessionHandle.refs.sessionRef, text: input.text })
+    const receipt = await adapter.dispatch({
+      sessionRef: sessionHandle.refs.sessionRef, text: input.text,
+      kingdomDispatchId: intent.dispatch_id, preparedDispatch,
+    })
+
+    if (receipt.refs.runtimeType !== session.runtimeType
+      || receipt.refs.runtimeInstanceRef !== session.runtimeInstanceRef
+      || receipt.refs.sessionRef !== session.sessionRef
+      || !receipt.refs.runtimeDispatchRef?.trim()
+      || (intent.runtime_dispatch_ref !== null && receipt.refs.runtimeDispatchRef !== intent.runtime_dispatch_ref)) {
+      throw new Error('runGovernedDispatch: Dispatch Receipt Runtime/Session/reference 不匹配')
+    }
 
     // TX-3R：Receipt（INTENDED→DISPATCHED→RECEIVED）
     if (!runnerContext) throw new Error('runGovernedDispatch: RunnerContext 未注册')

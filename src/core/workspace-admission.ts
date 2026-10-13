@@ -16,10 +16,25 @@ declare const WORKSPACE_HANDLE: unique symbol
 export interface WorkspaceAdmissionHandle { readonly [WORKSPACE_HANDLE]: true }
 interface Live { store: KingdomStore; record: Reservation; closed: boolean }
 const handles = new WeakMap<object, Live>()
+export interface WorkspaceOccupancyDiagnostic {
+  source: 'RESOURCE_RESERVATION' | 'LEGACY_LEASE' | 'LEGACY_EXECUTION' | 'BUDGET_PREPARATION'
+  taskId: string; attemptNo: number | null; state: string
+  admissionId?: string; leaseId?: string; dispatchId?: string; executionId?: string
+}
 export class WorkspaceAdmissionError extends Error {
-  constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'WorkspaceAdmissionError' }
+  constructor(readonly code: string, message: string, readonly occupancy: readonly WorkspaceOccupancyDiagnostic[] = [],
+    readonly occupancyCount: number = occupancy.length) { super(`${code}: ${message}`); this.name = 'WorkspaceAdmissionError' }
 }
 const deny = (code: string, message: string): never => { throw new WorkspaceAdmissionError(code, message) }
+const diagnosticId = (value: unknown): string => typeof value === 'string' && /^[\w][\w.:-]{0,79}$/u.test(value) ? value : 'REDACTED'
+function denyBusy(code: string, reason: string, occupancy: WorkspaceOccupancyDiagnostic[]): never {
+  const shown = occupancy.slice(0, 3).map(item => ({ ...item, taskId: diagnosticId(item.taskId), state: diagnosticId(item.state),
+    attemptNo: Number.isSafeInteger(item.attemptNo) && item.attemptNo! > 0 ? item.attemptNo : null,
+    ...Object.fromEntries(['admissionId', 'leaseId', 'dispatchId', 'executionId']
+      .filter(field => field in item).map(field => [field, diagnosticId(item[field as keyof WorkspaceOccupancyDiagnostic])])) }))
+  const references = shown.map(item => Object.entries(item).map(([name, value]) => `${name}=${value ?? 'UNKNOWN'}`).join(', ')).join('；')
+  throw new WorkspaceAdmissionError(code, `${reason} 占用引用（${shown.length}/${occupancy.length}）：${references}。请等待前序结束或对账后重新请求；系统不会自动排队。`, shown, occupancy.length)
+}
 
 /** Resolve existing aliases. A missing directory is rechecked again before dispatch. */
 export function canonicalWorkspaceKey(path: string): string {
@@ -93,7 +108,11 @@ export function assertWorkspaceAvailable(store: KingdomStore, kingdomId: string,
     const active = records(store, kingdomId).filter(record => stillHeld(store, record))
     const overlaps = (path: string | null | undefined): boolean => !key || !path || workspaceKeysOverlap(key, canonicalWorkspaceKey(path))
     const conflicts = active.filter(record => (!key || workspaceKeysOverlap(key, record.workspaceKey)) && (access === 'WRITE' || record.access === 'WRITE'))
-    if (conflicts.length) return deny('WORKSPACE_BUSY', '重叠工作区正在使用或等待对账，本项排队，尚未访问执行会话。')
+    if (conflicts.length) return denyBusy('WORKSPACE_BUSY', '重叠工作区存在资源预留或待对账占用。', conflicts.map(record => ({
+      source: 'RESOURCE_RESERVATION', taskId: record.taskId, attemptNo: record.attemptNo, state: record.state,
+      admissionId: record.admissionId, ...(record.leaseId ? { leaseId: record.leaseId } : {}),
+      ...(record.dispatchId ? { dispatchId: record.dispatchId } : {}),
+    })))
     // Pre-existing work without a resource record is conservatively exclusive.
     // This covers installation/upgrade while another governed Lease is unresolved.
     const representedLeases = new Set(active.map(record => record.leaseId).filter(Boolean))
@@ -101,18 +120,23 @@ export function assertWorkspaceAvailable(store: KingdomStore, kingdomId: string,
       if (lease.state === 'RELEASED' || representedLeases.has(lease.lease_id)) continue
       const other = store.getTerritoryById(lease.territory_id)
       if (overlaps(other?.workspace_path)) {
-        return deny('WORKSPACE_LEGACY_LEASE_BUSY', '已有未结算执行缺少资源接纳记录，须先对账或串行等待。')
+        return denyBusy('WORKSPACE_LEGACY_LEASE_BUSY', '已有未结算Lease缺少资源接纳记录。', [{
+          source: 'LEGACY_LEASE', taskId: lease.task_id, attemptNo: lease.attempt_no, state: lease.state, leaseId: lease.lease_id,
+        }])
       }
     }
     for (const task of store.listTasks(kingdomId)) {
-      const unrepresented = store.listExecutions(task.task_id).some(execution =>
+      const unrepresented = store.listExecutions(task.task_id).filter(execution =>
         !['COMPLETED', 'FAILED', 'ABORTED'].includes(execution.state)
         && (!execution.lease_id || !representedLeases.has(execution.lease_id)))
-      if (unrepresented && overlaps(store.getTerritoryById(task.territory_id)?.workspace_path)) {
-        return deny('WORKSPACE_LEGACY_EXECUTION_BUSY', '已有兼容或未登记资源的执行占用重叠目录，请等待结束或先对账。')
+      if (unrepresented.length && overlaps(store.getTerritoryById(task.territory_id)?.workspace_path)) {
+        return denyBusy('WORKSPACE_LEGACY_EXECUTION_BUSY', '已有兼容或未登记资源的非终态Execution占用重叠目录。', unrepresented.map(execution => ({
+          source: 'LEGACY_EXECUTION', taskId: execution.task_id, attemptNo: execution.attempt_no, state: execution.state,
+          executionId: execution.execution_id, ...(execution.lease_id ? { leaseId: execution.lease_id } : {}),
+        })))
       }
     }
-    const pendingBudgets = new Map<string, { taskId: string; attemptNo: number; state: string }>()
+    const pendingBudgets = new Map<string, { taskId: string; attemptNo: number; state: string; admissionId: string }>()
     for (const event of store.listBudgetEvents(kingdomId)) {
       if (!event.event_type.startsWith('BUDGET_ADMISSION_')) continue
       try { const value = JSON.parse(event.payload_json); pendingBudgets.set(value.admissionId, value) }
@@ -122,7 +146,9 @@ export function assertWorkspaceAvailable(store: KingdomStore, kingdomId: string,
       if (other.state !== 'RESERVED' || active.some(record => record.taskId === other.taskId && record.attemptNo === other.attemptNo)) continue
       const task = store.getTask(other.taskId), territory = task ? store.getTerritoryById(task.territory_id) : null
       if (overlaps(territory?.workspace_path)) {
-        return deny('WORKSPACE_LEGACY_PREPARATION_BUSY', '已有未决准备可能使用相同目录，请先核对。')
+        return denyBusy('WORKSPACE_LEGACY_PREPARATION_BUSY', '已有预算RESERVED准备可能使用相同目录。', [{
+          source: 'BUDGET_PREPARATION', taskId: other.taskId, attemptNo: other.attemptNo, state: other.state, admissionId: other.admissionId,
+        }])
       }
     }
 }

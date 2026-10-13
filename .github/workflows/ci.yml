@@ -27,6 +27,9 @@ jobs:
       - name: Unit tests (tsc build + node --test)
         run: npm test
 
+      - name: Dispatch probe failure contracts
+        run: node --test tests/dsh-dispatch-id-probe.test.mjs
+
       - name: Governance and recovery smoke (isolated fixtures)
         run: node scripts/p2-smoke.mjs
 

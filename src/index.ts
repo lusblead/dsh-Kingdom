@@ -920,7 +920,8 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
 
   const collectDispatchUsage = async (dispatchId: string, authorized: () => boolean = () => true): Promise<void> => {
     const dispatch = store.getDispatch(dispatchId)
-    if (!dispatch?.runtime_dispatch_ref) return
+    // A pre-committed planned reference is not proof of Runtime acceptance.
+    if (!dispatch?.runtime_dispatch_ref || !dispatch.receipt_json) return
     // Resolve the persisted exact reference against Runtime-owned agents; do not mint a branded SessionId.
     const agent = ctx.get('agents')?.list().find(candidate => candidate.id === dispatch.session_ref)
     const observed = await observeDshDispatchUsage(agent?.session, dispatch.runtime_dispatch_ref)
@@ -1035,6 +1036,8 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       provider: config.workerProvider || 'spawn',
       model: null,
       agents,
+      sessions: ctx.get('sessions') as { flush(session: unknown): Promise<boolean> } | undefined,
+      sessionPersistence: ctx.get('sessionPersistence'),
       permission: ctx.get('permission'),
       sandboxPolicy: s4Seam.sandboxPolicy,
       approval: s4Seam.approval,
@@ -1253,11 +1256,26 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       const current = resolveGovernedStartSupervisor(store, governedStartCommandContext(kingdomId, principal), args.taskId)
       return current.ok && current.binding.binding_id === authorized.binding.binding_id
     }
-    const reconciled = await reconcileGovernedDispatch(store, dispatch.dispatch_id, stillAuthorized)
+    // Observation-only adapter: reads an exact saved Runtime reference without
+    // Session resume, enforcement, fresh RunnerContext or cleanup authority.
+    const observationAdapter = new DshRuntimeAdapter({
+      runtimeInstanceRef: `dsh-${hostname()}`,
+      provider: config.workerProvider || 'spawn', model: null,
+      agents: ctx.get('agents'),
+      sessions: ctx.get('sessions') as { flush(session: unknown): Promise<boolean> } | undefined,
+      sessionPersistence: ctx.get('sessionPersistence'),
+    })
+    const reconciled = await reconcileGovernedDispatch(store, dispatch.dispatch_id, stillAuthorized, observationAdapter)
     if (!stillAuthorized()) return 'AUTHZ_DENIED [AUTHORITY_REVOKED]: 对账期间授权已失效，请重新确认当前任务。'
-    await collectDispatchUsage(dispatch.dispatch_id, stillAuthorized)
+    if (!reconciled.readOnly) await collectDispatchUsage(dispatch.dispatch_id, stillAuthorized)
     if (!stillAuthorized()) return 'AUTHZ_DENIED [AUTHORITY_REVOKED]: 对账期间授权已失效。'
-    if (reconciled.status !== 'TERMINAL') return `RECOVERY_REQUIRED [${reconciled.status}]: ${reconciled.reason}；未重新派发任务，未释放 Lease。`
+    if (reconciled.status !== 'TERMINAL') {
+      const observation = reconciled.runtimeObservation
+      const detail = observation
+        ? `；只读 Runtime 观察=${observation.state}，来源=${observation.evidence.source}，准确输入${observation.evidence.located ? '已找到' : '未找到或不可确认'}；该观察不生成 Receipt 或终态`
+        : ''
+      return `RECOVERY_REQUIRED [${reconciled.status}]: ${reconciled.reason}${detail}；未重新派发任务，未释放 Lease。`
+    }
     try {
       const claim = submitGovernedClaim(store, dispatch.dispatch_id, reconciled.summary ?? '(终态证据已确认；最终消息文本当前不可恢复)')
       const lease = store.getLease(dispatch.lease_id)

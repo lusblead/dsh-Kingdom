@@ -20,6 +20,8 @@ import type {
   EnforcementRequest,
   ExecutionObservation,
   MaterializeResult,
+  PrepareDispatchInput,
+  PreparedRuntimeDispatch,
   PreflightResult,
   ReconcileResult,
   RuntimeAdapter,
@@ -42,7 +44,14 @@ import {
   type DshPolicyDeps,
 } from '../capability/dsh-enforcement.js'
 import { terminalOutcomeOf } from '../dispatch/evidence.js'
-import { locateDshDispatchRef, readDshSessionEvents, type DshSessionEventSource } from './dsh-session-events.js'
+import {
+  DSH_RECONCILE_EVENT_LIMIT,
+  locateDshDispatchRef,
+  readBoundedDshSessionEvents,
+  readDshSessionEvents,
+  type BoundedDshEvents,
+  type DshSessionEventSource,
+} from './dsh-session-events.js'
 
 // ── dsh 结构面（@ 00b7102f1d）───────────────────────────────────────────────
 
@@ -154,6 +163,46 @@ interface AgentsLike {
 
 interface SessionPersistenceLike {
   has?(id: string): boolean
+  stat?(id: string): Promise<unknown>
+  open?(id: string, access: 'read'): Promise<{
+    readonly id: string
+    readonly access: 'read'
+    read(offset: number, length: number): Promise<{ readonly events: readonly RuntimeEvent[] }>
+    close(): Promise<void>
+  }>
+}
+
+type PreparedDshDispatch = {
+  readonly kingdomDispatchId: string
+  readonly sessionRef: string
+  readonly text: string
+  readonly message: UserMessageLike
+  readonly agent: AgentLike
+  readonly session: SessionLike
+  used: boolean
+}
+
+const DEFAULT_DSH_IO_TIMEOUT_MS = 5000
+
+/** Timeout never cancels/resends a Runtime operation; its outcome stays uncertain. */
+async function boundedWait<T>(operation: Promise<T>, milliseconds: number, code: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(code)), milliseconds) }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function freezeUserMessage(text: string): UserMessageLike {
+  const message = buildUserMessage(text)
+  Object.freeze(message.content[0])
+  Object.freeze(message.content)
+  Object.freeze(message.source)
+  return Object.freeze(message)
 }
 
 interface AgentPresetsLike {
@@ -233,10 +282,14 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
   readonly runtimeType = 'dsh'
   /** Fence tokens are accepted only by the exact Adapter instance that issued them. */
   private readonly trustFenceStates = new WeakMap<object, FenceState>()
+  /** The exposed ref cannot replace the original single-use preparation token. */
+  private readonly preparedDispatches = new WeakMap<object, PreparedDshDispatch>()
   private readonly deps: Required<Pick<DshBackendDeps, 'runtimeInstanceRef' | 'provider'>> & {
     model: string | null
     agents: AgentsLike
     sessionPersistence: SessionPersistenceLike | undefined
+    sessions: DshBackendDeps['sessions']
+    dispatchFlushTimeoutMs: number
     presets: AgentPresetsLike | undefined
     policy: DshPolicyDeps
   }
@@ -248,6 +301,10 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       model: deps.model ?? null,
       agents: asAgents(deps.agents),
       sessionPersistence: asPersistence(deps.sessionPersistence),
+      sessions: deps.sessions,
+      dispatchFlushTimeoutMs: Number.isFinite(deps.dispatchFlushTimeoutMs) && (deps.dispatchFlushTimeoutMs ?? 0) > 0
+        ? Math.min(deps.dispatchFlushTimeoutMs!, DEFAULT_DSH_IO_TIMEOUT_MS)
+        : DEFAULT_DSH_IO_TIMEOUT_MS,
       presets: asPresets(deps.presets),
       policy: {
         toolDisclosure: deps.toolDisclosure as DshPolicyDeps['toolDisclosure'],
@@ -696,11 +753,71 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
 
   // ── Dispatch / Evidence / Reconcile ────────────────────────────────────────
 
+  async prepareDispatch(input: PrepareDispatchInput): Promise<PreparedRuntimeDispatch> {
+    if (!input.kingdomDispatchId.trim() || !input.sessionRef.trim()) throw new Error('dsh prepare: DISPATCH_IDENTITY_REQUIRED')
+    const agent = this.deps.agents.get(input.sessionRef)
+    if (!agent || agent.id !== input.sessionRef) throw new Error('dsh prepare: EXACT_LIVE_SESSION_REQUIRED')
+    const message = freezeUserMessage(input.text)
+    const baseline = readDshSessionEvents(agent.session)
+    if (baseline === null) throw new Error('dsh prepare: BASELINE_UNREADABLE')
+    if (locateDshDispatchRef(baseline, message.id) >= 0) throw new Error('dsh prepare: RUNTIME_REF_ALREADY_PRESENT')
+    const token: PreparedRuntimeDispatch = Object.freeze({ runtimeDispatchRef: message.id })
+    this.preparedDispatches.set(token, {
+      kingdomDispatchId: input.kingdomDispatchId,
+      sessionRef: input.sessionRef,
+      text: input.text,
+      message,
+      agent,
+      session: agent.session,
+      used: false,
+    })
+    return token
+  }
+
   async dispatch(input: DispatchInput): Promise<DispatchReceipt> {
     const agent = this.deps.agents.get(input.sessionRef)
     if (!agent) throw new Error(`dsh dispatch: session ${input.sessionRef} 不在 live registry（无法 dispatch）`)
-    const message = buildUserMessage(input.text)
-    agent.followup(message) // 持久 splice 插入即「已接受」
+    let message: UserMessageLike
+    if (input.preparedDispatch !== undefined) {
+      const prepared = input.preparedDispatch !== null && typeof input.preparedDispatch === 'object'
+        ? this.preparedDispatches.get(input.preparedDispatch)
+        : undefined
+      if (!prepared) throw new Error('dsh dispatch: UNKNOWN_PREPARED_TOKEN')
+      if (prepared.used) throw new Error('dsh dispatch: PREPARED_TOKEN_ALREADY_USED')
+      if (prepared.kingdomDispatchId !== input.kingdomDispatchId || prepared.sessionRef !== input.sessionRef
+        || prepared.text !== input.text || prepared.agent !== agent || prepared.session !== agent.session
+        || agent.id !== input.sessionRef || prepared.message.id !== input.preparedDispatch.runtimeDispatchRef) {
+        throw new Error('dsh dispatch: PREPARED_IDENTITY_MISMATCH')
+      }
+      if (typeof this.deps.sessions?.flush !== 'function') throw new Error('dsh dispatch: DURABILITY_BARRIER_UNAVAILABLE')
+      const baseline = readDshSessionEvents(agent.session)
+      if (baseline === null) throw new Error('dsh dispatch: BASELINE_UNREADABLE')
+      if (locateDshDispatchRef(baseline, prepared.message.id) >= 0) throw new Error('dsh dispatch: RUNTIME_REF_ALREADY_PRESENT')
+      // Consume before any side effect. A thrown followup or uncertain barrier
+      // must never make this token usable for an automatic second send.
+      prepared.used = true
+      message = prepared.message
+      agent.followup(message)
+      let durable: boolean
+      try {
+        durable = await boundedWait(
+          Promise.resolve(this.deps.sessions.flush(agent.session)),
+          this.deps.dispatchFlushTimeoutMs,
+          'dsh dispatch: DURABILITY_BARRIER_TIMEOUT',
+        )
+      } catch (error: unknown) {
+        throw new Error(error instanceof Error && error.message === 'dsh dispatch: DURABILITY_BARRIER_TIMEOUT'
+          ? 'dsh dispatch: DURABILITY_BARRIER_TIMEOUT'
+          : 'dsh dispatch: DURABILITY_BARRIER_UNCERTAIN')
+      }
+      if (durable !== true) throw new Error('dsh dispatch: DURABILITY_BARRIER_NOT_CONFIRMED')
+    } else {
+      // Explicit compatibility seam for historical direct Adapter consumers;
+      // correlated governed dispatch cannot fall back to this non-durable path.
+      if (input.kingdomDispatchId !== undefined) throw new Error('dsh dispatch: PREPARED_TOKEN_REQUIRED')
+      message = buildUserMessage(input.text)
+      agent.followup(message)
+    }
     return {
       refs: {
         runtimeType: this.runtimeType,
@@ -718,22 +835,96 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     return reconstructExecutionObservation(live, refs.runtimeDispatchRef)
   }
 
+  private async persistedEvents(sessionRef: string): Promise<BoundedDshEvents> {
+    const persistence = this.deps.sessionPersistence
+    if (typeof persistence?.open !== 'function') return { events: [], complete: false, reason: 'UNREADABLE' }
+    let reader: Awaited<ReturnType<NonNullable<SessionPersistenceLike['open']>>> | undefined
+    let openTimedOut = false
+    let result: BoundedDshEvents = { events: [], complete: false, reason: 'UNREADABLE' }
+    try {
+      const opening = Promise.resolve(persistence.open(sessionRef, 'read'))
+      // If open finishes after our deadline, release only its read handle.
+      void opening.then(handle => {
+        if (openTimedOut) void Promise.resolve().then(() => handle.close()).catch(() => undefined)
+      }, () => undefined)
+      try {
+        reader = await boundedWait(opening, DEFAULT_DSH_IO_TIMEOUT_MS, 'PERSISTENCE_OPEN_TIMEOUT')
+      } catch {
+        openTimedOut = true
+        return result
+      }
+      if (reader.id !== sessionRef || reader.access !== 'read' || typeof reader.read !== 'function' || typeof reader.close !== 'function') return result
+      const slice = await boundedWait(
+        Promise.resolve(reader.read(0, DSH_RECONCILE_EVENT_LIMIT)),
+        DEFAULT_DSH_IO_TIMEOUT_MS,
+        'PERSISTENCE_READ_TIMEOUT',
+      )
+      // At the exact limit we cannot know whether the log has a later tail.
+      result = readBoundedDshSessionEvents({ events: slice.events })
+      if (result.events.length === DSH_RECONCILE_EVENT_LIMIT) result = { ...result, complete: false, reason: 'EVENT_LIMIT' }
+    } catch {
+      result = { events: [], complete: false, reason: 'UNREADABLE' }
+    } finally {
+      if (reader && typeof reader.close === 'function') {
+        try {
+          await boundedWait(Promise.resolve(reader.close()), DEFAULT_DSH_IO_TIMEOUT_MS, 'PERSISTENCE_CLOSE_TIMEOUT')
+        } catch {
+          result = { events: [], complete: false, reason: 'UNREADABLE' }
+        }
+      }
+    }
+    return result
+  }
+
   async reconcile(kingdomDispatchId: string, refs: { sessionRef: string; runtimeDispatchRef?: string }): Promise<ReconcileResult> {
-    // session 维：live registry 或持久可恢复 → AVAILABLE；否则 UNKNOWN（GONE 需显式删除证据，S5 细化）
     const live = this.deps.agents.get(refs.sessionRef)
     let sessionObservation: ReconcileResult['sessionObservation'] = 'UNKNOWN'
-    if (live) sessionObservation = 'AVAILABLE'
-    else if (this.deps.sessionPersistence?.has?.(refs.sessionRef) === true) sessionObservation = 'AVAILABLE'
-
-    // execution 维：live 会话事件链；不可判定 → UNKNOWN（fail-closed，不盲发、不 ABORT）
+    let source: 'LIVE' | 'PERSISTED' | 'NONE' = 'NONE'
+    let projection: BoundedDshEvents = { events: [], complete: false, reason: 'UNREADABLE' }
+    if (live?.id === refs.sessionRef) {
+      sessionObservation = 'AVAILABLE'
+      source = 'LIVE'
+      projection = readBoundedDshSessionEvents(live.session)
+    } else if (typeof this.deps.sessionPersistence?.open === 'function') {
+      source = 'PERSISTED'
+      projection = await this.persistedEvents(refs.sessionRef)
+      if (projection.complete || projection.reason === 'EVENT_LIMIT') sessionObservation = 'AVAILABLE'
+    }
+    if (sessionObservation === 'UNKNOWN') {
+      try {
+        // Presence metadata never establishes a dispatch or its terminal.
+        const persistence = this.deps.sessionPersistence
+        const present = typeof persistence?.stat === 'function'
+          ? await boundedWait(Promise.resolve(persistence.stat(refs.sessionRef)), DEFAULT_DSH_IO_TIMEOUT_MS, 'PERSISTENCE_STAT_TIMEOUT')
+          : persistence?.has?.(refs.sessionRef) === true
+        if (present) sessionObservation = 'AVAILABLE'
+      } catch { /* unknown presence stays unknown */ }
+    }
+    const located = Boolean(refs.runtimeDispatchRef && locateDshDispatchRef(projection.events, refs.runtimeDispatchRef) >= 0)
     let executionObservation: ExecutionObservation = 'UNKNOWN'
-    if (live && refs.runtimeDispatchRef) {
-      executionObservation = reconstructExecutionObservation(live.session, refs.runtimeDispatchRef)
+    if (projection.complete && located && refs.runtimeDispatchRef) {
+      const start = locateDshDispatchRef(projection.events, refs.runtimeDispatchRef)
+      const foreign = projection.events.slice(start).some(event => {
+        if (event.type === 'user/message') return eventMessageId(event) !== refs.runtimeDispatchRef
+        return event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted)
+          && event.data.inserted.some(item => item === null || typeof item !== 'object' || (item as { id?: unknown }).id !== refs.runtimeDispatchRef)
+      })
+      if (!foreign) executionObservation = reconstructExecutionObservation({ header: {}, events: projection.events }, refs.runtimeDispatchRef)
     }
     return {
       executionObservation,
       sessionObservation,
-      evidence: { kingdomDispatchId, runtimeDispatchRef: refs.runtimeDispatchRef ?? null, observedAt: new Date().toISOString() },
+      evidence: {
+        kingdomDispatchId,
+        runtimeDispatchRef: refs.runtimeDispatchRef ?? null,
+        source,
+        located,
+        eventsRead: projection.events.length,
+        complete: projection.complete,
+        reason: projection.reason !== 'READABLE' ? projection.reason === 'EVENT_LIMIT' ? 'EVENT_LIMIT' : 'OBSERVATION_UNREADABLE'
+          : located ? 'EXACT_INPUT_FOUND' : 'INPUT_NOT_LOCATED',
+        observedAt: new Date().toISOString(),
+      },
     }
   }
 }

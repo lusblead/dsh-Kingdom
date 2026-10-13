@@ -1,0 +1,275 @@
+version: 1
+feature_id: "governed-process-boundaries"
+title: "Owned process crash and SQLite Lease contention verification"
+status: "implemented"
+characteristics:
+  cross_component: true
+  asynchronous: true
+  persisted_state: true
+  external_dependencies: false
+  retry_or_compensation: true
+  security_sensitive: true
+nodes:
+  E1:
+    kind: entry
+    description: Explicit isolated process-boundary test or probe runner
+    trigger: node test file or runGovernedProcessProbe
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runGovernedProcessProbe
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  A1:
+    kind: action
+    description: Create an owned disposable SQLite database and fork known child helper
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: isolated
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: startChild
+  T1:
+    kind: transition
+    description: Seed Affinity and optional DISPATCH_READY prerequisite through real Core APIs
+    entity: Test fixture Affinity and Lease
+    from: Empty isolated database
+    to: Affinity or DISPATCH_READY Lease with explicit fake enforcement
+    trigger: Owned seed child
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: seedStore
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  D1:
+    kind: decision
+    description: Select explicit named crash or same-Session contention probe
+    condition: runCrashScenario or runLeaseContention invoked
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runGovernedProcessProbe
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: two real processes contend for one Session lease without duplicate dispatch
+  A2:
+    kind: action
+    description: Run prepareGovernedDispatch and hold the named IPC crash barrier
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: main
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+  D2:
+    kind: decision
+    description: Kill before TX-3 COMMIT or after its durable COMMIT
+    condition: Crash point equals BEFORE_COMMIT
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: BEFORE_COMMIT
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  T2:
+    kind: transition
+    description: Real TX-3 prepares and commits the complete ledger tuple atomically
+    entity: Execution and Dispatch and Lease
+    from: No Execution or Dispatch and DISPATCH_READY Lease
+    to: STARTING Execution and INTENDED Dispatch and EXECUTING Lease
+    trigger: prepareGovernedDispatch COMMIT
+    code:
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/core/db.ts
+        symbol: withImmediateTransaction
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  A3:
+    kind: action
+    description: Optionally flush an explicitly fake external acceptance marker before any Receipt
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: FAKE_RUNTIME_ACCEPTANCE
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  C1:
+    kind: compensation
+    description: Parent forcefully terminates only its owned ChildProcess at a known barrier
+    restores_or_resolves: Uncommitted SQLite TX-3 rolls back while committed rows survive
+    failure_behavior: A missing barrier or unexpected child exit fails the test and closes owned resources
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runCrashScenario
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: stop
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  T5:
+    kind: transition
+    description: Actual process termination discards the uncommitted TX-3 tuple
+    entity: SQLite uncommitted Execution and Dispatch and Lease
+    from: Uncommitted STARTING and INTENDED and EXECUTING tuple
+    to: No Execution or Dispatch and original DISPATCH_READY Lease
+    trigger: SIGKILL before COMMIT and new connection opens database
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runCrashScenario
+      - path: src/core/db.ts
+        symbol: withImmediateTransaction
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  A4:
+    kind: action
+    description: New process opens only the existing isolated database and reads durable rows
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: snapshot
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: finish
+  T3:
+    kind: transition
+    description: Explicit indeterminate recovery moves committed tuple to RECOVERING and preserves exclusivity
+    entity: Execution and Dispatch and Lease
+    from: STARTING and INTENDED and EXECUTING or retained DISPATCH_READY Lease
+    to: Three RECOVERING rows or unchanged pre-COMMIT Lease
+    trigger: New process explicitly applies indeterminate recovery; blind retry remains rejected
+    code:
+      - path: src/dispatch/reconcile.ts
+        symbol: applyRecovery
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+      - path: src/core/governed.ts
+        symbol: markGovernedDispatchRecovering
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  D4:
+    kind: decision
+    description: Crash inspection applies recovery and retry checks while contention inspection reads acquired Lease only
+    condition: Inspection child mode equals inspect-crash rather than inspect-contention
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: inspect-crash
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: inspect-contention
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: two real processes contend for one Session lease without duplicate dispatch
+  A5:
+    kind: action
+    description: Assert same-Session acquire rejects and Worker runner exits before any Runtime side effect
+    code:
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: runGovernedTask
+      - path: src/worker/governed-executor.ts
+        symbol: guardBeforeWorkerSessionSideEffect
+      - path: src/core/governed.ts
+        symbol: acquireExecutionLease
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  A6:
+    kind: action
+    description: Two distinct child connections report READY and receive GO for one Session
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runLeaseContention
+  A7:
+    kind: action
+    description: Wait for both attempts and first writer lock, then release a bounded artificial test barrier
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: testLockHoldMs
+      - path: tests/helpers/governed-process-child.mjs
+        symbol: waitForRelease
+  T4:
+    kind: transition
+    description: Competing real SQLite connections commit exactly one active Session Lease
+    entity: Execution Lease
+    from: No Lease for test Session
+    to: One ACQUIRED Lease and one unique or busy rejection
+    trigger: Two real acquireExecutionLease calls after READY barrier
+    code:
+      - path: src/core/governed.ts
+        symbol: acquireExecutionLease
+      - path: src/core/db.ts
+        symbol: lease_one_active_per_session
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: two real processes contend for one Session lease without duplicate dispatch
+  D3:
+    kind: decision
+    description: Accept only observed rows, failure categories and absence of Runtime retry that satisfy the boundary
+    condition: assertCrashBoundary or assertLeaseContention completes without assertion failure
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: assertCrashBoundary
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: assertLeaseContention
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: two real processes contend for one Session lease without duplicate dispatch
+  G1:
+    kind: safeguard
+    description: Limit termination and cleanup to resources created by this invocation
+    safeguard_type: authorization
+    guarantee: Never discover or terminate a user process or remove a pre-existing directory
+    protects: [A1, C1]
+    failure_behavior: Fail after bounded IPC wait and close only retained ChildProcess handles and own mkdtemp directory
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: isolated
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: startChild
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  G2:
+    kind: safeguard
+    description: Keep missing receipt and indeterminate dispatch recoverable without opening blind retry
+    safeguard_type: atomicity
+    guarantee: Committed indeterminate rows recover together; active Lease blocks new acquire and Runtime session actions; Task stays ASSIGNED
+    protects: [T3, A5]
+    failure_behavior: Missing Receipt returns RECOVERING; indeterminate recovery does not release Lease or resend
+    code:
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+      - path: src/worker/governed-executor.ts
+        symbol: guardBeforeWorkerSessionSideEffect
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: assertCrashBoundary
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: real child crash/reopen preserves dispatch boundary
+  G3:
+    kind: safeguard
+    description: Bound evidence claims to local processes, SQLite and explicit fake Runtime prerequisites
+    safeguard_type: validation
+    guarantee: Real DSH Provider remains NOT_RUN and effective model unverified; artificial hold latency never becomes a production claim
+    protects: [A3, X1]
+    failure_behavior: Unexpected counts or categories fail assertions; public JSON omits scratch paths and private content
+    code:
+      - path: scripts/e2e/governed-process-probe.mjs
+        symbol: runGovernedProcessProbe
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: realDshProvider
+    tests:
+      - path: tests/governed-process-boundaries.test.ts
+        symbol: two real processes contend for one Session lease without duplicate dispatch
+  X1:
+    kind: outcome
+    description: All observed boundaries hold and report carries explicit local-only evidence classification
+    result: Four process tests pass with dynamic state and timing observations; real DSH Provider remains NOT_RUN
+  X2:
+    kind: outcome
+    description: Missing barrier or assertion failure rejects the probe
+    result: Nonzero test or runner exit with owned process and scratch cleanup

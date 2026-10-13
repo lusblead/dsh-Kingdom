@@ -108,7 +108,7 @@ function fakeAgents(): {
       get: (id: string) => agents.get(id),
       list: () => [...agents.values()],
     },
-    sessions: { get: (id: string) => sessions.get(id) },
+    sessions: { get: (id: string) => sessions.get(id), flush: async () => true },
     registerAgent,
     followupCount: () => followups,
     sessionRefs: () => [...workerSessionIds],

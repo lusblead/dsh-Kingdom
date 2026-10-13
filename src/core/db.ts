@@ -1849,6 +1849,20 @@ BEGIN SELECT RAISE(ABORT, 'DISPATCH_NO_DELETE'); END;
     return { ...task, status: next, assigned_binding_id: assigned, result_summary: summary, updated_at: now }
   }
 
+  /** Targeted ACCEPT compare-and-set; a stale Task cannot overwrite a newer relation or state. */
+  transitionTaskIfCurrent(task: TaskRow, to: TaskStatus): TaskRow {
+    const next = transition(asTaskStatus(task.status), to)
+    const now = new Date().toISOString()
+    const result = this.db.prepare(
+      `UPDATE tasks SET status = ?, updated_at = ?
+        WHERE task_id = ? AND status = ? AND territory_id = ?
+          AND assigned_binding_id IS ? AND result_summary IS ? AND updated_at = ?`,
+    ).run(next, now, task.task_id, task.status, task.territory_id,
+      task.assigned_binding_id, task.result_summary, task.updated_at)
+    if (result.changes !== 1) throw new Error('TASK_STATE_CHANGED: 当前任务关系或状态已变化，拒绝过期状态更新。')
+    return { ...task, status: next, updated_at: now }
+  }
+
   // ── worker_results（Phase 2 第 6 张表；保存 Claim，不是 Fact）──
 
   listWorkerResults(taskId: string): WorkerResultRow[] {

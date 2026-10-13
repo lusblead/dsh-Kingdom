@@ -2,8 +2,59 @@ import type { RuntimeEvent } from './contract.js'
 
 /** Supported DSH Session read surfaces; the live Session is never wrapped. */
 export interface DshSessionEventSource {
-  readonly snapshotEvents?: () => readonly RuntimeEvent[]
+  readonly seq?: number
+  readonly snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly RuntimeEvent[]
   readonly events?: readonly RuntimeEvent[]
+}
+
+export const DSH_RECONCILE_EVENT_LIMIT = 10_000
+
+export interface BoundedDshEvents {
+  readonly events: readonly RuntimeEvent[]
+  readonly complete: boolean
+  readonly reason: 'READABLE' | 'UNREADABLE' | 'EVENT_LIMIT'
+}
+
+function validEvents(events: unknown): events is readonly RuntimeEvent[] {
+  if (!Array.isArray(events)) return false
+  // for-of visits sparse slots as undefined; Array.every would skip them and
+  // incorrectly admit a non-contiguous projection as readable evidence.
+  for (const event of events) {
+    if (event === null || typeof event !== 'object' || Array.isArray(event)
+      || typeof event.type !== 'string' || event.type.length === 0
+      || (event.data !== undefined && (event.data === null || typeof event.data !== 'object' || Array.isArray(event.data)))) return false
+  }
+  return true
+}
+
+/** Bounded read projection only; even a missing ID in a complete read is UNKNOWN. */
+export function readBoundedDshSessionEvents(session: unknown, limit = DSH_RECONCILE_EVENT_LIMIT): BoundedDshEvents {
+  if (session === null || typeof session !== 'object') return { events: [], complete: false, reason: 'UNREADABLE' }
+  try {
+    const source = session as DshSessionEventSource
+    let events: unknown
+    let complete: boolean
+    if ('snapshotEvents' in source) {
+      if (typeof source.snapshotEvents !== 'function') return { events: [], complete: false, reason: 'UNREADABLE' }
+      const count = source.seq
+      events = source.snapshotEvents(0, limit)
+      complete = typeof count === 'number' && Number.isSafeInteger(count) && count >= 0
+        ? count <= limit && Array.isArray(events) && events.length === count
+        : Array.isArray(events) && events.length < limit
+    } else {
+      events = source.events
+      complete = Array.isArray(events) && events.length <= limit
+    }
+    if (!Array.isArray(events)) return { events: [], complete: false, reason: 'UNREADABLE' }
+    const prefix = events.length > limit ? events.slice(0, limit) : events
+    // Legacy arrays or a nonconforming snapshot implementation must not make
+    // validation itself traverse more than the observation budget.
+    if (!validEvents(prefix)) return { events: [], complete: false, reason: 'UNREADABLE' }
+    if (events.length > limit || !complete) return { events: prefix, complete: false, reason: 'EVENT_LIMIT' }
+    return { events: prefix, complete: true, reason: 'READABLE' }
+  } catch {
+    return { events: [], complete: false, reason: 'UNREADABLE' }
+  }
 }
 
 /**
@@ -23,12 +74,7 @@ export function readDshSessionEvents(session: unknown): readonly RuntimeEvent[] 
     } else {
       events = source.events
     }
-    if (!Array.isArray(events)) return null
-    for (const event of events) {
-      if (event === null || typeof event !== 'object' || Array.isArray(event)
-        || typeof event.type !== 'string' || event.type.length === 0
-        || (event.data !== undefined && (event.data === null || typeof event.data !== 'object' || Array.isArray(event.data)))) return null
-    }
+    if (!validEvents(events)) return null
     return events as readonly RuntimeEvent[]
   } catch {
     return null

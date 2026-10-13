@@ -58,7 +58,7 @@ interface FakeAgents {
     get(sessionId: string): unknown
     list(): unknown[]
   }
-  sessions: { get(sessionId: string): unknown }
+  sessions: { get(sessionId: string): unknown; flush(session: unknown): Promise<boolean> }
   counts(): { create: number; resume: number; followup: number }
   setCurrent(sessionId: string | undefined): void
   ensure(sessionId: string): unknown
@@ -145,6 +145,8 @@ function makeFakeAgents(options: FakeAgentOptions = {}): FakeAgents {
       get(sessionId) {
         return (agents.get(sessionId) as { session?: unknown } | undefined)?.session
       },
+      // Explicit fake durability prerequisite; this fixture is not real DSH evidence.
+      async flush() { return true },
     },
     counts: () => ({ create, resume, followup }),
     setCurrent(sessionId) {
@@ -464,6 +466,43 @@ test('public governed start rechecks the original Supervisor after asynchronous 
     assert.equal(harness.store.listExecutions(harness.taskA).length, 0)
     assert.equal(harness.store.listBudgetEvents(harness.kingdomId).length, 0)
   } finally { resumed(); harness.close() }
+})
+
+test('public governed admission rechecks caller and exact scope after authorization but before BEGIN', async t => {
+  const cases: { name: string; change(harness: Harness): void }[] = [
+    { name: 'Supervisor Session replaced', change: h => h.store.updateBindingSession(h.supA, 'replacement-supervisor-session', NOW()) },
+    { name: 'Supervisor retired', change: h => h.store.retireBinding(h.supA, 'transaction boundary test') },
+    { name: 'Territory Supervisor replaced', change: h => h.store.updateTerritorySupervisor('territory-a', h.supB) },
+    { name: 'Task Territory replaced', change: h => h.store.db.prepare('UPDATE tasks SET territory_id = ? WHERE task_id = ?').run('territory-b', h.taskA) },
+    { name: 'Task Worker replaced', change: h => h.store.db.prepare('UPDATE tasks SET assigned_binding_id = ? WHERE task_id = ?').run('binding-caller-worker', h.taskA) },
+    { name: 'Worker retired', change: h => h.store.retireBinding(h.worker, 'transaction boundary test') },
+    { name: 'Task no longer startable', change: h => h.store.db.prepare('UPDATE tasks SET status = ? WHERE task_id = ?').run('REVIEW', h.taskA) },
+  ]
+  for (const item of cases) await t.test(item.name, async () => {
+    const harness = await makeHarness({ allowCapability: true, allowTerminal: true })
+    const original = KingdomStore.prototype.withImmediateTransaction
+    let intercepted = false
+    try {
+      // The product uses a second Store connection. Apply the replacement
+      // only after all outer checks and immediately before its first BEGIN.
+      KingdomStore.prototype.withImmediateTransaction = function <T>(fn: () => T): T {
+        if (!intercepted) { intercepted = true; item.change(harness) }
+        return original.call(this, fn) as T
+      }
+      const result = await executeGoverned(harness, harness.taskA, S.supervisorA)
+      assert.equal(intercepted, true, 'must reach the admission transaction boundary')
+      assert.match(result, /AUTHORITY_CHANGED/)
+      assert.deepEqual(harness.agents.counts(), { create: 0, resume: 0, followup: 0 })
+      assert.equal(harness.store.listWorkspaceAdmissionEvents(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listBudgetEvents(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listAffinities(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listLeases(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listCapabilityDecisions(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listExecutions(harness.taskA).length, 0)
+      assert.equal(harness.store.listDispatches(harness.kingdomId).length, 0)
+      assert.equal(harness.store.listWorkerResults(harness.taskA).length, 0)
+    } finally { KingdomStore.prototype.withImmediateTransaction = original; harness.close() }
+  })
 })
 
 test('public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup', async (t) => {
@@ -877,10 +916,23 @@ test('public reconcile never resends a dispatch whose Runtime accepted message b
   const h = await makeHarness({ allowCapability: true, forceTimeout: true, throwAfterAccept: true }); t.after(() => h.close())
   assert.match(await executeGoverned(h, h.taskA, S.supervisorA), /DISPATCH_EXCEPTION/)
   const dispatch = h.store.listDispatches(h.kingdomId).find(row => row.task_id === h.taskA)!
-  assert.equal(dispatch.runtime_dispatch_ref, null)
+  assert.ok(dispatch.runtime_dispatch_ref, 'planned Runtime ref is saved before the uncertain send')
+  assert.equal(dispatch.receipt_json, null, 'planned ref is not a Receipt')
+  const before = {
+    task: h.store.getTask(h.taskA), lease: h.store.getLease(dispatch.lease_id),
+    dispatch: h.store.getDispatch(dispatch.dispatch_id), execution: h.store.getExecution(dispatch.execution_id),
+    events: h.store.listEventsSince(h.kingdomId, 0, 1000),
+  }
   h.agents.setCurrent(S.supervisorA)
   const result = String(await h.reconcileTool.execute({ task_id: h.taskA }, { agent: h.agents.ensure(S.supervisorA), signal: { aborted: false } }))
   assert.match(result, /RECEIPT_UNAVAILABLE/)
+  assert.match(result, /只读 Runtime 观察=QUEUED/)
+  assert.match(result, /来源=LIVE/)
+  assert.deepEqual({
+    task: h.store.getTask(h.taskA), lease: h.store.getLease(dispatch.lease_id),
+    dispatch: h.store.getDispatch(dispatch.dispatch_id), execution: h.store.getExecution(dispatch.execution_id),
+    events: h.store.listEventsSince(h.kingdomId, 0, 1000),
+  }, before, 'cold public observation must not write usage, receipt, Claim or governance rows')
   assert.equal(h.agents.counts().followup, 1)
   assert.equal(h.store.listWorkerResults(h.taskA).length, 0)
   assert.equal(h.store.getLease(dispatch.lease_id)!.state, 'RECOVERING')

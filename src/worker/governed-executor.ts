@@ -273,6 +273,24 @@ export async function runGovernedTask(input: GovernedTaskInput): Promise<Governe
   let collaboration = readCollaborationReadiness(store, kingdomId, taskId)
   try {
     store.withImmediateTransaction(() => {
+      // The caller check and its exact ledger relation must share the write
+      // transaction with both reservations. An outer check can become stale
+      // while BEGIN IMMEDIATE waits for another writer to replace a binding.
+      if (input.stillAuthorized && !input.stillAuthorized()) {
+        throw new WorkspaceAdmissionError('AUTHORITY_CHANGED', '当前调用者或任务范围已变化，未接纳执行。')
+      }
+      const currentTask = store.getTask(taskId)
+      const currentTerritory = store.getTerritoryById(territoryId)
+      const currentWorker = store.getBindingById(workerBindingId)
+      const currentSupervisor = supervisorBindingId ? store.getBindingById(supervisorBindingId) : null
+      if (!currentTask || currentTask.territory_id !== territoryId || currentTask.assigned_binding_id !== workerBindingId
+        || !['ASSIGNED', 'RUNNING'].includes(currentTask.status)
+        || !currentTerritory || currentTerritory.kingdom_id !== kingdomId || currentTerritory.status !== 'ACTIVE'
+        || currentTerritory.supervisor_binding_id !== supervisorBindingId
+        || !currentWorker || currentWorker.kingdom_id !== kingdomId || currentWorker.role_type !== 'WORKER' || currentWorker.status !== 'ACTIVE'
+        || !currentSupervisor || currentSupervisor.kingdom_id !== kingdomId || currentSupervisor.role_type !== 'SUPERVISOR' || currentSupervisor.status !== 'ACTIVE') {
+        throw new WorkspaceAdmissionError('AUTHORITY_CHANGED', '当前主管、任务、领地或执行者关系已变化，未接纳执行。')
+      }
       collaboration = readCollaborationReadiness(store, kingdomId, taskId)
       if (collaboration && readCollaborationPlan(store, kingdomId, collaboration.planId)?.state !== 'ADOPTED') collaboration = null
       if (collaboration) {

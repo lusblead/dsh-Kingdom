@@ -30,18 +30,22 @@ export function readDispatchUsage(store: KingdomStore, dispatchId: string): Disp
 
 /** Runtime usage is a separate observation, never terminal/cleanup or task governance evidence. */
 export function recordDispatchUsage(store: KingdomStore, dispatchId: string, observed: DshDispatchUsageObservation): void {
-  const dispatch = store.getDispatch(dispatchId)
-  if (!dispatch || !dispatch.runtime_dispatch_ref || dispatch.runtime_dispatch_ref !== observed.runtimeDispatchRef) return
   const usage = observed.status === 'COMPLETE' && observed.usage ? {
     uncachedInputTokens: observed.usage.uncachedInputTokens, outputTokens: observed.usage.outputTokens, totalTokens: observed.usage.totalTokens,
     ...(observed.usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: observed.usage.cacheReadTokens }),
     ...(observed.usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: observed.usage.cacheWriteTokens }),
     ...(observed.usage.reasoningTokens === undefined ? {} : { reasoningTokens: observed.usage.reasoningTokens }),
   } : null
-  const view: DispatchUsageView = { type: 'KingdomDispatchUsage/v1', dispatchId, taskId: dispatch.task_id, attemptNo: dispatch.attempt_no,
-    source: 'provider-reported', status: observed.status, reasonCode: observed.reasonCode, observedRequests: observed.observedRequests,
-    reportedRequests: observed.reportedRequests, turn: observed.turn, throughSeq: observed.throughSeq, usage }
   store.withImmediateTransaction(() => {
+    // A planned INTENDED ref proves no Runtime acceptance. Re-read the exact
+    // receipted association in this write transaction before recording any
+    // COMPLETE, PARTIAL or UNAVAILABLE usage observation.
+    const dispatch = store.getDispatch(dispatchId)
+    if (!dispatch || !dispatch.runtime_dispatch_ref || dispatch.runtime_dispatch_ref !== observed.runtimeDispatchRef
+      || !dispatch.receipt_json?.trim()) return
+    const view: DispatchUsageView = { type: 'KingdomDispatchUsage/v1', dispatchId, taskId: dispatch.task_id, attemptNo: dispatch.attempt_no,
+      source: 'provider-reported', status: observed.status, reasonCode: observed.reasonCode, observedRequests: observed.observedRequests,
+      reportedRequests: observed.reportedRequests, turn: observed.turn, throughSeq: observed.throughSeq, usage }
     const previous = readDispatchUsage(store, dispatchId)
     if (JSON.stringify(previous) === JSON.stringify(view)) return
     // An unavailable later lookup cannot erase an earlier complete provider report.

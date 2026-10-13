@@ -10,6 +10,95 @@ characteristics:
   retry_or_compensation: true
   security_sensitive: true
 nodes:
+  G5:
+    kind: safeguard
+    description: Usage persistence requires an exact receipted association
+    safeguard_type: validation
+    guarantee: Planned references cannot admit any usage status; persistence rechecks the current exact reference and nonempty Receipt inside BEGIN
+    protects: [A3]
+    failure_behavior: Return without a usage event and preserve the existing ledger
+    code:
+      - path: src/index.ts
+        symbol: collectDispatchUsage
+      - path: src/core/usage.ts
+        symbol: recordDispatchUsage
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: planned Runtime reference without Receipt cannot record any usage status
+      - path: tests/dispatch-correlation.test.ts
+        symbol: usage admission rereads Receipt inside BEGIN before recording a provider observation
+  D4:
+    kind: decision
+    description: Cold observation has an exact saved reference and matching Runtime Adapter identity
+    condition: Original context or receipt is unavailable but saved reference, runtime type and instance match the trusted observation Adapter
+    code:
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: cold observation rejects adapter identity mismatch, lost authority and absent legacy reference
+  A4:
+    kind: action
+    description: Bounded read-only observation without Session resume or model execution
+    code:
+      - path: src/adapter/dsh-backend.ts
+        symbol: reconcile
+      - path: src/adapter/dsh-session-events.ts
+        symbol: readBoundedDshSessionEvents
+    external_call:
+      system: DeepSeek Harness public live snapshot or read-only session persistence
+      timeout: Each persistence operation bounded to 5000ms; maximum 10000 events
+      failure_behavior: Return indeterminate observation and retain recovery; no dispatch or cleanup
+      failure_nodes: [X5]
+      retry:
+        max_attempts: 1
+        backoff: No automatic retry
+    tests:
+      - path: tests/dsh-prepared-dispatch.test.ts
+        symbol: cold DSH reconcile
+  D5:
+    kind: decision
+    description: Caller authorization and exact saved relationship survive the read
+    condition: Authority remains valid after await and original task, execution, lease, attempt and Runtime reference still match
+    code:
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+      - path: src/index.ts
+        symbol: runGovernedReconcile
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: cold observation rejects adapter identity mismatch, lost authority and absent legacy reference
+      - path: tests/dispatch-correlation.test.ts
+        symbol: cold observation discards positive evidence when Task scope or Execution relation changes during await
+      - path: tests/dispatch-correlation.test.ts
+        symbol: cold observation accepts a stable already-reassigned Task under its current authorized scope
+  X5:
+    kind: outcome
+    description: Cold observed input or indeterminate result remains recovery-required
+    result: Bounded Runtime observation without new receipt, usage event, Claim or Lease release
+    code:
+      - path: src/index.ts
+        symbol: runGovernedReconcile
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public reconcile never resends a dispatch whose Runtime accepted message but Receipt was lost
+  G4:
+    kind: safeguard
+    description: Positive observation does not grant settlement authority or prove absence
+    safeguard_type: authorization
+    guarantee: Cold reads cannot recreate RunnerContext or Fence, resume a Session, create receipt or Claim, persist usage, settle or release
+    protects: [A4, X5]
+    failure_behavior: Preserve original ledger rows and recovery-required result
+    code:
+      - path: src/dispatch/service.ts
+        symbol: reconcileGovernedDispatch
+      - path: src/index.ts
+        symbol: runGovernedReconcile
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: cold exact observation remains RECOVERING and preserves every governance row, event and Claim
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public reconcile never resends a dispatch whose Runtime accepted message but Receipt was lost
   D0:
     kind: decision
     description: Original terminal evidence is already recorded

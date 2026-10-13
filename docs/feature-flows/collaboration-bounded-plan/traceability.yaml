@@ -9,7 +9,7 @@ characteristics:
   external_dependencies: true
   retry_or_compensation: true
   security_sensitive: true
-evidence_status: "Source reconciled; 460 tests, official isolated DSH journey and 16 browser scenarios passed; human acceptance separate"
+evidence_status: "Historical baseline passed; 2026-10-13 bounded occupancy diagnostics source reconciled and workspace 21 tests passed in the unified isolated 55-test run; flow validation and finalize remain coordinator-owned; human acceptance separate"
 nodes:
   E1:
     kind: "entry"
@@ -405,7 +405,7 @@ nodes:
     safeguard_type: "concurrency"
     guarantee: "Overlapping directories, aliases, active Legacy executions and preexisting non-team leases participate in resource conflict checks before Session effects"
     protects: ["A3", "C1"]
-    failure_behavior: "Wait or block; unresolved/recovering occupancy is never released on assumption"
+    failure_behavior: "Block with existing reason code, bounded named occupancy references and explicit wait or reconcile then request again; no automatic queue or assumed release"
     code:
       - path: "src/core/workspace-admission.ts"
         symbol: "canonicalWorkspaceKey"
@@ -425,11 +425,19 @@ nodes:
       - path: "tests/workspace-admission.test.ts"
         symbol: "workspace ancestor descendant and junction aliases conflict while distinct directories remain independent"
       - path: "tests/workspace-admission.test.ts"
-        symbol: "workspace admits concurrent read-only access but queues a writer"
+        symbol: "workspace admits concurrent read-only access but blocks a writer pending a new request"
       - path: "tests/workspace-admission.test.ts"
         symbol: "workspace excludes unresolved legacy Leases and budget-only preparation in an overlapping directory"
       - path: "tests/workspace-admission.test.ts"
         symbol: "workspace keeps RECOVERING ownership and only a terminal dispatch plus released Lease frees the directory"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace reservation diagnostics are bounded and require a new request without changing occupancy"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace bound recovering diagnostics identify the exact Lease and Dispatch without releasing them"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace diagnostic references redact malformed or oversized identifiers while retaining the block"
+      - path: "tests/workspace-admission.test.ts"
+        symbol: "workspace unresolved legacy directory remains conservatively exclusive after diagnostic reads"
   G7:
     kind: "safeguard"
     description: "Team budget uses an explicit conservative coordination risk upper bound"
@@ -479,7 +487,7 @@ nodes:
   X6:
     kind: "outcome"
     description: "Admission blocked or unresolved"
-    result: "Show budget/resource/recovery cause, retain unsettled occupancy and never auto-retry"
+    result: "Show budget/resource/recovery cause with at most three named occupancy references and matching count; retain unsettled occupancy and require an explicit new request after waiting or reconciliation"
   X7:
     kind: "outcome"
     description: "Exact settled failed rework or explicit failure; adopted members cannot change worker"

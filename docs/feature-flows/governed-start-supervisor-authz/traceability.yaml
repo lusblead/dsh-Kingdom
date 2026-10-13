@@ -12,6 +12,171 @@ characteristics:
   security_sensitive: true
 
 nodes:
+  D27:
+    kind: decision
+    description: Require a persisted Receipt before usage collection and recheck it inside usage persistence
+    condition: Current Dispatch has the exact Runtime reference and a nonempty receipt_json inside the write transaction
+    code:
+      - path: src/index.ts
+        symbol: collectDispatchUsage
+      - path: src/core/usage.ts
+        symbol: recordDispatchUsage
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: planned Runtime reference without Receipt cannot record any usage status
+      - path: tests/dispatch-correlation.test.ts
+        symbol: receipted exact Runtime reference records usage normally with idempotence and foreign-ref rejection
+      - path: tests/dispatch-correlation.test.ts
+        symbol: usage admission rereads Receipt inside BEGIN before recording a provider observation
+  X21:
+    kind: outcome
+    description: Planned reference without Receipt cannot admit a usage event
+    result: Skip collection and persistence without changing the governance ledger
+  A22:
+    kind: action
+    description: Generate one Kingdom dispatch ID and optionally await pure Adapter message preparation before TX-3
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/adapter/contract.ts
+        symbol: prepareDispatch
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: prepared correlation saves the exact Runtime reference before first send without claiming Receipt
+  D25:
+    kind: decision
+    description: Recheck original authority after preparation await and within TX-3; reject empty prepared refs
+    condition: Prepared ref is absent for compatibility or nonempty, and stillAuthorized remains true after await and after BEGIN IMMEDIATE
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: preparation, post-await revocation and TX-3 failure each produce zero dispatch and zero intent
+      - path: tests/dispatch-correlation.test.ts
+        symbol: TX-3 rechecks authority inside BEGIN after pure preparation
+      - path: tests/dispatch-correlation.test.ts
+        symbol: adapters without pure preparation retain explicit legacy dispatch compatibility
+  D26:
+    kind: decision
+    description: Require exact Receipt Runtime, instance, Session and optional planned Runtime reference
+    condition: Receipt identity equals the committed Session identity and its nonempty Runtime ref equals any saved planned ref
+    code:
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: service rejects foreign Receipt runtime, session and prepared reference before receipt persistence
+      - path: tests/dispatch-correlation.test.ts
+        symbol: prepared correlation saves the exact Runtime reference before first send without claiming Receipt
+  G25:
+    kind: safeguard
+    description: Persist a planned reference before send and forbid mismatched Receipt replacement or recovery reopening
+    safeguard_type: integrity
+    guarantee: Pure preparation and TX-3 failure send nothing; saved INTENDED reference is not Receipt evidence; fresh transactional Receipt validation rejects mismatched first writes and idempotent replay without replacing the ref, and RECOVERING cannot return to RECEIVED
+    protects: [A22, D25, T1, D26, T3]
+    failure_behavior: Preparation or TX-3 failures leave zero intent; post-commit Receipt mismatch retains the planned ref and enters existing three-ledger RECOVERING without resend or new settlement authority
+    code:
+      - path: src/core/governed.ts
+        symbol: recordDispatchReceipt
+      - path: src/core/governed.ts
+        symbol: prepareGovernedDispatch
+      - path: src/dispatch/service.ts
+        symbol: runGovernedDispatch
+    tests:
+      - path: tests/dispatch-correlation.test.ts
+        symbol: Receipt mismatch cannot replace planned reference and mismatched idempotent replay is rejected
+      - path: tests/dispatch-correlation.test.ts
+        symbol: Receipt transaction uses a fresh read and cannot reopen a recovering dispatch
+      - path: tests/dispatch-correlation.test.ts
+        symbol: prepared correlation saves the exact Runtime reference before first send without claiming Receipt
+  X20:
+    kind: outcome
+    description: Pure preparation or transactional authority validation rejected before dispatch
+    result: Zero intent, Execution or Runtime send; caller retains responsibility for the existing capability-denial cleanup path
+  D23:
+    kind: decision
+    description: Admission rechecks original caller authority and exact current execution relation after BEGIN IMMEDIATE
+    condition: stillAuthorized remains true and Task is ASSIGNED or RUNNING with the requested ACTIVE Worker and ACTIVE Territory, whose current ACTIVE Supervisor matches the requested binding in the same Kingdom
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public governed admission rechecks caller and exact scope after authorization but before BEGIN
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: "public governed start: 正确 Supervisor 进入既有 Capability Gate，Ceiling 拒绝仍保留 cleanup"
+  A21:
+    kind: action
+    description: Reserve workspace and budget in the same admission transaction as the authority check before any Worker Session effect
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+      - path: src/core/workspace-admission.ts
+        symbol: reserveWorkspaceAdmission
+      - path: src/core/budget.ts
+        symbol: reserveBudgetAdmission
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public governed admission rechecks caller and exact scope after authorization but before BEGIN
+  D24:
+    kind: decision
+    description: ACCEPT re-resolves current Supervisor caller authority inside BEGIN IMMEDIATE
+    condition: Current authority proves the same Supervisor binding and Task Territory as outer authorization, and the reread Task remains REVIEW
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/task-service.ts
+        symbol: resolveTaskSupervisor
+    tests:
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT revalidates Supervisor Session and Territory after outer authorization before BEGIN
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT ordinary current authorization commits DONE with the reread Supervisor attribution
+  C4:
+    kind: compensation
+    description: Roll back every review write when targeted DONE compare-and-set or another ACCEPT database write fails
+    restores_or_resolves: No partial DONE, assignment closure, or TASK_ACCEPTED persists from a failed review transaction
+    failure_behavior: Propagate the failure after rollback; require a fresh current review request
+    code:
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/db.ts
+        symbol: transitionTaskIfCurrent
+      - path: src/core/db.ts
+        symbol: withImmediateTransaction
+    tests:
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT compare-and-set failure rolls back the entire review transaction
+  G24:
+    kind: safeguard
+    description: Authority and exact relation checks share admission and ACCEPT write transactions; DONE uses a targeted current-state compare-and-set
+    safeguard_type: atomicity
+    guarantee: Replacement before BEGIN is rejected with zero admission or ACCEPT writes; a stale Task cannot overwrite a newer state or assignment, and successful TASK_ACCEPTED uses the reread Supervisor binding
+    protects: [D23, A21, D24, A15]
+    failure_behavior: Deny stale authorization before writes; a stale conditional DONE write throws and rolls back the entire ACCEPT transaction
+    code:
+      - path: src/worker/governed-executor.ts
+        symbol: runGovernedTask
+      - path: src/core/task-service.ts
+        symbol: reviewTask
+      - path: src/core/db.ts
+        symbol: transitionTaskIfCurrent
+    tests:
+      - path: tests/governed-start-supervisor-authz.test.ts
+        symbol: public governed admission rechecks caller and exact scope after authorization but before BEGIN
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT revalidates Supervisor Session and Territory after outer authorization before BEGIN
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT targeted compare-and-set cannot overwrite a newer Task state or assignment
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT compare-and-set failure rolls back the entire review transaction
+  X19:
+    kind: outcome
+    description: Transaction-bound authority, relation, or state rejection
+    result: Deny admission before reservations or deny ACCEPT without DONE, TASK_ACCEPTED, or assignment closure; write failure propagates after complete rollback
   E3:
     kind: entry
     description: Observe provider usage for an accepted dispatch
@@ -361,7 +526,7 @@ nodes:
 
   T1:
     kind: transition
-    description: Atomically prepare the governed Execution, Decision binding, Dispatch Intent, and executing Lease
+    description: Atomically prepare Execution, Decision binding, INTENDED with optional planned Runtime reference, and executing Lease after current authority check
     entity: GovernedAttempt
     from: PREPARED
     to: INTENT_COMMITTED
@@ -378,6 +543,8 @@ nodes:
         symbol: "S5 TX-3: Intent preparation failure rolls back Execution and Decision binding"
       - path: tests/m3s2-v4-s5-dispatch.test.ts
         symbol: "S5 TX-3: Lease progression failure rolls back Intent, Execution, and Decision binding"
+      - path: tests/dispatch-correlation.test.ts
+        symbol: prepared correlation saves the exact Runtime reference before first send without claiming Receipt
 
   A17:
     kind: action
@@ -466,7 +633,7 @@ nodes:
 
   T3:
     kind: transition
-    description: Record Runtime Receipt by advancing Dispatch from INTENDED through DISPATCHED to RECEIVED; Receipt remains nonterminal
+    description: Fresh transaction reread validates the exact saved Runtime ref before advancing INTENDED through DISPATCHED to RECEIVED; Receipt remains nonterminal and mismatched replay is rejected
     entity: GovernedAttempt
     from: INTENT_COMMITTED
     to: RECEIVED
@@ -485,6 +652,10 @@ nodes:
         symbol: "S5 dispatch: session.events 是 getter（真实 DSH 每次访问返回新数组）→ 轮询每轮重读仍达 terminal（正式入口 E2E seam）"
       - path: tests/m3s2-v4-s5-dispatch.test.ts
         symbol: "S5 dispatch: correlation window 后首次同时看到 turn+terminal 时先 correlate 再 terminal"
+      - path: tests/dispatch-correlation.test.ts
+        symbol: Receipt mismatch cannot replace planned reference and mismatched idempotent replay is rejected
+      - path: tests/dispatch-correlation.test.ts
+        symbol: Receipt transaction uses a fresh read and cannot reopen a recovering dispatch
 
   A12:
     kind: action
@@ -734,13 +905,19 @@ nodes:
 
   A15:
     kind: action
-    description: Atomically accept the exact Claim, transition Task REVIEW to DONE, close the active assignment, and emit TASK_ACCEPTED
+    description: Atomically accept the exact Claim, conditionally transition current Task REVIEW to DONE, close the active assignment, and emit TASK_ACCEPTED attributed to the reread Supervisor
     code:
       - path: src/core/task-service.ts
         symbol: reviewTask
+      - path: src/core/db.ts
+        symbol: transitionTaskIfCurrent
     tests:
       - path: tests/r8-tx4-integrity.test.ts
         symbol: "R8 ACCEPT re-reads exact Task/Claim and blocks only the incident-correlated attempt"
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT ordinary current authorization commits DONE with the reread Supervisor attribution
+      - path: tests/governed-transaction-authority.test.ts
+        symbol: ACCEPT compare-and-set failure rolls back the entire review transaction
 
   A16:
     kind: action
@@ -942,7 +1119,7 @@ nodes:
     entity: Task
     from: REVIEW
     to: DONE
-    trigger: accept_without_open_incident
+    trigger: accept_current_authority_without_open_incident
     code:
       - path: src/core/task-service.ts
         symbol: reviewTask

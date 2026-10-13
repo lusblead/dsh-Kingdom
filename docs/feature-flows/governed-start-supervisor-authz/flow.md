@@ -7,7 +7,7 @@ status: implemented
 # Governed-start Supervisor caller authorization and persistent dispatch
 
 - Feature ID: `governed-start.supervisor-authz`
-- Status: `implemented` (1.1 runtime compatibility, rework context, and usage baseline)
+- Status: `implemented` (pre-COMMIT planned Runtime reference and exact Receipt correlation)
 - Impact: `updated`
 
 ## Scope and classification
@@ -16,6 +16,13 @@ The 1.5 composition is defined in [bounded collaboration](../collaboration-bound
 Every public start retains the original caller identity and rechecks its current binding, task,
 workspace, profile and ceiling after policy loading and Session preparation, after capability
 inspection, before materialization, after materialization and after opening the Runtime fence.
+Before workspace and budget reservation, the runner begins `BEGIN IMMEDIATE` and
+rechecks the original caller plus the current Task/Territory/Worker/Supervisor relation.
+Replacement while the transaction waits is rejected before either reservation or any
+Worker Session effect. ACCEPT likewise re-resolves the current caller-owned Supervisor
+inside its write transaction, rejects a replaced binding or Task Territory, and uses
+that current binding for event attribution. The DONE write
+compares the reread Task state and relation; a stale write throws and rolls back review.
 Revocation stops further work; any materialized request follows existing cleanup evidence rules.
 Runner revisions ignore another task's events only when a known event kind and its exact Core
 target prove independent Worker and Session relationships. Missing targets, shared workers,
@@ -98,6 +105,20 @@ receipt, correlation, or terminal-write exception atomically moves Dispatch,
 Lease, and Execution to `RECOVERING`; Task governance remains unchanged and the
 system does not redispatch, release the Lease, create a new attempt, or fabricate
 a terminal result.
+
+Before TX-3, Core generates one Kingdom dispatch ID and optionally awaits a pure
+Adapter preparation which allocates the exact immutable Runtime message reference.
+Preparation has no Runtime side effect. Authority is checked again after that await
+and inside TX-3; preparation or commit failure produces zero dispatch. TX-3 saves
+the planned `runtime_dispatch_ref` with `INTENDED`, null receipt and null dispatch
+timestamps. That reference is correlation data, not evidence that input left Core.
+Adapters without preparation retain the explicit compatibility path with a null
+planned ref. The post-commit dispatch carries the same Kingdom ID and original
+prepared token. A prepared DSH Receipt additionally requires its public flush
+barrier to return true. Core validates Receipt Runtime/instance/Session identity
+and exact planned reference before binding it. Receipt writes reread the row in
+one write transaction; a mismatched ref, including an idempotent `RECEIVED` replay,
+is rejected without overwriting the original reference or reopening `RECOVERING`.
 
 Capability ceiling setup is an independent direct Owner Slash flow, not a call
 inside governed start. `/kingdom ceiling` may persist a boolean map (including
@@ -188,16 +209,24 @@ flowchart TD
     D3 -->|Yes| D6{"D6 Latest GOVERNED_PERSISTENT Execution is terminal or absent"}
     D6 -->|No| X7(["X7 EXISTING_EXECUTION_UNSETTLED or RECOVERING; no Runtime, Session, Lease, or ledger side effect"])
     D6 -->|Yes| D11{"D11 Worker affinity/Runtime has no active or recovering Lease before Session side effect"}
-    D11 -->|Guard passes| A4["A4 Establish or resume Worker Session and run Capability Gate with bounded sandbox mode"]
+    D11 -->|Guard passes| D23{"D23 Original caller and exact Task/Territory/Worker/Supervisor relation still current inside BEGIN IMMEDIATE?"}
     D11 -->|active/recovery/orphaned Lease or identity unresolved| X12(["X12 RECOVERING guard; no Session reuse/create/resume or Dispatch"])
+    D23 -->|Yes| A21["A21 Reserve workspace and budget in the same transaction, then COMMIT"]
+    D23 -->|No| X19(["X19 Reject changed authority or state; no admission or ACCEPT write"])
+    A21 --> A4["A4 Establish or resume Worker Session and run Capability Gate with bounded sandbox mode"]
     A4 --> D4{"D4 Context-bound effective capability and required write are enforceable"}
     D4 -->|No| X4(["X4 CAPABILITY_DENIED with existing zero-execution cleanup"])
     D4 -->|Yes| D9{"D9 Requested sandbox mode is within the effective write upper bound"}
-    D9 -->|workspace-write with effective filesystem.write| T1["T1 Atomically create STARTING Execution, bind Decision, persist INTENDED, and advance Lease to EXECUTING"]
+    D9 -->|workspace-write with effective filesystem.write| A22["A22 Generate one Kingdom dispatch ID and optionally prepare a pure Runtime message reference"]
     D9 -->|workspace-write without required write| A8["A8 Bound request to read-only and record boundedNarrowing"]
-    D9 -->|read-only without required write| T1
+    D9 -->|read-only without required write| A22
     D9 -->|read-only with required write| X4
-    A8 --> T1
+    A8 --> A22
+    A22 -->|preparation succeeds or Adapter has explicit compatibility path| D25{"D25 Original authority and valid planned ref remain current after await and inside TX-3?"}
+    A22 -->|pure preparation throws or returns invalid ref| X20(["X20 Zero Dispatch, Execution, or send; existing denial cleanup remains responsible"])
+    D25 -->|Yes| T1["T1 Atomically create STARTING Execution, bind Decision, persist INTENDED plus optional planned ref, and advance Lease to EXECUTING"]
+    D25 -->|No| X20
+    T1 -->|TX-3 commit fails and rolls back| X20
     T1 --> A17["A17 Create and acquire the exact local canonical RunnerContext for this dispatch"]
     A17 --> D20{"D20 Caller explicitly created an active public run-scoped Product lifecycle"}
     D20 -->|No| A11["A11 Open module-private fence bound to exact Adapter instance, lease, and Session before dispatch"]
@@ -206,7 +235,9 @@ flowchart TD
     A18 -->|registration, relation, or ticket failure| C1
     A11 -->|fence opened and reservation seam proven| A6["A6 Invoke Runtime dispatch only after the complete TX-3 commit"]
     A11 -->|identity, baseline, or reservation indeterminate| C1
-    A6 --> T3["T3 Record Receipt: Dispatch INTENDED to DISPATCHED to RECEIVED; Receipt is not Terminal"]
+    A6 --> D26{"D26 Receipt Runtime, instance, Session and optional planned ref match exactly?"}
+    D26 -->|Yes| T3["T3 Fresh transaction reread; INTENDED to DISPATCHED to RECEIVED without ref replacement; Receipt is not Terminal"]
+    D26 -->|No| C1
     A6 -->|post-commit dispatch exception| C1
     T3 -->|receipt exception| C1
     T3 --> A12["A12 Bind the accepted Runtime dispatch reference with the exact Adapter/lease/Session expectation"]
@@ -239,9 +270,13 @@ flowchart TD
     X13 --> D16
     D16 -->|No: explicit REWORK or FAIL| A14["A14 Apply REWORK or FAIL governance decision; the integrity gate is ACCEPT-only"]
     A14 --> X14(["X14 Task follows the explicit REWORK or FAIL decision"])
-    D16 -->|Yes| D17{"D17 Exact current Task/Claim has no open terminal-integrity incident?"}
+    D16 -->|Yes| D24{"D24 Current caller-owned Supervisor, unchanged Task Territory and REVIEW state valid inside BEGIN IMMEDIATE?"}
+    D24 -->|Yes| D17{"D17 Exact current Task/Claim has no open terminal-integrity incident?"}
+    D24 -->|No| X19
     D17 -->|Yes| A15["A15 In one transaction transition REVIEW to DONE, close assignment, and emit TASK_ACCEPTED"]
-    A15 --> X15(["X15 Task DONE; accepted Claim becomes organization fact"])
+    A15 -->|conditional write and all review writes succeed| X15(["X15 Task DONE; accepted Claim becomes organization fact"])
+    A15 -->|stale Task or write failure| C4["C4 Roll back the complete ACCEPT transaction"]
+    C4 --> X19
     D17 -->|No: exact incident is open| X16(["X16 CLAIM_INTEGRITY_BLOCKED; zero TASK_ACCEPTED, DONE, and assignment close"])
     D15 -->|No: post-TX-4 identity or fence mismatch| C3["C3 In one BEGIN IMMEDIATE revalidate the exact relation; preserve terminal Dispatch/Execution, recover the Lease, and append one bounded incident"]
     C3 --> A10
@@ -266,6 +301,11 @@ flowchart TD
     G6 -.-> X8
     G7[["G7 Runtime identity precedes one atomic TX-3 commit; Runtime dispatch follows it"]] -.-> T1
     G7 -.-> A6
+    G25[["G25 Planned ref precedes send and never proves dispatch; fresh exact Receipt correlation prevents ref replacement and recovery reopening"]] -.-> A22
+    G25 -.-> D25
+    G25 -.-> T1
+    G25 -.-> D26
+    G25 -.-> T3
     G8[["G8 Receipt, Correlation, and Terminal are distinct; an observed turn is correlated before trusted terminal settlement"]] -.-> T3
     G8 -.-> D8
     G8 -.-> T8
@@ -313,6 +353,10 @@ flowchart TD
     G18 -.-> A15
     G18 -.-> T14
     G18 -.-> T17
+    G24[["G24 Admission and ACCEPT authorization share the write transaction with facts; current Supervisor attribution and targeted DONE CAS prevent stale authority or state writes"]] -.-> D23
+    G24 -.-> A21
+    G24 -.-> D24
+    G24 -.-> A15
     G12 -.-> D9
     G12 -.-> T1
     G19[["G19 Exact RunnerContext and opaque version; neutral observations and proven independent-task events are excluded; related or unclassified changes invalidate"]] -.-> A16
@@ -373,6 +417,13 @@ sequenceDiagram
             alt active/recovery/orphaned Lease or identity unresolved
                 Executor-->>Tool: RECOVERING guard rejection; no Session side effect or Dispatch
             else guard passes
+                Executor->>Store: BEGIN IMMEDIATE; recheck original caller and exact Task/Territory/Worker/Supervisor relation
+                alt authority or current start state changed
+                    Store-->>Executor: AUTHORITY_CHANGED; no admission or Worker Session side effect
+                else current authority and relation valid
+                    Executor->>Store: reserve workspace and budget; COMMIT
+                end
+                Note over Executor,Runtime: Only accepted reservation proceeds to Worker Session preparation
                 Executor->>Runtime: establish or resume persistent Worker Session
             Executor->>Store: acquire Lease and run Capability Gate with requested sandbox mode
             alt Capability denied or cannot be enforced
@@ -384,7 +435,13 @@ sequenceDiagram
                     Executor->>Store: persist the bounded Enforcement Plan and evidence
                 end
                  Executor->>Runtime: identify and verify live Session identity before writes
-                  Executor->>Store: one TX-3 transaction creates Execution, binds Decision, commits INTENDED, advances Lease EXECUTING
+                  Executor->>Executor: allocate one Kingdom dispatch ID
+                  opt Adapter supports pure preparation
+                      Executor->>Runtime: prepareDispatch(Kingdom ID, exact Session and text); no send or Runtime mutation
+                      Runtime-->>Executor: opaque prepared token with planned Runtime dispatch ref
+                  end
+                  Executor->>Store: recheck authority after await and inside TX-3; create Execution, bind Decision, commit INTENDED plus planned ref, advance Lease EXECUTING
+                  Note over Executor,Store: Preparation or TX-3 failure sends nothing; INTENDED planned ref is not Receipt evidence
                   Executor->>Executor: create and acquire exact local canonical RunnerContext
                   alt explicit public run-scoped Product lifecycle is active
                       Executor->>Broker: register one exact committed Port and issue one ticket
@@ -398,9 +455,13 @@ sequenceDiagram
                   end
                   Executor->>Runtime: open Adapter-instance-private fence bound to exact lease and Session before dispatch
                 Runtime-->>Executor: opaque fence reservation
-                Executor->>Runtime: dispatch after complete TX-3 commit
-                Runtime-->>Executor: Dispatch Receipt
-                Executor->>Store: INTENDED -> DISPATCHED -> RECEIVED; Receipt is not Terminal
+                Executor->>Runtime: dispatch exact Kingdom ID and original prepared token after complete TX-3 commit
+                Runtime-->>Executor: Dispatch Receipt; prepared DSH requires public flush=true
+                alt Receipt Runtime, instance, Session or planned ref mismatch
+                    Executor->>Store: preserve planned ref and atomically enter three-ledger RECOVERING
+                else Receipt identity matches
+                    Executor->>Store: fresh transaction reread; INTENDED -> DISPATCHED -> RECEIVED with same planned ref
+                end
                 Executor->>Runtime: bind Runtime dispatch ref and inspect exact Adapter/lease/Session expectation plus fence generation
                 loop bounded correlation and terminal polling
                     Executor->>Runtime: re-read snapshotEvents; legacy events only when modern API absent
@@ -460,10 +521,18 @@ sequenceDiagram
     opt Supervisor reviews the Claim after the governed run
         Tool->>Store: reviewTask(ACCEPT | REWORK | FAIL)
         alt ACCEPT
-            Store->>Store: one transaction re-reads exact Task and Claim and queries the exact open incident relation
-            alt no open incident
-                Store->>Store: REVIEW -> DONE, close active assignment, append TASK_ACCEPTED
+            Store->>Store: BEGIN IMMEDIATE; reread Task and resolve current caller-owned Supervisor
+            alt authority, Task Territory, or REVIEW state changed
+                Store-->>Tool: deny; zero DONE, TASK_ACCEPTED, or assignment closure
+            else current authority and exact Task remain valid
+                Store->>Store: reread latest Claim and query exact open incident relation
+            end
+            alt current authority valid and no open incident
+                Store->>Store: conditional REVIEW -> DONE; close assignment; TASK_ACCEPTED uses current Supervisor; COMMIT
                 Store-->>Tool: ACCEPTED / DONE
+            else stale conditional Task write or DB write failure
+                Store->>Store: ROLLBACK complete ACCEPT transaction
+                Store-->>Tool: throw failure; no review writes persist
             else incident exists
                 Store-->>Tool: CLAIM_INTEGRITY_BLOCKED; zero TASK_ACCEPTED, DONE, or assignment close
             end
@@ -478,9 +547,9 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> PREPARED
-    PREPARED --> INTENT_COMMITTED: T1 capability_granted / atomic Execution + Decision + INTENDED + Lease preparation
+    PREPARED --> INTENT_COMMITTED: T1 capability_granted / atomic Execution + Decision + INTENDED with optional planned ref + Lease preparation
     INTENT_COMMITTED --> CONTEXT_ACQUIRED: R18 local_context_acquired / exact Port acquired for this dispatch
-    CONTEXT_ACQUIRED --> RECEIVED: T3 runtime_receipt / Dispatch INTENDED to DISPATCHED to RECEIVED
+    CONTEXT_ACQUIRED --> RECEIVED: T3 exact_runtime_receipt / fresh transaction reread; same planned ref; INTENDED to DISPATCHED to RECEIVED
     CONTEXT_ACQUIRED --> RECOVERING: R20 explicit_broker_registration_failed / no fence or Runtime dispatch
     RECEIVED --> CORRELATED: T8 turn_observed / bind runtime execution and mark Execution RUNNING
     CORRELATED --> TERMINAL_PROVEN: T4 trusted_terminal_and_fence_settlement / persist terminal Dispatch, terminal Execution, and Lease SETTLING
@@ -492,7 +561,7 @@ stateDiagram-v2
     TERMINAL_PROVEN --> TERMINAL_RECOVERING: T12 post_tx4_integrity_mismatch / terminal rows preserved, Lease RECOVERING before Claim
     LEASE_RELEASED --> CLAIM_REVIEW: T6 settlement_consumed_then_claim_recorded / Task enters REVIEW after Lease RELEASED
     TERMINAL_RECOVERING --> CLAIM_REVIEW: T6 settlement_consumed_then_claim_recorded / Task enters REVIEW after Lease RECOVERING
-    CLAIM_REVIEW --> DONE: T14 accept_without_open_incident / atomic Task REVIEW→DONE + assignment close + TASK_ACCEPTED
+    CLAIM_REVIEW --> DONE: T14 accept_current_authority_without_open_incident / conditional Task REVIEW→DONE + assignment close + TASK_ACCEPTED
     CLAIM_REVIEW --> RUNNING: T15 supervisor_rework / preserve active assignment
     CLAIM_REVIEW --> FAILED: T16 supervisor_fail / close assignment
     CLAIM_REVIEW --> CLAIM_REVIEW: T17 accept_open_incident / CLAIM_INTEGRITY_BLOCKED and zero DONE write
@@ -502,11 +571,13 @@ stateDiagram-v2
 
 ## Safeguards and failure semantics
 
-The 1.1 adapter usage observation is independent of terminal authority:
+The 1.1 adapter usage observation is independent of terminal authority. Collection requires a persisted Receipt, and persistence rechecks the exact reference and Receipt inside its write transaction. A planned reference alone produces no usage event:
 
 ```mermaid
 flowchart TD
-    E3(["E3 Observe usage for one accepted dispatch reference"]) --> A19["A19 Read current snapshot and isolate the exact admitted message turn"]
+    E3(["E3 Observe usage for one dispatch reference"]) --> D27{"D27 Exact Runtime reference has a persisted Receipt?"}
+    D27 -->|Yes| A19["A19 Read current snapshot and isolate the exact admitted message turn"]
+    D27 -->|No| X21(["X21 Skip usage observation and persistence; planned ref proves no acceptance"])
     A19 --> D21{"D21 Complete boundaries and optional public usage reader available?"}
     D21 -->|Yes| A20["A20 Fold every attempt including retries; validate disjoint token counts"]
     D21 -->|No| X17(["X17 Unavailable or partial coverage; no invented total"])
@@ -538,6 +609,10 @@ sequenceDiagram
 - `G1` and `G2` ensure caller identity, active Supervisor binding, and exact
   Territory scope are resolved before Grant parsing and executor entry.
 - `G3` keeps authorization separate from capability enforceability.
+- `G24` repeats the caller and current ledger relation inside admission and
+  ACCEPT write transactions. Denial precedes reservation or review writes;
+  the current Supervisor supplies the audit identity. A failed targeted DONE
+  compare-and-set throws so the entire review transaction rolls back.
 - `G4` and `G6` prohibit automatic one-shot fallback or write retry after an
   uncertain persistent outcome.
 - `G7` resolves Runtime identity before writes, then commits Execution,

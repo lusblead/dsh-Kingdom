@@ -1,6 +1,6 @@
 {
   "name": "dsh-kingdom",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "个人 Agent 工作台：任务交付可逐条查看、知悉与提问，改动证据可追溯；Worker Claim 仍须主管审查才成为事实。",
   "type": "module",
   "main": "./lib/index.js",
@@ -25,7 +25,9 @@
     "docs/V3.0-RELEASE-NOTES.md",
     "docs/V3.1-RELEASE-NOTES.md",
     "docs/V3.2-RELEASE-NOTES.md",
-    "docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md"
+    "docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md",
+    "docs/V3.2.1-RELEASE-NOTES.md",
+    "docs/DISPATCH-IDENTITY-PROBE.md"
   ],
   "license": "AGPL-3.0-or-later",
   "publishConfig": {
@@ -65,7 +67,9 @@
     "@deepseek-ai/schemastery": "^3.18.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-token-meter": { "optional": true }
+    "@deepseek-ai/dsh-token-meter": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

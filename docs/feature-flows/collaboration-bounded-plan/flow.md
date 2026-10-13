@@ -10,6 +10,8 @@ status: implemented
 
 依据 .local/construction-audit/20260912-v15-bounded-collaboration/00-WORK-ORDER.md。本合同已对照当前Core计划、资源接纳、advanceCollaboration、Owner及GUI源码核对，主流程全量460/460、官方DSH隔离旅程、16场景浏览器和Flow finalize通过。现有身份、Task、Owner prepare/commit/receipt、Capability Gate、预算及恢复机制继续作为权威接缝；本地测试和合成浏览器证据不等于真实Provider收益或人类验收。
 
+2026-10-13首轮仅更新工作区占用拒绝及诊断，依据 .local/construction-audit/20261013-01-dispatch-safety-dev/00-WORK-ORDER.md。以上通过记录属于历史基线；本轮已对照最终源码，主流程隔离编译及authz/transaction-authority/workspace三文件55项测试通过，其中workspace为21项。合同校验与finalize仍由主流程统一完成；没有自动队列、资源豁免、子目录权限扩展或新迁移接口。
+
 单 Worker 仍是默认。需要协作时，宰相提出一层 EXPERT 或 TEAM 计划，人类在独立 Owner 窗口一次采纳整份确定内容。计入主整合者后最多三个不同 Worker。EXPERT 的专家强制只读；TEAM 使用明确资源范围。没有递归扩队、后台无界调度、自动 ACCEPT、角色升级或跨任务记忆。
 
 计划包含父 Task、ID/版本/摘要、拆分理由、工作项 key/TaskID、范围、验收、领地和 Worker、访问模式、依赖、预期产物、整合者以及整项软额度/单次估计。文件列表表达责任，实际隔离以规范化真实工作区及运行时限制为准。
@@ -45,7 +47,7 @@ flowchart TD
     A2 --> A3["A3 Session副作用前在同一IMMEDIATE事务检查计划并预留预算与工作区"]
     A3 --> D5{"D5 预算与资源都允许新增，且无重复或未决派发"}
     D5 -->|否| C1["C1 仅取消可证明未派发的预留；未决或恢复占用保留"]
-    C1 --> X6(["X6 显示预算/资源/恢复原因；等待合法处理，无自动重试"])
+    C1 --> X6(["X6 显示预算/资源/恢复原因及有界占用引用；等待或对账后重新请求，无自动排队"])
     D5 -->|是| A4["A4 原治理启动链核验Grant/Ceiling，TX-3重验并绑定准确Dispatch"]
     A4 -->|启动失败或不明| C1
     A4 -->|合法运行| T3["T3 子项按现有Task运行和Claim流程到REVIEW"]
@@ -104,8 +106,8 @@ sequenceDiagram
     Core->>Core: 依赖准确结果与Assignment/Scope检查
     Core->>Admission: Session副作用前同一IMMEDIATE事务检查计划并预留预算和读写资源
     alt 资源冲突、额度耗尽、缺口阻断或恢复占用
-        Admission-->>Core: 确定原因及占用/依赖引用
-        Core-->>GUI: 排队或阻塞；保留既有执行事实
+        Admission-->>Core: 确定原因及最多三项占用引用、总数或依赖引用
+        Core-->>GUI: 阻塞；等待前序结束或对账后重新请求，无自动排队
     else 接纳允许
         Core->>Runtime: 原治理启动与Capability Gate
         Core->>Store: TX-3重验，绑定预留及准确Dispatch
@@ -164,6 +166,7 @@ stateDiagram-v2
 - index的runGovernedStart向runGovernedTask、Gate与派发传递内部stillAuthorized校验；S4、Session、preflight、materialize及trustFence等await之后，在后续副作用前重查当前Supervisor身份和范围。此内部回调不是模型可提供的权限参数，异步期间撤销不因旧的批次校验而失效。
 - 准确依赖至少绑定计划版本、Task、最新attempt、result引用与有效主管ACCEPT；产物携带版本/内容摘要和引用，有限摘要定向进入Worker上下文。缺失、失败、过期或验收不明都会阻断后继；多数模型同意不构成验收。
 - 无Task文件级enforcement时，重叠真实工作区实行读共享/写独占；目录链接和别名必须归一，非团队未释放Lease和旧尚未派发预算预留按独占保守参与冲突。计划检查、预算和资源预留在Session副作用前的同一IMMEDIATE事务完成，TX-3重新核验并绑定准确Dispatch，不能仅比较用户填写的文件清单。
+- 工作区拒绝保留原错误码，并按资源预留RESERVED/BOUND、未被代表的Lease、非终态Execution及预算RESERVED分别返回具名占用来源、状态和最小Task/attempt/admission/Lease/Dispatch/Execution引用。一次错误最多展示三项并标明当前命中总数，不输出工作路径、Session、参数或原始payload；格式异常或超长引用显示REDACTED。调用方须等待前序结束或完成对账后重新请求，系统不自动排队；诊断读取不会释放或豁免未知占用。
 - 王国与整项软预算同时约束新增工作。预算视图明确标为 PLAN_WITH_KINGDOM_COORDINATION_UPPER_BOUND：Worker准确实报、同期王国协调成本保守上界、估计预留和归属缺口分别显示，金额保持未测。不把协调共享来源重复累加或精确摊给某个工作项。
 - 到达上限、发现依赖风险或无法证明收益时停止新增并行；既有工作仍按原治理对账。只有能证明未派发且无未结算运行/Lease的预留才允许取消；RECOVERING和未确认结果保留占用。缩为串行不等于终止所有Agent。
 - 现阶段没有后台调度循环、自动重试或新增计时器。kingdom_advance_collaboration经真实调用身份进入advanceCollaboration：SERIAL一次一个且等待已有执行/预留结算，PARALLEL一次最多两个独立子项，父项整合单独推进。批次先同事务核验范围并完成正常分配，每次启动再次读取真实身份；首项立即拒绝可停止后续启动，已接纳独立工作不因另一项失败被取消。重复调用及RUNNING无最新准确REWORK均拒绝。运行超时、派发不明、恢复和清理沿用原governed路径；Owner准备验证沿用有界超时，过期和撤销继续生效。

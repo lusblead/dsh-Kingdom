@@ -128,7 +128,7 @@ function fakeAgents(): {
 
   return {
     service,
-    sessions: { get: (id: string) => sessions.get(id) },
+    sessions: { get: (id: string) => sessions.get(id), flush: async () => true },
     registerAgent,
     sessionRefs: () => [...workerSessionIds],
     followupCount: () => followups,
