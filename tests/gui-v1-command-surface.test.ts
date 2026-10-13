@@ -233,8 +233,8 @@ test('v1 GUI command surface is session-bound, state-safe, replay-safe, and dire
     assert.deepEqual(control.reviewDecisions, ['ACCEPT', 'REWORK', 'FAIL', 'HANDOFF'])
     assert.deepEqual(control.sandboxModes, ['workspace-write', 'read-only'])
     assert.equal(control.actions['setup.basic'], undefined)
-    assert.equal(control.actions['review:handoff']?.executable, true)
-    assert.equal(control.actions['execution:pause']?.executable, true)
+    assert.equal(control.actions['review:handoff']?.executable, false, 'unbound activation cannot perform supervisor actions')
+    assert.equal(control.actions['execution:pause']?.executable, false)
     assert.equal(control.actions.init?.executable, false)
     assert.equal(control.actions.init?.disabledReason, 'DIRECT_SLASH_REQUIRED')
     return { origin, cookie, csrf: control.csrfToken }
@@ -317,6 +317,11 @@ test('v1 GUI command surface is session-bound, state-safe, replay-safe, and dire
     binding_id: workerA.binding_id, provider: 'spawn', model: 'fake-requested-model',
   })}`)
   await directOwner(`ceiling ${JSON.stringify({ ceiling: { 'tool:pwsh': true } })}`)
+  const refreshedControl = await fetch(`${ownerClient.origin}/api/control`, { headers: { cookie: ownerClient.cookie } })
+  assert.equal(refreshedControl.status, 200)
+  const refreshedActions = (await refreshedControl.json() as any).actions
+  assert.equal(refreshedActions['task.create'].executable, true, 'the bound Chancellor can create tasks')
+  assert.equal(refreshedActions.assign.executable, true, 'the bound Supervisor can assign tasks')
 
   const fixtureOwnerAuth = ownerControlAuth(issueOwnerControlCapability())
   assert.match(bindRole(store, {
@@ -504,8 +509,8 @@ test('v1 GUI command surface is session-bound, state-safe, replay-safe, and dire
     title: 'must not be created',
     territory_id: territory.territory_id,
   })
-  assert.equal(unauthorized.status, 409)
-  assert.equal(unauthorized.body.errorCode, 'UNAUTHORIZED_PRINCIPAL')
+  assert.equal(unauthorized.status, 403)
+  assert.equal(unauthorized.body.errorCode, 'CONTROL_ROLE_DENIED')
   assert.equal(store.listTasks(kingdom.kingdom_id).length, taskCountBeforeIntruder)
   assert.equal(store.revision(kingdom.kingdom_id), revisionBeforeIntruder)
 

@@ -1,7 +1,7 @@
 version: 1
 feature_id: "owner-binding-natural-language"
 title: "Natural-language Owner binding intent Draft"
-status: "proposed"
+status: "implemented"
 
 characteristics:
   cross_component: true
@@ -151,13 +151,17 @@ nodes:
   D1:
     kind: decision
     description: Natural language matches an allowlisted role phrase
-    condition: Current/this/that session phrase and supported Chinese role alias match without trailing command text
+    condition: Current/this/that session phrase and supported Chinese role alias or exact-territory responsibility/replacement/succession phrase match without trailing command text
     code:
       - path: src/core/owner-binding-intent.ts
         symbol: parseNaturalLanguage
     tests:
       - path: tests/owner-binding-intent.test.ts
         symbol: "注入垃圾不会进入 canonical Slash，也不会产生 Owner Authority"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "歧义、失效会话、Owner 意图和附加指令均不提供管理命令"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "把当前会话设为准确领地主管的说法使用同一 exact 解析与失效拒绝"
   D2:
     kind: decision
     description: Generic/natural buildDraftFromParsed proves one active local exact target after the Owner precheck
@@ -192,7 +196,7 @@ nodes:
   D4:
     kind: decision
     description: Generic Supervisor Territory is one active local match after target session proof
-    condition: Supervisor has a non-placeholder Territory query with one active local match; missing, foreign, unavailable, or multiple Territory matches fail closed
+    condition: Supervisor has a non-placeholder Territory query with one active local match; new conversation responsibility/replacement/succession phrases require the exact territory name, while legacy aliases remain compatible; missing, foreign, unavailable, or multiple matches fail closed
     code:
       - path: src/core/owner-binding-intent.ts
         symbol: resolveTerritory
@@ -204,6 +208,8 @@ nodes:
         symbol: "Supervisor 缺 Territory 或 Territory 多匹配时只追问 AMBIGUOUS"
       - path: tests/owner-binding-intent.test.ts
         symbol: "Supervisor 唯一 Territory 生成 role.bind Draft，并保留已解析 Territory 目标"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "新表达不把名称前缀、旧后缀或别名猜成目标领地"
   D5:
     kind: decision
     description: The generic role_type/Territory path checks whether a reusable exact role binding exists
@@ -237,30 +243,28 @@ nodes:
       - path: tests/owner-binding-intent.test.ts
         symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
       - path: tests/owner-binding-intent.test.ts
-        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+        symbol: "Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完"
   D6:
     kind: decision
-    description: Supervisor needs the dependent Territory attachment step
-    condition: The resolved role is SUPERVISOR and no existing Territory supervisor binding can be reused
+    description: A new Supervisor binding includes the exact territory in its single atomic command
+    condition: The resolved role is SUPERVISOR with one territory and no reusable current Supervisor; other roles omit territory_id
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildDraftFromParsed
+    tests:
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完"
+      - path: tests/owner-binding-intent.test.ts
+        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
+  A3:
+    kind: action
+    description: Keep territory_id in the same role.bind operation; do not append a second attachment step
     code:
       - path: src/core/owner-binding-intent.ts
         symbol: canonicalSteps
     tests:
       - path: tests/owner-binding-intent.test.ts
-        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
-      - path: tests/owner-binding-intent.test.ts
-        symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
-  A3:
-    kind: action
-    description: Append the dependent territory.supervisor zero-write Draft step
-    code:
-      - path: src/core/owner-binding-intent.ts
-        symbol: territorySupervisorStep
-      - path: src/core/owner-binding-intent.ts
-        symbol: canonicalTerritorySupervisorSlash
-    tests:
-      - path: tests/owner-binding-intent.test.ts
-        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+        symbol: "Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完"
   D7:
     kind: decision
     description: Direct role/session target passes live registry validation
@@ -426,10 +430,10 @@ nodes:
       - path: src/core/owner-binding-intent.ts
         symbol: OwnerBindingStepPolicy
       - path: src/core/owner-binding-intent.ts
-        symbol: territorySupervisorStep
+        symbol: canonicalSteps
     tests:
       - path: tests/owner-binding-intent.test.ts
-        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+        symbol: "Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完"
       - path: tests/owner-binding-intent.test.ts
         symbol: "OWNER_CONTROL_REQUIRED structured rejection helper 生成 normalized Draft 且保持 zero-write"
   G6:
@@ -513,7 +517,7 @@ nodes:
   X5:
     kind: outcome
     description: Reviewable canonical direct Owner Draft
-    result: role.bind or exact role.session, plus the dependent territory.supervisor step when required, with DIRECT_SLASH_CONFIRM_REQUIRED
+    result: Preserve role.bind or exact role.session and DIRECT_SLASH_CONFIRM_REQUIRED; supported stable supervisor/chancellor requests additionally receive Chinese guidance and a single exact-scope human owner.gui command
     code:
       - path: src/core/owner-binding-intent.ts
         symbol: readyDraft
@@ -523,7 +527,7 @@ nodes:
       - path: tests/owner-binding-intent.test.ts
         symbol: "自然语言别名生成 deterministic zero-write CHANCELLOR role.bind Draft"
       - path: tests/owner-binding-intent.test.ts
-        symbol: "Supervisor 新绑定生成完整两步 canonical plan，第二步只依赖 direct Owner 结果"
+        symbol: "Supervisor 新绑定生成单步 canonical plan：席位与领地主理在同一事务里一次写完"
       - path: tests/owner-binding-intent.test.ts
         symbol: "已有 Territory supervisor_binding_id 时对 exact Supervisor binding 生成 role.session"
   X6:
@@ -566,3 +570,85 @@ nodes:
     tests:
       - path: tests/index-owner-binding-integration.test.ts
         symbol: "direct role.session validates envelope grammar before Owner gate and rejects before live-session proof with zero writes"
+  D17:
+    kind: decision
+    description: A ready draft can yield one exact management-window command only while its current context remains valid
+    condition: Draft has one supported supervisor/chancellor action, explicit ACTIVE current session, exact kingdom, unchanged role and territory relationship, and no ambiguity; supervisor role.session reuses one active seat and its entire unchanged affected_territories snapshot, with every related territory local, available and still pointing to that seat
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildOwnerBindingGuidance
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "ready 草案不能覆盖已经改变的会话或主管关系"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "歧义、失效会话、Owner 意图和附加指令均不提供管理命令"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "同席位其它领地新增、换绑、失效或外来时拒绝沿用原主管引导命令"
+  A6:
+    kind: action
+    description: Return Chinese steps plus one ten-minute owner.gui command using only exact kingdom, all affected territories, one binding, role and current session; seat-wide handover names every territory and warns a user who only wants one to stop before confirming
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildOwnerBindingGuidance
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "会话能按准确领地名准备首次主管任命，仍为零写和无 Owner 权限"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "更换和接替主管表达复用原席位，仅准备一次 role.session 管理窗口"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "同一主管席位负责多个领地时，引导列出全部准确范围并提示只想一领地应停止"
+  E4:
+    kind: entry
+    description: Human executes the prepared exact-scope owner.gui command through direct Slash ingress
+    trigger: Direct /kingdom owner.gui command copied from the conversation guidance
+    code:
+      - path: src/index.ts
+        symbol: "case 'owner.gui'"
+  A7:
+    kind: action
+    description: Hand off to gui.owner-control for human preview and explicit commit with current scope, related facts and unsettled-work checks
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ownerBindingFormPrefill
+      - path: src/core/owner-window.ts
+        symbol: prepare
+      - path: src/core/owner-window.ts
+        symbol: commit
+      - path: src/core/owner-window.ts
+        symbol: guardUnsettled
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "单动作准确范围仅预填已有目录目标，预填本身不扩权或提交"
+      - path: tests/owner-window.test.ts
+        symbol: An older unreleased Lease blocks topology even when the newest execution is terminal
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: conversation guidance reaches exact Owner preview and confirmation for first binding and session replacement
+  G7:
+    kind: safeguard
+    description: Guided management-window command is a bounded human instruction, never Owner authority
+    safeguard_type: authorization
+    guarantee: Exactly one action with kingdomWide false, exact references and TTL 600000; supervisor role.session scopes all unchanged current territories of only that seat and names them before confirmation; no ticket/capability, automatic preview/commit, seat retirement, extra binding or silent fallback
+    protects: [D17, A6, A7]
+    failure_behavior: Clarification only when stale/ambiguous; the active Owner window still refuses out-of-scope, changed or unsettled targets
+    code:
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildOwnerBindingGuidance
+      - path: src/gui/owner-ui.ts
+        symbol: ownerBindingFormPrefill
+      - path: src/core/owner-window.ts
+        symbol: guardUnsettled
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "会话能按准确领地名准备首次主管任命，仍为零写和无 Owner 权限"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "管理窗口多目标、宽范围或目录目标缺失时不会自动选择第一项"
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: conversation guidance reaches exact Owner preview and confirmation for first binding and session replacement
+  X12:
+    kind: outcome
+    description: No exact management command can be produced
+    result: Preserve compatible Draft JSON and return Chinese clarification with ZERO_WRITE and owner_authority false
+  X13:
+    kind: outcome
+    description: Human reads the bounded management result
+    result: Confirmed operation result or explicit refusal/uncertain result; the Agent does not retry, terminate, detach or compensate automatically

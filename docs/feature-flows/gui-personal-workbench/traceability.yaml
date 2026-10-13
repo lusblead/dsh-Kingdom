@@ -191,7 +191,7 @@ nodes:
         symbol: v1 public GUI covers governed DONE, HANDOFF, execution controls, and Owner boundary
   X5:
     kind: outcome
-    description: Open the exact new task
+    description: Select the exact new task and preserve dispatch or open detail
     result: Created task is selected without automatic assignment or dispatch
     code:
       - path: src/gui/console-app.ts
@@ -697,3 +697,143 @@ nodes:
         symbol: a nested workspace ignore rule is enumerated, so removing it never turns an unchanged file into a confirmable addition
       - path: tests/delivery-change-boundary.test.ts
         symbol: a newly added nested workspace ignore rule never turns an unchanged file into a confirmable deletion
+
+  E20:
+    kind: entry
+    description: Open runtime overview
+    trigger: Navigate to today
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderRuntimeOverview
+  A20:
+    kind: action
+    description: Derive exact current role session and execution relationships
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderRuntimeOverview
+  D20:
+    kind: decision
+    description: A session has an exact matching live execution
+    condition: Current worker binding, affinity territory and sessionDisplay all match the execution
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderRuntimeOverview
+    tests:
+      - path: tests/simple-workbench.test.ts
+        symbol: a different binding, task, session or territory cannot animate an unrelated session as running
+  X20:
+    kind: outcome
+    description: Show the current execution record independently from model liveness
+    result: Execution status visible and model observation remains unconfirmed
+  X21:
+    kind: outcome
+    description: No matching current execution
+    result: No linked execution and unconfirmed model observation
+  E21:
+    kind: entry
+    description: Open dispatch page
+    trigger: Navigate to dispatch
+    code:
+      - path: src/gui/console-app.ts
+        symbol: parseConsoleFragment
+  A21:
+    kind: action
+    description: Mount original create assign start forms without losing listeners
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: mountWorkbench
+    tests:
+      - path: tests/simple-workbench.test.ts
+        symbol: dispatch mounting preserves original form listeners and leaves review and recovery in task details
+  E22:
+    kind: entry
+    description: Copy supervisor setup request
+    trigger: Click the territory supervisor request button
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderSupervisorSettings
+  A22:
+    kind: action
+    description: Copy exact territory natural language request with manual fallback
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderSupervisorSettings
+    tests:
+      - path: tests/simple-workbench.test.ts
+        symbol: clipboard failure leaves a clear manual chat request and does not report copied
+  X22:
+    kind: outcome
+    description: Chat prepares confirmation without console mutation
+    result: User can request setup without finding ids or writing JSON
+  G20:
+    kind: safeguard
+    description: Current identity and liveness separation
+    safeguard_type: observability
+    guarantee: Retired history and unrelated execution never become a current running session
+    protects: [A20]
+    failure_behavior: Show unconfirmed supervisor or unconfirmed model status
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderRuntimeOverview
+    tests:
+      - path: tests/simple-workbench.test.ts
+        symbol: retired binding history and truncated supervisor seats never become current roles or false missing seats
+  G21:
+    kind: safeguard
+    description: Supervisor request zero write
+    safeguard_type: authorization
+    guarantee: Copying a request cannot bind a supervisor or create Owner authority
+    protects: [A22]
+    failure_behavior: Keep visible request and explain clipboard failure
+    code:
+      - path: src/gui/workbench-ui.ts
+        symbol: renderSupervisorSettings
+    tests:
+      - path: tests/simple-workbench.test.ts
+        symbol: supervisor settings copy natural language to the target chat without performing a write
+
+  E23:
+    kind: entry
+    description: Select a task inside dispatch forms
+    trigger: Assign or start task selector changes
+    code:
+      - path: src/gui/console-app.ts
+        symbol: selectTask
+  A23:
+    kind: action
+    description: Preserve dispatch page and fetch exact newly selected task detail
+    code:
+      - path: src/gui/console-app.ts
+        symbol: selectTask
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: dispatch task selection stays on the page and loads only the newly selected resource
+  X23:
+    kind: outcome
+    description: Continue dispatch from the same page
+    result: Current task selection and gate update without automatic dispatch
+  G22:
+    kind: safeguard
+    description: Dispatch page and resource selection continuity
+    safeguard_type: authorization
+    guarantee: Old detail permissions clear before the newly selected task is loaded
+    protects: [A23]
+    failure_behavior: Keep the current page and use only the selected task snapshot or exact task detail
+    code:
+      - path: src/gui/console-app.ts
+        symbol: selectTask
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: dispatch task selection stays on the page and loads only the newly selected resource
+      - path: tests/v12-workbench-console.test.ts
+        symbol: creation from dispatch selects the returned task without leaving dispatch or starting it
+
+  A24:
+    kind: action
+    description: Scroll changed main pages to their heading while same-page selection preserves reading position
+    code:
+      - path: src/gui/console-app.ts
+        symbol: applyNavigationFromLocation
+    tests:
+      - path: tests/v12-workbench-console.test.ts
+        symbol: primary navigation brings the new page into view without scrolling same-page dispatch selection

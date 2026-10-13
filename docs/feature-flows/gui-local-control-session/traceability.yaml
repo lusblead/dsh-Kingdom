@@ -12,6 +12,151 @@ characteristics:
   security_sensitive: true
 
 nodes:
+  E9:
+    kind: entry
+    description: Browser refreshes controls or submits an allowlisted GUI command
+    trigger: GET /api/control or POST /api/commands/:command
+    code:
+      - path: src/gui/server.ts
+        symbol: startGuiServer
+  D27:
+    kind: decision
+    description: Existing transport admission and captured Session boundary remain authoritative
+    condition: Exact loopback and configured Origin plus valid session and command transport checks pass; a Role command also needs a captured Session identity
+    code:
+      - path: src/gui/local-control.ts
+        symbol: validateTransport
+      - path: src/gui/local-control.ts
+        symbol: authorize
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+    tests:
+      - path: tests/gui-local-control-security.test.ts
+        symbol: same-origin GET without Origin can inspect, while mutation without/external Origin is zero-effect denied
+      - path: tests/gui-role-preflight.test.ts
+        symbol: a permissive callback cannot add Session identity or expose Owner actions
+  D28:
+    kind: decision
+    description: Closing the control session does not depend on Role availability
+    condition: The server allowlisted command is exactly control.revoke
+    code:
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+      - path: src/gui/server.ts
+        symbol: control.revoke
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: exceptional or malformed role preflight fails closed and never disables control revoke
+  A27:
+    kind: action
+    description: Read the current Role only for the exact activation-captured Session
+    code:
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+      - path: src/index.ts
+        symbol: inspectRoleAction
+  D29:
+    kind: decision
+    description: Current Role and valid preflight result permit this command
+    condition: Captured Session is currently live; plan requires ACTIVE CHANCELLOR while assign, start, review, reconcile and execution commands require ACTIVE SUPERVISOR; missing, retired, changed or unreadable Role evidence cannot enable the command
+    code:
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+      - path: src/index.ts
+        symbol: inspectRoleAction
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: Supervisor preflight disables task creation and rejects the submitted plan
+      - path: tests/gui-role-preflight.test.ts
+        symbol: Chancellor preflight allows plan while all Supervisor commands remain unavailable
+      - path: tests/gui-role-preflight.test.ts
+        symbol: live rebind narrows both refreshed controls and mutation admission without consuming denied requests
+      - path: tests/gui-role-preflight.test.ts
+        symbol: exceptional or malformed role preflight fails closed and never disables control revoke
+      - path: tests/gui-role-preflight.test.ts
+        symbol: HTTP command admission rereads Role and rejects the wrong Role before invoking the business handler
+  A28:
+    kind: action
+    description: Produce a narrowed control view or admit a Role-eligible command to existing Core authorization
+    code:
+      - path: src/gui/local-control.ts
+        symbol: publicView
+      - path: src/gui/local-control.ts
+        symbol: authorize
+      - path: src/gui/server.ts
+        symbol: options.control.authorize
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: HTTP command admission rereads Role and rejects the wrong Role before invoking the business handler
+  A29:
+    kind: action
+    description: Revoke the existing in-memory control session without Role lookup
+    code:
+      - path: src/gui/local-control.ts
+        symbol: revoke
+      - path: src/gui/server.ts
+        symbol: control.revoke
+  X37:
+    kind: outcome
+    description: Existing transport or Session admission fails
+    result: Retain existing failure codes and produce no protected business side effect
+  X38:
+    kind: outcome
+    description: The current Role is eligible but resource-specific authority remains a Core decision
+    result: Browser receives narrowed actions or the existing structured Core command result; no new authority is minted
+  X39:
+    kind: outcome
+    description: Wrong or unreadable Role cannot reach the command handler
+    result: Disable the control action with a stable reason or return HTTP 403 CONTROL_ROLE_DENIED without consuming a request ID or mutation lock; callback failure detail stays private
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: live rebind narrows both refreshed controls and mutation admission without consuming denied requests
+      - path: tests/gui-role-preflight.test.ts
+        symbol: exceptional or malformed role preflight fails closed and never disables control revoke
+      - path: tests/gui-role-preflight.test.ts
+        symbol: HTTP command admission rereads Role and rejects the wrong Role before invoking the business handler
+  X40:
+    kind: outcome
+    description: Control session is closed even when Role lookup is unavailable
+    result: Existing cookie and captured authority are revoked through the existing transport
+  G25:
+    kind: safeguard
+    description: Read-only preflight can only narrow the captured identity and existing command surface
+    safeguard_type: authorization
+    guarantee: Missing Session identity and Owner-only actions cannot be enabled by a permissive callback; current Role eligibility does not replace Core exact Task and Territory authorization
+    protects: [A27, A28]
+    failure_behavior: Disable the action or return CONTROL_ROLE_DENIED; Owner actions remain direct-Slash-only
+    code:
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+      - path: src/gui/local-control.ts
+        symbol: publicView
+      - path: src/gui/local-control.ts
+        symbol: authorize
+      - path: src/gui/server.ts
+        symbol: options.control.authorize
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: a permissive callback cannot add Session identity or expose Owner actions
+      - path: tests/gui-role-preflight.test.ts
+        symbol: omitting the optional preflight preserves the existing session-bound broker behavior
+      - path: tests/gui-role-preflight.test.ts
+        symbol: HTTP command admission rereads Role and rejects the wrong Role before invoking the business handler
+  G26:
+    kind: safeguard
+    description: Unavailable Role preflight fails closed while the control session remains revocable
+    safeguard_type: validation
+    guarantee: Callback throws and malformed or contradictory results never expose executable Role commands or private error details; control.revoke bypasses Role lookup
+    protects: [D29, A29]
+    failure_behavior: ROLE_PREFLIGHT_UNAVAILABLE for the control view and CONTROL_ROLE_DENIED for mutation admission; revoke uses the existing transport path
+    code:
+      - path: src/gui/local-control.ts
+        symbol: roleAction
+      - path: src/gui/local-control.ts
+        symbol: authorize
+    tests:
+      - path: tests/gui-role-preflight.test.ts
+        symbol: exceptional or malformed role preflight fails closed and never disables control revoke
   E7:
     kind: entry
     description: A one-sentence goal or task draft is edited in the personal workbench

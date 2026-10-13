@@ -167,7 +167,7 @@ nodes:
       - path: tests/owner-window.test.ts
         symbol: An older unreleased Lease blocks topology even when the newest execution is terminal
       - path: tests/owner-window.test.ts
-        symbol: Retired previous Supervisor is a historical relationship, while its unsettled work still blocks replacement
+        symbol: An ACTIVE incumbent is never silently replaced, while a legacy pointer to a RETIRED seat can be repaired
   T2:
     kind: transition
     description: Atomically apply the exact operation and append its receipt
@@ -670,3 +670,67 @@ nodes:
         symbol: a supervisor-confirmed CHANGE entry is questionable and answerable, and evidence drift fails closed
       - path: tests/delivery-question-loop.test.ts
         symbol: the session inbox enumerates every ACTIVE supervisor binding instead of silently dropping the later one
+  E10:
+    kind: entry
+    description: Human opens the exact Owner management window prepared by conversation guidance
+    trigger: Open the link returned by a directly executed single-action owner.gui command
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: load
+      - path: src/core/owner-binding-intent.ts
+        symbol: buildOwnerBindingGuidance
+    tests:
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: conversation guidance reaches exact Owner preview and confirmation for first binding and session replacement
+  D12:
+    kind: decision
+    description: Role-operation prefill requires one exact scope and uniquely locatable authorized catalog targets
+    condition: Exactly one role.bind or role.session action, kingdomWide false, no workspace roots, one SUPERVISOR or CHANCELLOR role type, one current target Session in catalog, every supervisor territory uniquely in catalog, and zero binding targets plus one territory for role.bind or one exact active role-matching binding and all its affected territories for role.session
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ownerBindingFormPrefill
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "单动作准确范围仅预填已有目录目标，预填本身不扩权或提交"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "管理窗口多目标、宽范围或目录目标缺失时不会自动选择第一项"
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "同一主管席位的多领地接替仍仅预填该席位和会话，并保留全部领地影响提示"
+  A10:
+    kind: action
+    description: Prefill only the unique role, current session or original role binding; a new supervisor name defaults to territory name plus 主管, while a seat-wide session change explicitly names all affected territories and warns the user to stop if only one is intended
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ownerBindingFormPrefill
+      - path: src/gui/owner-ui.ts
+        symbol: applyBindingPrefill
+      - path: src/gui/owner-ui.ts
+        symbol: renderFields
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "单动作准确范围仅预填已有目录目标，预填本身不扩权或提交"
+  X12:
+    kind: outcome
+    description: Role-operation target is not uniquely eligible for convenience prefill
+    result: No alternative target is selected; explicit role, territory, binding and session choices remain required before the existing human preview/commit path
+  G9:
+    kind: safeguard
+    description: Conversation preparation and form prefill never grant Owner authority or submit a mutation
+    safeguard_type: authorization
+    guarantee: Prefill changes only existing form values inside the exact active catalog; no scope expansion, no automatic prepare/commit, no seat retirement or detachment; Core still checks current scope, related facts and unsettled work in prepare/commit
+    protects: [D12, A10]
+    failure_behavior: Return no prefill for multiple, broad, missing or duplicate targets and keep explicit choices; server rejects stale, out-of-scope or unsettled submissions
+    code:
+      - path: src/gui/owner-ui.ts
+        symbol: ownerBindingFormPrefill
+      - path: src/core/owner-window.ts
+        symbol: context
+      - path: src/core/owner-window.ts
+        symbol: guardUnsettled
+    tests:
+      - path: tests/supervisor-guidance.test.ts
+        symbol: "管理窗口多目标、宽范围或目录目标缺失时不会自动选择第一项"
+      - path: tests/owner-window.test.ts
+        symbol: An older unreleased Lease blocks topology even when the newest execution is terminal
+      - path: tests/index-owner-binding-integration.test.ts
+        symbol: conversation guidance reaches exact Owner preview and confirmation for first binding and session replacement

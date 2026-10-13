@@ -1,7 +1,61 @@
 /** Self-contained management surface; all business values are rendered as text. */
 export function renderOwnerApp(nonce: string): string {
   if (!/^[A-Za-z0-9_-]{20,100}$/u.test(nonce)) throw new Error('invalid owner page nonce')
-  return OWNER_APP_HTML.replaceAll('__OWNER_NONCE__', nonce)
+  return OWNER_APP_HTML.replace('__BINDING_PREFILL__', ownerBindingFormPrefill.toString()).replaceAll('__OWNER_NONCE__', nonce)
+}
+
+interface OwnerBindingPrefillControl {
+  decision: {
+    actions: readonly string[]
+    scope: {
+      kingdomWide: boolean
+      roleTypes: readonly string[]
+      territoryIds: readonly string[]
+      bindingIds: readonly string[]
+      targetSessionIds: readonly string[]
+      workspaceRoots: readonly string[]
+    }
+  }
+  catalog?: {
+    territories?: readonly { id: string; name: string }[]
+    bindings?: readonly { id: string; roleType: string; roleName: string }[]
+    runtimeSessions?: readonly { id: string; label: string }[]
+  }
+}
+
+/** Pure form convenience only; preview/commit still recheck scope and current facts. */
+export function ownerBindingFormPrefill(control: OwnerBindingPrefillControl): Record<string, string> | null {
+  const decision = control?.decision, scope = decision?.scope, catalog = control?.catalog
+  if (!scope || !catalog || decision.actions.length !== 1) return null
+  const action = decision.actions[0]!
+  if (!['role.bind', 'role.session'].includes(action)) return null
+  if (!['roleTypes', 'territoryIds', 'bindingIds', 'targetSessionIds', 'workspaceRoots']
+    .every(key => Array.isArray(scope[key as keyof typeof scope]))) return null
+  if (scope.kingdomWide || scope.workspaceRoots.length
+    || scope.roleTypes.length !== 1 || scope.targetSessionIds.length !== 1) return null
+  const role = scope.roleTypes[0]!, sessionId = scope.targetSessionIds[0]!
+  if (!['SUPERVISOR', 'CHANCELLOR'].includes(role)) return null
+  const sessions = (catalog.runtimeSessions ?? []).filter(item => item.id === sessionId)
+  if (sessions.length !== 1) return null
+  let territory: { id: string; name: string } | null = null
+  if (role === 'SUPERVISOR') {
+    if (!scope.territoryIds.length || new Set(scope.territoryIds).size !== scope.territoryIds.length
+      || (action === 'role.bind' && scope.territoryIds.length !== 1)) return null
+    for (const territoryId of scope.territoryIds) {
+      const territories = (catalog.territories ?? []).filter(item => item.id === territoryId)
+      if (territories.length !== 1) return null
+      if (action === 'role.bind') territory = territories[0]!
+    }
+  } else if (scope.territoryIds.length) return null
+  if (action === 'role.bind') {
+    if (scope.bindingIds.length) return null
+    return { role_type: role, role_name: territory ? territory.name + '主管' : '宰相', session_id: sessionId,
+      ...(territory ? { territory_id: territory.id } : {}) }
+  }
+  if (scope.bindingIds.length !== 1) return null
+  const bindings = (catalog.bindings ?? []).filter(item => item.id === scope.bindingIds[0] && item.roleType === role)
+  if (bindings.length !== 1) return null
+  return { binding_id: bindings[0]!.id, session_id: sessionId }
 }
 
 const OWNER_APP_HTML = String.raw`<!doctype html>
@@ -36,6 +90,7 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
 </main><script nonce="__OWNER_NONCE__">
 (() => {
   'use strict';
+  const ownerBindingFormPrefill = __BINDING_PREFILL__;
   const el = id => document.getElementById(id);
   const state = { control: null, decisionId: null, preview: null, busy: false, uncertain: false, ackTarget: null, ackHintInvalid: false, askTarget: null, askHintInvalid: false, askThread: null, changeTarget: null, changeHintInvalid: false, questionLimit: 50, questionSeq: 0 };
   /**
@@ -189,6 +244,12 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
     const action = el('action').value; const catalog = state.control.catalog || {}; text('action-note', notes[action]);
     const territories = (catalog.territories || []).map(item => ({id:item.id,label:item.name + ' · ' + item.id}));
     const sessions = (catalog.runtimeSessions || []).map(item => ({id:item.id,label:item.label + ' · ' + item.id}));
+    const requireChoice = (values, label) => [{id:'',label}, ...values];
+    const applyBindingPrefill = () => {
+      const prefill = ownerBindingFormPrefill(state.control);
+      if (!prefill) return;
+      for (const [key, value] of Object.entries(prefill)) { const input=el('param-' + key); if(input) input.value=value; }
+    };
     if (action === 'init') { field('kingdom_name','王国名称'); field('owner_name','所有者显示名'); }
     if (action === 'territory.create') { field('name','领地名称'); field('workspace_path','已存在的工作目录'); field('summary','领地说明','textarea',undefined,false); const roots = make('p','允许的根目录：' + (catalog.workspaceRoots || []).join('；'),'muted'); roots.classList.add('wide'); el('fields').append(roots); }
     if (action === 'territory.update') { field('territory_id','领地','select',territories); field('name','新名称（不改请留空）','text',undefined,false); field('summary','新说明（不改请留空）','textarea',undefined,false); }
@@ -211,13 +272,13 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
       release.addEventListener('change', update); update();
     }
     if (action === 'role.bind') {
-      const role = field('role_type','角色','select',(state.control.decision.scope.roleTypes || []).map(id=>({id,label:roleNames[id]}))); field('role_name','角色名称');
-      const session = field('session_id','运行会话','select',sessions);
+      const role = field('role_type','角色','select',requireChoice((state.control.decision.scope.roleTypes || []).map(id=>({id,label:roleNames[id]})), '请选择角色')); field('role_name','角色名称');
+      const session = field('session_id','运行会话','select',requireChoice(sessions, '请选择运行会话'));
       // v3.2.0：主管必须同时隶属一个领地（席位与主理同一事务写入），因此这里强制选择领地；
       // 其它角色不隶属领地，字段隐藏并禁用，不进入 payload。
-      const territory = field('territory_id','主理领地（主管必选）','select',territories);
+      const territory = field('territory_id','主理领地（主管必选）','select',requireChoice(territories, '请选择领地'));
       const territoryHint = make('p', territories.length
-        ? '领地和主管完全绑定：任命主管时会同时把该领地的主理设为此席位；领地当前已有主理时会被拒绝，请先解除现有主理再指派。'
+        ? '本次确认会让所选会话负责该领地。领地已有主管时，请回到要接任的会话说“把「准确领地名」主管换成当前会话”，由会话准备更换引导。'
         : '本次授权范围内没有任何可用领地：无法任命主管。请先创建领地，或重新激活本包含目标领地的管理窗口。','muted');
       territoryHint.classList.add('wide'); el('fields').append(territoryHint);
       const update = () => {
@@ -227,9 +288,17 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
         territoryHint.hidden = !supervisor;
         el('prepare').disabled = supervisor && !territories.length;
       };
-      role.addEventListener('change',update); update();
+      applyBindingPrefill(); role.addEventListener('change',update); update();
     }
-    if (action === 'role.session') { field('binding_id','要调整的角色','select',allowedBindings(item=>['CHANCELLOR','SUPERVISOR'].includes(item.roleType))); field('session_id','新的运行会话','select',sessions); }
+    if (action === 'role.session') {
+      field('binding_id','要接替的角色','select',requireChoice(allowedBindings(item=>['CHANCELLOR','SUPERVISOR'].includes(item.roleType)), '请选择要接替的角色'));
+      field('session_id','接任的运行会话','select',requireChoice(sessions, '请选择接任会话')); applyBindingPrefill();
+      if (ownerBindingFormPrefill(state.control) && state.control.decision.scope.roleTypes[0] === 'SUPERVISOR') {
+        const names = state.control.decision.scope.territoryIds.map(id => '「' + catalog.territories.find(item => item.id === id).name + '」').join('、');
+        const hint = make('p','本次更换同一主管席位的会话，会同时接替全部领地：' + names + '。若只想接替其中一个领地，请停止确认，不提交此变更。','evidence-weak field wide');
+        hint.id='supervisor-session-scope'; el('fields').append(hint);
+      }
+    }
     if (action === 'execution-profile') {
       field('binding_id','要配置的角色','select',allowedBindings(item=>['CHANCELLOR','SUPERVISOR','WORKER'].includes(item.roleType)));
       field('provider','模型服务商（可选，留空使用现有配置默认值）','text',undefined,false); field('model','模型名称');
@@ -596,7 +665,7 @@ const OWNER_APP_HTML = String.raw`<!doctype html>
       }
       if(state.ackTarget) el('action').value='delivery.item.ack';
       if(state.askTarget) el('action').value='delivery.item.question';
-      renderFields(); lock(false); status(openNotice || '管理窗口已就绪。填写变更后先查看预览。'); tick();
+      renderFields(); lock(false); status(openNotice || (ownerBindingFormPrefill(control) ? '本次唯一目标已填好。核对领地、角色和会话后查看变更预览。' : '管理窗口已就绪。填写变更后先查看预览。')); tick();
       // 只读问答线程与历史入口在窗口就绪后单独渲染：它们不参与授权，也不写任何事实。
       renderQuestionHistory();
       void renderQuestions();

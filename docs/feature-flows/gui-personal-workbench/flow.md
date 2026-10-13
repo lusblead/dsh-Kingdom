@@ -10,6 +10,44 @@ The user opens a personal workbench, distinguishes actual Owner configuration de
 
 已确认交付按「成果摘要 → 模块/事项 → 证据/改动」三层展示，每条有稳定条目 ID 与内容版本，外层摘要知悉不覆盖子条。每条知悉图标按钮只做一件事：把 exact `task/item/contentHash` 作为 URL 参数交给 canonical Owner Window 并预选该条。工作台不写事实、不代替 Owner 授权、预览、提交或回执；图标按钮不再重复长文案，accessible name 与 tooltip 保留在 `aria-label`/`title`，键盘可操作，知悉/待知悉状态由相邻状态文本与图标共同表达。改动定位只在主管于 ACCEPT 中显式选择、且本地内容寻址证据 hash 重验通过时可定位，并固定标注「主管确认的改动证据」；其余条目保持不可定位，不把执行者自述文本、本机绝对路径或既有 `SourceRef` 变成链接。查看差异正文需要有效的人类管理窗口，查看不写入、不自动知悉。该证据是有界窗口观测 + 主管确认，绝不声称 Git 证明作者身份。条目提问已由 17 号 Work Order 实现：每条（摘要层与证据层各条）都有独立提问图标，只把 exact `task/item/contentHash` 交给 canonical Owner Window 并预选该条；问题文本由 Owner 在窗口内填写、预览并提交，接收者固定为接受该交付的主管。工作台只投影提问的**最小元数据**（计数、时间、接收主管是否可达），绝不携带问题或回复正文；未回复的问题只显示「待领取」，不代表已通知或已阅读。
 
+## 简化工作台（本轮）
+
+主导航是运行总览、派发任务、主管设置。总览分别展示任务治理状态与准确角色/领地/脱敏会话关联的执行记录；未提供模型运行观测时显示未知。主管辖下任务计数不能证明主管本人在运行；退任历史不作为当前席位。派发页移动原创建、指派和启动表单节点并保留监听器，创建仍由宰相，后两步仍由任务所属领地主管。高级JSON/沙箱折叠且沿用原默认值；未知响应不重发。主管设置只复制自然语言请求，由 owner-binding-natural-language 准备 exact 确认入口。
+
+```mermaid
+flowchart TD
+    E20(["E20 打开运行总览"]) --> A20["A20 读取当前角色与任务，按exact binding/session/territory关联执行"]
+    A20 --> D20{"D20 有精确匹配的活跃执行记录"}
+    D20 -->|有| X20(["X20 显示执行记录状态；模型观测仍未知"])
+    D20 -->|无| X21(["X21 显示未关联当前执行；模型观测未知"])
+    E21(["E21 进入派发任务"]) --> A24["A24 主页面切换定位到标题；同页选择与刷新保留阅读位置"]
+    A24 --> A21["A21 保留原表单与事件，填写、指派、启动"]
+    A21 --> E3
+    E22(["E22 在主管设置复制请求"]) --> A22["A22 复制准确领地名的自然语言请求"]
+    A22 --> X22(["X22 会话准备确认命令；页面零写入"])
+    E23(["E23 在派发表单选择任务"]) --> A23["A23 保留派发页，清除旧资源许可，读取准确新任务详情"]
+    A23 --> X23(["X23 在原页继续指派或启动，使用新任务权限"])
+    G22[["G22 选择任务不离页，旧任务许可不泄漏"]] -.-> A23
+    G20[["G20 席位、会话、执行分离，历史不冒充当前"]] -.-> A20
+    G21[["G21 只复制请求，不制造Owner权限"]] -.-> A22
+```
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Console
+    participant Snapshot
+    participant Chat as Current session
+    User->>UI: 打开总览
+    UI->>Snapshot: 读取有界快照
+    Snapshot-->>UI: 任务/当前角色/会话关联/执行记录
+    UI-->>User: 显示领地与状态，未知观测明确标注
+    User->>UI: 复制绑定或接替主管请求
+    UI-->>User: 准确自然语言请求或复制失败可手动选择文本
+    User->>Chat: 在目标会话提出请求
+    Chat-->>User: exact Owner窗口命令与预览确认步骤
+```
+
 ## Flow
 
 ```mermaid
@@ -32,7 +70,7 @@ flowchart TD
     D2 -->|No| X4(["X4 Keep draft and display actionable failure without automatic retry"])
     D2 -->|Yes| T1["T1 Persist CREATED task through planTask transaction"]
     T1 --> D3{"D3 Successful response includes the new Task ID"}
-    D3 -->|Yes| X5(["X5 Open exactly the returned task without dispatch"])
+    D3 -->|Yes| X5(["X5 Select only the returned task; keep dispatch page or open detail without starting"])
     D3 -->|No| X4
     E4(["E4 点击某条已确认交付的知悉图标"]) --> D5{"D5 该条有准确任务/条目/内容版本，且同一尝试已由主管 ACCEPT"}
     D5 -->|No| X7(["X7 不展示条目层或禁用图标；零写入"])
@@ -150,3 +188,13 @@ stateDiagram-v2
 - R2 定点返工（19 号 Code Review QA R1 的七项 + 20 号事务门修复；本机 `node --test --experimental-test-isolation=none`，默认子进程隔离因沙箱父子进程管道 spawn EPERM 不可用）：`tests/delivery-question-loop.test.ts` — 17/17、`tests/owner-delivery-ack.test.ts` — 42/42、`tests/delivery-change-evidence.test.ts` — 9/9、`tests/delivery-change-boundary.test.ts` — 28 passed/1 skipped（symlink EPERM）、`tests/delivery-change-tool-entry.test.ts` — 1/1、`tests/gui-owner-control.test.ts` — 10/10、`tests/v13-owner-direct-ingress.test.ts` — 1/1；相邻回归 `owner-window`/`owner-control-plane`/`owner-binding-intent`/`index-owner-binding-integration`/`gui-personal-workbench`/`gui-owner-ui`/`gui-owner-ui-recovery`/`gui-control-server`/`gui-local-control-security`/`r8-tx4-integrity`/`gui-v1-command-surface`/`v12-workbench-console` 合计 95/95；GUI 渲染批 `gui-visual-language`/`gui-stage-cardinality`/`gui-interactive-console`/`gui-v1-vertical-flow`/`gui-governed-vertical-flow`/`m3s2-v4-gui`/`v15-collaboration-gui`/`v14-cost-gui` 合计 65/65。反例实测：①新 operation 的同文问题不再被历史问文吞掉（两条独立事实、事件 ID 由 operationId 决定）；②接收主管要求 `actor_id` 与 payload `reviewer_binding_id` 同时非空且相等，伪造/缺一字段零写；③主管显式选择的 CHANGE 条目可提问并回复，证据漂移后 fail-closed；④同一交付第二个条目保留自己的问答线程；⑤提问专用最小 direct 命令 + `hintAction` 兑换后回到 `ask_*`，非法动作激活前拒绝；⑥收件箱枚举该 session 全部 ACTIVE SUPERVISOR binding；⑦回复事件 ID 只由 questionId 决定、重验与唯一写入在 `store.withImmediateTransaction` 内，双连接同库不产生双事实，BEGIN 失败原样传播零写（BEGIN-fallback 已删除）。`npm run typecheck` 与 `npm run build` 通过；`flowctl.py validate --changed` 为 0 error / 0 warning。未运行全套 `npm test`，未运行真实 DSH/Provider、正式 DB、真实浏览器人工交互与 Owner acceptance。
 - R5 定点返工（25 号 Code Review QA R4 的唯一定点：历史列表点击后无焦点/视口反馈；本机以直接 `node tests/<file>.test.ts` 运行，`node --test` 因沙箱拒绝父子进程管道的 spawn EPERM 不可用）：`tests/owner-delivery-ack.test.ts` — 49/49；相邻回归 `delivery-question-loop` 21/21、`delivery-change-evidence` 9/9、`gui-owner-ui` 2/2、`gui-owner-ui-recovery` 4/4、`gui-owner-control` 10/10、`v13-owner-direct-ingress` 1/1、`v12-workbench-console` 9/9、`gui-personal-workbench` 7/7、`owner-window` 25/25，全部 0 failed。反例实测：把编译产物里的 `'THREAD'` 焦点分支临时停用后，恰好这 2 个焦点用例失败（47 pass / 2 fail），`npm run build` 恢复后 49/49；新用例用真实 Core→UI 断言「A 的读取仍在途中不抢焦点/视口、改点 B 后焦点与视口落到 B 的真实线程标题、过期的 A 响应回来既不覆盖面板也不跳焦点」。`npm run typecheck` 与 `npm run build` 通过；`python C:\Users\ADMIN\.codex\skills\feature-flow-contract\scripts\flowctl.py --project D:\dsh\kingdom-owner-ack-dev-20260927 validate --changed` 为 0 error / 0 warning。未运行全套 `npm test`，未运行真实 DSH/Provider、正式 DB、真实浏览器人工交互与 Owner acceptance。
 - R6 定点返工（26 号 Code Review QA R5 的唯一定点：历史列表点击后的**新鲜失败**反馈不可见；本机以直接 `node tests/<file>.test.ts` 运行，`node --test` 因沙箱拒绝父子进程管道的 spawn EPERM 不可用）：`tests/owner-delivery-ack.test.ts` — 50/50；相邻回归 `delivery-question-loop` 21/21、`delivery-change-evidence` 9/9、`gui-owner-ui` 2/2、`gui-owner-ui-recovery` 4/4、`gui-owner-control` 10/10、`v13-owner-direct-ingress` 1/1、`v12-workbench-console` 9/9、`gui-personal-workbench` 7/7、`owner-window` 25/25，全部 0 failed。新用例用真实 Core→UI 历史条目加受控失败/乱序失败断言：新鲜失败消息本身获得程序化焦点与 `scrollIntoView`，因此停在下方列表的 Owner 也在当前视口看到错误；A 的失败停在途中时改点 B，焦点与视口落到 B 的真实 Core 线程标题；过期的 A 失败回来既不覆盖面板也不抢焦点；三条读取路径全程零 POST。反例实测：把编译产物里的失败焦点分支临时停用（`if (focusAfterRender === 'THREAD')` 改为 `if (false)`）后，恰好此用例失败为 49 pass / 1 fail，`npm run build` 恢复后 50/50。`npm run typecheck` 与 `npm run build` 通过；`python C:\Users\ADMIN\.codex\skills\feature-flow-contract\scripts\flowctl.py --project D:\dsh\kingdom-owner-ack-dev-20260927 validate --changed` 为 0 error / 0 warning。未运行全套 `npm test`，未运行真实 DSH/Provider、正式 DB、真实浏览器人工交互与 Owner acceptance。
+
+
+## 本轮验证与未运行项
+
+2026-10-13：运行总览/current角色/65领地截断反例/复制失败/原表单事件保留共8项，派发选择不离页及旧资源权限清除、创建保留派发页2项，现有导航、乱序详情、草稿保护继续回归。index中真实本地HTTP验证自然语言Tool→exact Owner窗口→预览→确认→绑定读回，首次任命和原席位会话接替均通过；它是隔离测试数据与协议验证，不代表人类Owner验收或正式DSH模型执行。
+
+浏览器验证NOT_RUN：Computer Use在本轮不能可靠识别Windows当前浏览器URL，安全检查中止了界面自动化。未绕过或改用另一种浏览器控制；四主题、窄屏实际视觉与陌生用户上手仍待验证。
+
+
+3.3.0发布前本轮IAB真实fixture检查已完成总览→任务详情→返回、派发选择留页及准确资源、主管请求复制、四主题与390px窄屏。修复真实helper将空链接单元格装饰为UNKNOWN的问题，增加窄屏横向滑动提示；仅主页面实际改变时定位到标题，同页选择和刷新不抢阅读位置。UI相关47项定点通过。它不代替陌生用户上手、正式Provider或人类Owner验收。

@@ -177,7 +177,7 @@ export interface ConsoleCommandEnvelope {
   payload: Record<string, unknown>
 }
 
-export type ConsoleSection = 'today' | 'inbox' | 'map' | 'usage' | 'settings' | 'overview' | 'organization' | 'tasks' | 'executions' | 'activity' | 'management' | 'ledger'
+export type ConsoleSection = 'today' | 'dispatch' | 'inbox' | 'map' | 'usage' | 'settings' | 'overview' | 'organization' | 'tasks' | 'executions' | 'activity' | 'management' | 'ledger'
 
 export const CONSOLE_APP_THEMES = [
   { id: 'parchment', label: '羊皮纸王国志', shortLabel: '羊皮' },
@@ -419,7 +419,7 @@ export function parseConsoleFragment(hash: string): ConsoleFragmentState {
       return { known: false, section: 'overview', taskId: null }
     }
   }
-  if (['today', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) {
+  if (['today', 'dispatch', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) {
     return { known: true, section: fragment as ConsoleSection, taskId: null }
   }
   return { known: false, section: 'overview', taskId: null }
@@ -1411,7 +1411,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#today">跳到今日工作台</a>
+  <a class="skip-link" href="#today">跳到运行总览</a>
   <div id="console-app" class="console-shell" data-console-app>
     <aside class="realm-sidebar" aria-label="王国侧栏">
       <header class="realm-brand">
@@ -1424,12 +1424,9 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </div>
       </header>
       <nav id="main-navigation" class="main-nav" aria-label="主导航">
-        <a href="#today" data-nav-section="today" aria-current="page">__ICON_MANAGEMENT__<span>今日工作台</span></a>
-        <a href="#tasks" data-nav-section="tasks">__ICON_LEDGER__<span>任务</span></a>
-        <a href="#inbox" data-nav-section="inbox">__ICON_MANAGEMENT__<span>待我处理</span></a>
-        <a href="#map" data-nav-section="map">__ICON_MAP__<span>王国地图</span></a>
-        <a href="#usage" data-nav-section="usage">__ICON_LEDGER__<span>用量</span></a>
-        <a href="#settings" data-nav-section="settings">__ICON_MANAGEMENT__<span>设置</span></a>
+        <a href="#today" data-nav-section="today" aria-current="page">__ICON_MANAGEMENT__<span>运行总览</span></a>
+        <a href="#dispatch" data-nav-section="dispatch">__ICON_LEDGER__<span>派发任务</span></a>
+        <a href="#settings" data-nav-section="settings">__ICON_MANAGEMENT__<span>主管设置</span></a>
       </nav>
       <div class="theme-picker" role="group" aria-label="界面风格">
         <span class="theme-picker-label">界面风格</span>
@@ -1441,10 +1438,10 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </div>
         <span id="active-theme-name" class="active-theme-name" aria-live="polite">森林墨绿</span>
       </div>
-      <section class="sidebar-boundary" aria-labelledby="authority-boundary-title">
-        <h2 id="authority-boundary-title">权力边界</h2>
+      <details class="sidebar-boundary">
+        <summary>权限说明</summary>
         <p>页面只呈现宿主明确开放的动作。人类所有者、代理与会话互不等同；浏览器不能自行获得治理权力。</p>
-      </section>
+      </details>
     </aside>
 
     <main class="console-main">
@@ -1616,12 +1613,12 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
         </section>
         <div class="forms" aria-label="操作抽屉">
       <section class="task-composer-card" aria-labelledby="task-composer-title">
-        <div class="task-composer-heading"><div><p class="section-kicker">任务草稿</p><h3 id="task-composer-title">明确目标与验收</h3></div><span>提交后由所属领地主管继续分派</span></div>
+        <div class="task-composer-heading"><div><p class="section-kicker">第一步</p><h3 id="task-composer-title">填写任务</h3></div><span>用宰相会话创建，再交给领地主管执行</span></div>
         <form id="task-create-form" novalidate>
           <label class="sr-only" for="task-title">任务名称</label>
           <div id="task-composer-shell" class="task-composer-shell">
             <span id="task-territory-chip" class="task-territory-chip" hidden></span>
-            <input id="task-title" name="title" required autocomplete="off" aria-autocomplete="list" aria-controls="territory-command-menu" aria-expanded="false" placeholder="写下任务，按 / 选择领地">
+            <input id="task-title" name="title" required autocomplete="off" aria-autocomplete="list" aria-controls="territory-command-menu" aria-expanded="false" placeholder="要完成什么？">
             <div id="territory-command-menu" class="territory-command-menu" role="listbox" aria-label="选择任务所属领地" hidden></div>
           </div>
           <div class="draft-fields">
@@ -1629,8 +1626,8 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
             <div class="field"><label for="task-acceptance">验收条件</label><textarea id="task-acceptance" name="acceptance_criteria" placeholder="什么结果可以确认完成？需要哪些产物或验证？"></textarea></div>
             <div class="field"><label for="task-territory">所属领地</label><select id="task-territory" name="territory_id" required><option value="">选择已有领地</option></select><span class="hint">所属领地的主管负责后续分派；浏览器不指定或替代治理身份。</span></div>
           </div>
-          <p class="hint">草稿保留在本页，不调用模型、不自动派发，也不代表 Owner 授权。提交仍需要合法宰相角色许可。</p>
-          <div class="form-actions"><button class="primary task-composer-submit" data-gated-action="task.create" type="submit" disabled>提交任务草稿</button></div>
+          <p class="hint">创建后还需指定执行者并开始执行。若当前会话是主管，请让宰相会话先创建任务。</p>
+          <div class="form-actions"><button class="primary task-composer-submit" data-gated-action="task.create" type="submit" disabled>创建任务</button></div>
           <div class="task-composer-meta"><span id="task-composer-hint">输入任务名称；按 <kbd>/</kbd> 唤出领地。</span><span class="button-reason" data-reason-for="task.create">暂时无法确认（UNKNOWN）</span></div>
         </form>
       </section>
@@ -1638,25 +1635,28 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       __GOVERNANCE_FLOW__
 
       <details class="form-card">
-        <summary>领地主管接手并派发</summary>
+        <summary>第二步 · 指定执行者</summary>
         <form id="assign-form" novalidate>
           <p class="form-route-note">任务已进入所选领地后，由该领地绑定的主管会话决定具体执行者；不会跨领地代派。</p>
           <div class="form-grid">
             <div class="field"><label for="assign-task">任务</label><select id="assign-task" name="task_id" data-task-selector required><option value="">选择任务</option></select></div>
-            <div class="field"><label for="assign-worker">执行者绑定</label><select id="assign-worker" name="worker_binding_id" required><option value="">等待宿主返回可用执行者</option></select></div>
+            <div class="field"><label for="assign-worker">执行者</label><select id="assign-worker" name="worker_binding_id" required><option value="">等待宿主返回可用执行者</option></select></div>
           </div>
-          <div class="form-actions"><button class="primary" data-gated-action="assign" data-resource-action="task" type="submit" disabled>主管确认派发</button><span class="button-reason" data-reason-for="assign">暂时无法确认（UNKNOWN）</span></div>
+          <div class="form-actions"><button class="primary" data-gated-action="assign" data-resource-action="task" type="submit" disabled>指定执行者</button><span class="button-reason" data-reason-for="assign">暂时无法确认（UNKNOWN）</span></div>
         </form>
       </details>
 
       <details class="form-card">
-        <summary>开始执行</summary>
+        <summary>第三步 · 开始执行</summary>
         <form id="start-form" novalidate>
           <div class="form-grid">
             <div class="field"><label for="start-task">任务</label><select id="start-task" name="task_id" data-task-selector required><option value="">选择任务</option></select></div>
-            <div class="field"><label for="start-sandbox">沙箱模式</label><select id="start-sandbox" name="sandbox_mode" disabled aria-disabled="true"><option value="">等待宿主开放沙箱模式</option><option value="workspace-write">workspace-write</option><option value="read-only">read-only</option></select><span class="hint">只选择宿主已开放的输入；不能扩大能力，也不证明操作系统级隔离。</span></div>
-            <div class="field field-wide"><label for="start-grant">监督者授予内容 <code>grant_json</code></label><textarea id="start-grant" name="grant_json">{"tool:pwsh":true}</textarea><span class="hint">仅作为宿主输入；宿主会单独核验授予范围与持久执行能力。</span></div>
           </div>
+          <p class="hint">由本领地主管启动。默认申请命令行工具权限，实际权限仍由宿主核验。</p>
+          <details class="dispatch-advanced"><summary>高级设置 · 工具权限与沙箱</summary><div class="form-grid">
+            <div class="field"><label for="start-sandbox">沙箱模式</label><select id="start-sandbox" name="sandbox_mode" disabled aria-disabled="true"><option value="">等待宿主开放沙箱模式</option><option value="workspace-write">workspace-write</option><option value="read-only">read-only</option></select><span class="hint">只选择宿主已开放的输入；不能扩大能力，也不证明操作系统级隔离。</span></div>
+            <div class="field field-wide"><label for="start-grant">工具权限</label><textarea id="start-grant" name="grant_json">{"tool:pwsh":true}</textarea><span class="hint">现有默认值；额外权限由主管显式设置，并受所有者上限约束。</span></div>
+          </div></details>
           <div class="form-actions"><button class="primary" data-gated-action="start" data-resource-action="task" type="submit" disabled>开始执行</button><span class="button-reason" data-reason-for="start">暂时无法确认（UNKNOWN）</span></div>
         </form>
       </details>
@@ -1784,6 +1784,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       const code = text(value).trim().toUpperCase();
       const labels = {
         UNKNOWN: '暂时无法确认', SESSION_AUTH_REQUIRED: '需要有效角色会话', DIRECT_SLASH_REQUIRED: '仅可由人类直接输入 Slash',
+        ROLE_AUTH_REQUIRED: '当前会话尚未绑定有效角色，请让会话引导绑定', CHANCELLOR_REQUIRED: '请到宰相会话创建任务', SUPERVISOR_REQUIRED: '请到所属领地的主管会话继续', ROLE_PREFLIGHT_UNAVAILABLE: '暂时无法核对会话角色，请重新读取', CONTROL_ROLE_DENIED: '当前会话角色不能执行此操作',
         SCOPE_MISMATCH: '当前资源不在职权范围', DECISION_NOT_AVAILABLE: '宿主未开放这项裁决', SANDBOX_MODE_REQUIRED: '请选择宿主开放的沙箱模式',
         STALE_PROJECTION: '王国投影已过时，请先重新读取',
         CONTROL_SESSION_EXPIRED: '本地控制通道已过期', CONTROL_SESSION_REQUIRED: '需要本地控制通道', CONTROL_REPLAY_DENIED: '重复请求已拒绝',
@@ -1880,7 +1881,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     const renderCapabilities = raw => {
       state.capabilities = normalizeCapabilities(raw); const value = state.capabilities; const chip = byId('session-chip');
       if (chip) chip.dataset.state = value.state; setText('session-chip-label', '操作通道：' + stateMeaning(value.state).label); setText('session-chip-code', value.state);
-      setText('capability-state-label', stateMeaning(value.state).label + (value.roleSessionBound ? ' · 已绑定角色会话' : '')); setText('capability-state-code', value.state);
+      setText('capability-state-label', stateMeaning(value.state).label + (value.roleSessionBound ? ' · 已捕获会话身份' : '')); setText('capability-state-code', value.state);
       setText('capability-expiry', '有效期：' + (value.expiresAt || '尚未确认') + ' · 投影版本：' + text(state.lastRevision));
       const note = byId('capability-note'); if (note) note.textContent = value.state === 'ACTIVE' ? '只有宿主明确开放的动作才可点击；每次写入都带校验信息与唯一请求号，宿主仍会再次核验。' : '操作通道不可用；浏览器不会构造治理身份。原因：' + reasonDisplay(value.disabledReason || value.state);
       renderCapabilityOptions(); renderGates();
@@ -1972,10 +1973,10 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
       const fragment = String(hash || '').replace(/^#/, '');
       if (!fragment || fragment === 'today') return { known: true, section: 'today', taskId: null };
       if (fragment.indexOf('task=') === 0) { try { const taskId = decodeURIComponent(fragment.slice(5)); return taskId ? { known: true, section: 'tasks', taskId } : { known: false, section: 'overview', taskId: null }; } catch (_) { return { known: false, section: 'overview', taskId: null }; } }
-      if (['today', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) return { known: true, section: fragment, taskId: null };
+      if (['today', 'dispatch', 'inbox', 'map', 'usage', 'settings', 'overview', 'organization', 'tasks', 'executions', 'activity', 'management', 'ledger'].includes(fragment)) return { known: true, section: fragment, taskId: null };
       return { known: false, section: 'overview', taskId: null };
     };
-    const pageForSection = section => ['organization', 'executions', 'activity', 'ledger'].includes(section) ? 'ledger' : section === 'management' ? 'tasks' : section === 'map' ? 'overview' : section;
+    const pageForSection = section => ['organization', 'executions', 'activity', 'ledger'].includes(section) ? 'ledger' : section === 'management' ? 'dispatch' : section === 'map' ? 'overview' : section;
     const renderNavigation = () => {
       const activePage = pageForSection(state.activeSection);
       document.querySelectorAll('[data-nav-section]').forEach(link => { if (pageForSection(link.getAttribute('data-nav-section')) === activePage) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
@@ -2335,14 +2336,17 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
        catch (_) { if (taskId === state.selectedTaskId) { state.detail = null; state.detailTaskId = ''; renderTaskDetail(state.snapshot || {}, null); renderGates(); } }
      };
        const applyNavigationFromLocation = shouldLoadDetail => {
+         const previousSection = state.activeSection;
          state.navigationHash = location.hash; const parsed = reconcileSelections(); renderSelectors(); renderTaskNavigator(); renderNavigation(); renderTaskDetail(state.snapshot || {}, state.detail); renderExecutions(state.snapshot || {}); renderGates();
          if (!parsed.known) status('导航位置未识别，已显示总览；未执行任何写操作。', 'unknown', 'UNKNOWN_NAVIGATION');
-         if (['organization', 'tasks', 'executions', 'activity'].includes(parsed.section) && typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(() => { const sectionNode = byId(parsed.section); if (sectionNode && typeof sectionNode.scrollIntoView === 'function') sectionNode.scrollIntoView({ block: 'start' }); });
+         const scrollToPage = ['organization', 'tasks', 'executions', 'activity'].includes(parsed.section) || (previousSection !== parsed.section && ['today', 'dispatch', 'settings'].includes(parsed.section));
+         if (scrollToPage && typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(() => { const sectionNode = byId(parsed.section) || byId(parsed.section + '-page'); if (sectionNode && typeof sectionNode.scrollIntoView === 'function') sectionNode.scrollIntoView({ block: 'start' }); });
          if (shouldLoadDetail && parsed.known) void refreshSelectedDetail();
        };
-     const selectTask = (taskId, pushHistory) => {
-       const nextTaskId = String(taskId || ''); const preserveDetail = nextTaskId === state.selectedTaskId && state.detail !== null && state.detail !== undefined && state.detailTaskId === nextTaskId && text(record(record(state.detail).task).taskId) === nextTaskId; state.selectedTaskId = nextTaskId; if (!preserveDetail) { state.detail = null; state.detailTaskId = ''; state.detailEpoch += 1; } state.activeSection = 'tasks';
-       if (pushHistory) history.pushState(null, '', nextTaskId ? '#task=' + encodeURIComponent(nextTaskId) : '#tasks');
+     const selectTask = (taskId, pushHistory, keepDispatch = false) => {
+       const stayOnDispatch = keepDispatch && pageForSection(state.activeSection) === 'dispatch';
+       const nextTaskId = String(taskId || ''); const preserveDetail = nextTaskId === state.selectedTaskId && state.detail !== null && state.detail !== undefined && state.detailTaskId === nextTaskId && text(record(record(state.detail).task).taskId) === nextTaskId; state.selectedTaskId = nextTaskId; if (!preserveDetail) { state.detail = null; state.detailTaskId = ''; state.detailEpoch += 1; } state.activeSection = stayOnDispatch ? 'dispatch' : 'tasks';
+       if (pushHistory && !stayOnDispatch) history.pushState(null, '', nextTaskId ? '#task=' + encodeURIComponent(nextTaskId) : '#tasks');
        applyNavigationFromLocation(false); if (!preserveDetail) void refreshSelectedDetail();
      };
      const load = async (silent, commandRefresh = false) => {
@@ -2362,7 +2366,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
        let gate = actionState(action, ownerOnly, resourceScope); if (gate.executable && action.indexOf('review:') === 0) { const decision = action.slice('review:'.length).toUpperCase(); const decisions = state.capabilities && Array.isArray(state.capabilities.reviewDecisions) ? state.capabilities.reviewDecisions.map(value => String(value).toUpperCase()) : []; if (!decisions.includes(decision)) gate = { executable: false, reason: 'DECISION_NOT_AVAILABLE' }; }
        if (!gate.executable) { status(actionDisplay(action) + '不可执行：' + reasonDisplay(gate.reason), gate.reason === 'UNKNOWN' ? 'unknown' : 'error'); renderGates(); return; }
        state.commandBusy = true; status('正在提交“' + actionDisplay(action) + '”；宿主将重新核验。', 'neutral'); renderGates();
-       try { const result = await postCommand(commandName, payload); if (result && result.ok === false) { status('宿主拒绝“' + actionDisplay(action) + '”（' + text(result.errorCode || 'UNKNOWN') + '）；不会自动重试。', result.errorCode === 'UNKNOWN' ? 'unknown' : 'error'); return; } if (!result || result.ok !== true) { status('宿主未返回明确成功结果；保留输入，不会自动重试。', 'unknown'); return; } status('宿主已接收“' + actionDisplay(action) + '”；正在刷新证据。', 'success'); await load(false, true); if (action === 'task.create') { const createdId = record(result.task).taskId; if (typeof createdId === 'string' && createdId) { selectTask(createdId, true); const consumed = consumeSubmittedDraft(payload); const draft = byId('task-draft-panel'); if (draft && consumed) { draft.open = false; readerDetails.set(draft.id, false); } status(consumed ? '任务草稿已提交；正在查看新任务，尚未派发执行。' : '任务已创建；已保留提交期间修改的草稿。', 'success'); } else status('宿主返回成功但缺少新任务编号；保留草稿，请核对任务列表，勿重复提交。', 'unknown'); } }
+       try { const result = await postCommand(commandName, payload); if (result && result.ok === false) { status('宿主拒绝“' + actionDisplay(action) + '”（' + text(result.errorCode || 'UNKNOWN') + '）；不会自动重试。', result.errorCode === 'UNKNOWN' ? 'unknown' : 'error'); return; } if (!result || result.ok !== true) { status('宿主未返回明确成功结果；保留输入，不会自动重试。', 'unknown'); return; } status('宿主已接收“' + actionDisplay(action) + '”；正在刷新证据。', 'success'); await load(false, true); if (action === 'task.create') { const createdId = record(result.task).taskId; if (typeof createdId === 'string' && createdId) { selectTask(createdId, true, pageForSection(state.activeSection) === 'dispatch'); const consumed = consumeSubmittedDraft(payload); const draft = byId('task-draft-panel'); if (draft && consumed) { draft.open = false; readerDetails.set(draft.id, false); } status(consumed ? (pageForSection(state.activeSection) === 'dispatch' ? '任务已创建并选中；请到所属领地主管会话指定执行者，再开始执行。' : '任务草稿已提交；正在查看新任务，尚未派发执行。') : '任务已创建；已保留提交期间修改的草稿。', 'success'); } else status('宿主返回成功但缺少新任务编号；保留草稿，请核对任务列表，勿重复提交。', 'unknown'); } }
        catch (error) { status('“' + actionDisplay(action) + '”结果未确认（' + text(error && (error.code || error.message)) + '）；不会自动重试。', error && error.code === 'UNKNOWN' ? 'unknown' : 'error'); }
        finally { state.commandBusy = false; renderGates(); if (state.commandRefreshPending && !state.loading) { state.commandRefreshPending = false; void load(false, true); } }
      };
@@ -2388,7 +2392,7 @@ const CONSOLE_APP_TEMPLATE = String.raw`<!doctype html>
     byId('review-form').addEventListener('submit', event => { event.preventDefault(); });
     byId('reconcile-form').addEventListener('submit', event => { event.preventDefault(); void submit(CONFIG.commands.reconcile, { task_id: formValue(event.currentTarget, 'task_id') }, 'reconcile', false, 'task'); });
     document.querySelectorAll('[data-review-decision]').forEach(button => { button.addEventListener('click', () => { const form = byId('review-form'); const decision = String(button.getAttribute('data-review-decision') || '').toUpperCase(); const target = formValue(form, 'to_binding_id'); if (decision === 'HANDOFF' && !target) { status('移交前必须选择目标执行者绑定（INVALID_INPUT · to_binding_id）。', 'error'); return; } const payload = { task_id: formValue(form, 'task_id'), decision, reason: formValue(form, 'reason') }; if (decision === 'HANDOFF') payload.to_binding_id = target; void submit(CONFIG.commands.review, payload, 'review:' + decision.toLowerCase(), false, 'task'); }); });
-    document.querySelectorAll('[data-task-selector]').forEach(select => { select.addEventListener('change', event => { selectTask(event.currentTarget.value, true); }); });
+    document.querySelectorAll('[data-task-selector]').forEach(select => { select.addEventListener('change', event => { selectTask(event.currentTarget.value, true, ['assign-task', 'start-task'].includes(event.currentTarget.id)); }); });
     byId('execution-control-id').addEventListener('change', event => { state.selectedExecutionId = event.currentTarget.value; renderExecutions(state.snapshot || {}); renderGates(); });
     document.querySelectorAll('[data-execution-command]').forEach(button => { button.addEventListener('click', () => { const commandKey = button.getAttribute('data-execution-command') || ''; const action = button.getAttribute('data-gated-action') || ''; const executionId = formValue(byId('execution-control-form'), 'execution_id'); const reason = formValue(byId('execution-control-form'), 'reason'); if (!executionId) { status('请先选择执行记录（INVALID_INPUT · execution_id）。', 'error'); return; } void submit(CONFIG.commands[commandKey], { execution_id: executionId, reason }, action, false, 'execution'); }); });
      const handleNavigationEvent = () => { if (state.navigationHash === location.hash) return; applyNavigationFromLocation(true); };

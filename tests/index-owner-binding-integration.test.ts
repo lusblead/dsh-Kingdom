@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -45,6 +46,7 @@ function makeHarness(options: { includeRegistry?: boolean; durableSessions?: rea
   const sessions = new Map<string, TestSession>()
   let initiator: TestAgent | undefined
   let listedAgents: readonly TestAgent[] | null = null
+  let launchUrl = ''
 
   const agentsService: KingdomDshAgentRegistryLike = {
     currentInitiator: () => initiator,
@@ -113,7 +115,7 @@ function makeHarness(options: { includeRegistry?: boolean; durableSessions?: rea
     guiAllowOrigins: ['*'],
     authMode: 'session-bound',
     migrateV4: true,
-  })
+  }, { openLocalConsole(url) { launchUrl = url; return true } })
 
   const close = (): void => {
     for (const dispose of disposers.reverse()) dispose()
@@ -133,6 +135,7 @@ function makeHarness(options: { includeRegistry?: boolean; durableSessions?: rea
     addAgent,
     setInitiator(agent: TestAgent | undefined): void { initiator = agent },
     setListedAgents(value: readonly TestAgent[] | null): void { listedAgents = value },
+    launchUrl: () => launchUrl,
     close,
   }
 }
@@ -140,6 +143,53 @@ function makeHarness(options: { includeRegistry?: boolean; durableSessions?: rea
 function execution(agent: TestAgent, signal: AbortSignal = new AbortController().signal): Record<string, unknown> {
   return { agent, signal }
 }
+
+test('conversation guidance reaches exact Owner preview and confirmation for first binding and session replacement', async (t) => {
+  const h = makeHarness(); const slash = h.commands.get('kingdom')!
+  t.after(async () => { await slash.handler({ rawInput: 'gui stop' }); h.close() })
+  assert.equal((await slash.handler({ rawInput: 'init' })).kind, 'success')
+  assert.equal((await slash.handler({ rawInput: 'territory.create {"name":"会话引导领地"}' })).kind, 'success')
+  const store = new KingdomStore(join(h.root, 'kingdom', 'kingdom.db'), { allowSchemaV4: true })
+  try {
+    const kingdom = store.getDefaultKingdom()!, territory = store.listTerritories(kingdom.kingdom_id)[0]!
+    const tool = h.tools.get('kingdom_draft_owner_binding_intent')!
+    let bindingId = ''
+    for (const [index, text] of ['把当前会话设为「会话引导领地」的主管', '把「会话引导领地」主管换成当前会话'].entries()) {
+      const target = h.addAgent('guided-target-' + index, 'running'); h.setInitiator(target)
+      const before = store.revision(kingdom.kingdom_id)
+      const bindingsBefore = store.listBindings(kingdom.kingdom_id)
+      const result = JSON.parse(String(await tool.execute({ text }, execution(target)))) as any
+      assert.equal(result.guidance.status, 'READY'); assert.equal(store.revision(kingdom.kingdom_id), before)
+      const opened = await slash.handler({ rawInput: result.guidance.canonical_owner_gui.replace('/kingdom ', '') })
+      assert.equal(opened.kind, 'success', opened.text)
+      const url = h.launchUrl(), origin = new URL(url).origin
+      const redeemed = await fetch(url, { redirect: 'manual' }); assert.equal(redeemed.status, 303)
+      const cookie = (redeemed.headers.get('set-cookie') || '').split(';', 1)[0]!
+      const control = await fetch(origin + '/api/owner/control', { headers: { cookie, origin } })
+      assert.equal(control.status, 200); const view = await control.json() as any
+      assert.deepEqual(view.decision.actions, [index === 0 ? 'role.bind' : 'role.session'])
+      const post = async (route: string, payload: unknown) => {
+        const response = await fetch(origin + '/api/owner/' + route, { method: 'POST', headers: {
+          cookie, origin, 'content-type': 'application/json', 'x-kingdom-client': 'owner-gui',
+          'x-kingdom-csrf': view.csrfToken, 'x-kingdom-request-id': randomUUID(),
+        }, body: JSON.stringify(payload) })
+        const body = await response.json() as any; assert.equal(response.status, 200, JSON.stringify(body)); return body
+      }
+      const parameters = index === 0
+        ? { role_type: 'SUPERVISOR', role_name: '会话引导领地主管', territory_id: territory.territory_id, session_id: target.id }
+        : { binding_id: bindingId, session_id: target.id }
+      const prepared = await post('prepare', { action: result.operation.kind, parameters })
+      assert.deepEqual(store.listBindings(kingdom.kingdom_id), bindingsBefore, 'opening and previewing must not change role bindings')
+      assert.equal(store.getTerritoryById(territory.territory_id)?.supervisor_binding_id, index === 0 ? null : bindingId)
+      const applied = await post('commit', { prepareId: prepared.preview.prepareId, operationId: prepared.preview.operationId })
+      assert.equal(applied.receipt.status, 'APPLIED')
+      const current = store.getBindingById(store.getTerritoryById(territory.territory_id)!.supervisor_binding_id!)!
+      assert.equal(current.session_id, target.id)
+      if (index === 0) bindingId = current.binding_id
+      else assert.equal(current.binding_id, bindingId, 'replacement retains the existing seat')
+    }
+  } finally { store.close() }
+})
 
 test('trusted Tool session resolver requires the complete DSH identity conjunction', () => {
   const session = { id: 'target' }
@@ -297,6 +347,12 @@ test('Supervisor Draft preserves exact territory binding and direct Slash valida
     assert.equal(existing.operation.kind, 'role.session')
     assert.deepEqual(existing.steps.map((step: Record<string, unknown>) => step.kind), ['role.session'])
     assert.equal(existing.intent.territory.territory_id, territory.territory_id)
+    assert.equal(existing.guidance.status, 'READY')
+    assert.equal(existing.guidance.owner_authority, false)
+    const replaceWindow = JSON.parse(existing.guidance.canonical_owner_gui.replace('/kingdom owner.gui ', ''))
+    assert.deepEqual(replaceWindow.actions, ['role.session'])
+    assert.deepEqual(replaceWindow.scope, { kingdomWide: false, roleTypes: ['SUPERVISOR'], territoryIds: [territory.territory_id], bindingIds: [supervisor.binding_id], targetSessionIds: [target.id], workspaceRoots: [] })
+    assert.match(existing.guidance.steps.join('\n'), /确认/u)
 
     const createNewTerritory = await command.handler({ rawInput: 'territory.create {"name":"新领地"}' })
     assert.equal(createNewTerritory.kind, 'success', createNewTerritory.text)
@@ -305,6 +361,10 @@ test('Supervisor Draft preserves exact territory binding and direct Slash valida
     ))) as Record<string, any>
     assert.equal(newSupervisor.write_effect, 'ZERO_WRITE')
     assert.equal(newSupervisor.status, 'DRAFT_READY')
+    assert.equal(newSupervisor.guidance.status, 'READY')
+    const bindWindow = JSON.parse(newSupervisor.guidance.canonical_owner_gui.replace('/kingdom owner.gui ', ''))
+    assert.deepEqual(bindWindow.actions, ['role.bind'])
+    assert.deepEqual(bindWindow.scope, { kingdomWide: false, roleTypes: ['SUPERVISOR'], territoryIds: [newSupervisor.intent.territory.territory_id], bindingIds: [], targetSessionIds: [target.id], workspaceRoots: [] })
     // v3.2.0：主管任命是单步原子命令（role.bind 自带 territory_id），不再是两步。
     assert.deepEqual(newSupervisor.steps.map((step: Record<string, unknown>) => step.kind), ['role.bind'])
     assert.match(String(newSupervisor.steps[0]?.canonical_direct_slash ?? ''), /"territory_id":"[^"]+"/u)

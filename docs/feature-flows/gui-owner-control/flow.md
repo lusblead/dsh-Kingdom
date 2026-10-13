@@ -8,6 +8,8 @@ status: implemented
 
 人类从 canonical 直接 `/kingdom owner.gui` 入口建立范围明确、至多10分钟的 OwnerDecision。浏览器只消费该决定，Owner 永远是稳定的人类 principal。独立于 Role Plane，不创建 Agent 权限、任务裁定或记忆。
 
+本轮增加会话引导的主管任命/接替入口：`owner-binding-natural-language` 生成完整中文步骤和准确范围命令，用户只复制执行并打开返回链接，无需填写 ID 或学习 JSON。窗口仅在**一个动作、一个角色类型、一个当前会话**且全部目标已在本次目录内时预填；首次任命只含一个主管领地，接替只含一个原席位但精确列出该席位的全部当前领地。首次任命角色名默认「领地名 + 主管」；已有主管接替使用 `role.session`，保留原席位和任务历史。多个动作/席位/会话、宽范围、目录缺失或重复时不猜目录首项，角色/领地/会话/席位选择器保留明确「请选择」。同席位关联多个领地时，表单额外列出全部受影响领地并说明会同时接替它们，只想一个领地应停止确认。预填只改变表单，仍须人类查看预览并确认提交；当前 Scope、事实版本和未结算工作守卫保持由 Core 执行。
+
 1.5 增加 `plan.adopt`：目录只呈现完整 Scope 覆盖的 PROPOSED 计划；预览固定计划 ID、版本、摘要、理由、成员范围/验收/依赖/产物、整合者与预算。提交在同一事务创建子 Task、采纳事件与 Owner 回执，不产生 Assignment、Grant 或 ACCEPT。准确协作流程见[有界协作](../collaboration-bounded-plan/flow.md)。
 
 1.6 增加 `delivery.item.ack` 的准确入口：工作台知悉图标以 exact `task/item/contentHash` 导航到 `/owner?ack_task=…&ack_item=…&ack_hash=…`，本页只在该窗口有效、动作在范围内且目录中三者同时匹配时预选该条。预选不构成授权，也不会自动准备或提交；范围不含该动作、目录无该条，或参数重复/非法时，页面保持不可定位并明确不做替代选择。Owner 仍须自行查看预览、确认提交并核对回执；不新增 sessionStorage、票据别名链或前端写入路径。
@@ -26,7 +28,12 @@ flowchart TD
     D1 -->|否| X1(["X1 拒绝，不建立可写窗口"])
     D1 -->|是| T1["T1 记录有界OwnerDecision；空库bootstrap暂存内存"]
     T1 --> A1["A1 一次性ticket兑换独立Owner Cookie，清理URL"]
-    A1 --> E2(["E2 网页准备结构化变更，含类型化软预算参数"])
+    A1 --> E10(["E10 打开会话准备的主管任命或接替窗口"])
+    E10 --> D12{"D12 单动作准确范围且每个目标在当前目录中唯一匹配"}
+    D12 -->|是| A10["A10 预填唯一角色/会话/原席位；同席位全部领地列出影响提示，首次主管名为领地名加主管"]
+    D12 -->|否或不适用| X12(["X12 不自动选择其它目标；角色操作保留明确请选择"])
+    A10 --> E2(["E2 人类核对后准备结构化变更，含类型化软预算参数"])
+    X12 --> E2
     E2 --> D2{"D2 传输校验和决定有效，动作及资源在范围内"}
     D2 -->|否| X2(["X2 保留输入，拒绝写入"])
     D2 -->|是| A2["A2 核验相关目标或预算政策，固定规范化参数与事实版本"]
@@ -84,6 +91,8 @@ flowchart TD
     A9 --> A8
     G8[["G8 提问与回复是独立对话事实：不改 Task/Claim/知悉/ACCEPT/发布，也不自动派发或唤醒"]] -.-> T8
     G8 -.-> A8
+    G9[["G9 预填仅是表单便捷：不授Owner、不扩大范围、不自动准备或提交"]] -.-> D12
+    G9 -.-> A10
 ```
 
 ## 组件交互
@@ -103,6 +112,15 @@ sequenceDiagram
     Core->>Store: 已有王国记录决定事件
     Slash->>Broker: 建立一次性ticket
     Broker-->>Browser: 兑换后303到无ticket的/owner
+    opt 会话引导的主管任命或接替
+        Browser->>Browser: 核对单动作准确 scope 与唯一目录目标
+        alt 唯一且准确
+            Browser->>Browser: 预填表单；首次主管名称为领地名加主管，接替列出同席位全部领地与整体接替提示
+        else 多目标、宽范围或目录目标不可定位
+            Browser->>Browser: 角色操作保留请选择；不猜第一项
+        end
+        Note over Human,Browser: 预填不写事实，也不发准备或提交请求
+    end
     Human->>Browser: 选择结构化动作并准备
     Browser->>Broker: prepare + 独立Cookie/CSRF
     Broker->>Core: opaque决定handle及业务参数
@@ -171,6 +189,8 @@ stateDiagram-v2
 - first bootstrap只初始化姓名/王国名且OWNER.session_id=null，消费后不能扩大管理范围；重启不恢复可写窗口。历史决定与receipt保留在原事件账本。
 - 支持init、territory.create/update/supervisor、非OWNER role.bind、主管/宰相role.session、王国ceiling、execution-profile、budget.policy、revoke。既有Territory路径和Worker affinity不通过便捷配置隐式改变。
 - 主管的role.bind自3.2.0起**必填**territory_id（席位与该领地主理在同一事务里原子写入；提交时若领地已有**在任ACTIVE**主理，准备阶段即以TERRITORY_ALREADY_SUPERVISED拒绝，要求先解除）。非主管角色不携带该字段，表单对其它角色隐藏并禁用该字段。
+- 在同一领地更换负责会话时，会话引导复用现任席位的 `role.session`，不自动解除领地、退任或抢占席位。裸 `role.bind` 冲突信息不应被解释为会话可以自动解除；让当前会话接替主管仍走准确范围的管理窗口，未结算执行、Lease 或 Dispatch 会阻止预览/提交。
+- `ownerBindingFormPrefill` 只对单动作非王国级范围生效：角色类型和当前 Session 唯一，首次主管领地唯一，接替的 binding 唯一且可覆盖同席位全部领地，根目录范围为空，目标在 scope 及目录中精确匹配。多个动作/席位/会话或不可定位返回空预填；本函数不创建 capability、不修改 scope、不写账本、不自动调用 prepare/commit。首次主管名称只是表单默认值，人类可在预览前编辑；保存仍沿用现有角色参数契约。同席位多领地的接替说明留在表单内，预览提交前可核对全部影响，不自动新增席位或改绑领地。
 - 领地判据（`role.bind`(主管)、`territory.supervisor`、`territory.update` 一律相同）：目标领地必须**显式**出现在本次授权的 `scope.territoryIds` 内；`kingdomWide` **不**放宽领地清单（`catalog.territories` 与提交判定逐 action 同判据：清单里列不出的领地也提交不了，反之亦然）。
 - 领地主理自3.2.0起为**1:1**：一个主管席位只主理一个领地。指派一个已隶属其它未删除领地的席位 → 准备阶段以SUPERVISOR_ALREADY_ATTACHED拒绝（DELETED领地不计，本次目标领地不计）。换领地必须"先解除原领地、再指派"。
 - 本管理窗口**可以表达"解除"**：`territory.supervisor` 的 supervisor_binding_id 接受**显式 JSON null**（表单为"解除现任主理"勾选框；该勾选框不带 name，由 payload 显式转成 null，避免多送字段）。省略该字段仍是 INVALID_INPUT，绝不解释为解除。解除预览列出"解除后该领地无主理 → fail-closed"，并登记旧主理及其 session 参与未结算工作守卫（在途工作时不允许解除责任）。因此"换领地"可完全在窗口内完成：先在原领地解除、再在目标领地指派。重复解除**可重复且结论一致**（仍 APPLIED、指针保持 null），但**每次都会追加一条** `unassigned:true` 的解除事实——这与 direct Slash 通道自 3.1.0 起的既有语义相同（无条件 append，不做 no-op 去重）。
@@ -199,3 +219,12 @@ stateDiagram-v2
 1.8 只读改动入口映射 `tests/delivery-change-evidence.test.ts`：真实临时 Git 仓库 + 临时证据根 + 真实 HTTP，覆盖无凭据 401、参数缺失/多余 400、冒充条目非 200、成功读取返回仓库相对路径与有界片段，并断言读取前后事件账本不变。R3 返工后同一入口的窗口动作授权由 `tests/delivery-change-boundary.test.ts` 定向覆盖：同领地但未授权 `delivery.item.ack` 的窗口读不到正文，持有该动作的有效窗口仍可读且零写入。`npm run typecheck`、`npm run build` 与受影响定向套件 100/100 passed；未运行全套 `npm test`，未运行真实 DSH/Provider。
 
 发布修复：确定 PREVIEW_STALE 或明确事务回滚时保留输入、清除旧预览并允许重新预览；未知结果保留原引用，刷新优先核对回执，禁止新提交。存储不含票据、Cookie、CSRF或业务参数；新窗口不替代旧决定。窄屏完整显示只读计划指纹。
+
+本轮会话引导与角色预填增量：两份 Owner 源码针对性 noEmit 通过；统一编译后的
+`owner-binding-intent`、`supervisor-guidance`、`gui-owner-ui` 与
+`gui-owner-ui-recovery` 合计 35/35 通过。纯函数和 DOM double 覆盖唯一范围预填、
+多目标/宽范围不猜测、同席位多领地完整影响提示和关系漂移拒绝，仍保留预览
+提交与丢响应核对路径；不代表真人窗口或真实 DSH 会话验收。另有
+`index-owner-binding-integration` 的 conversation guidance 用例验证本机真实
+loopback Tool→Owner 窗口预览→显式确认→结果读回；Runtime/人类授权为 fixture，
+首次绑定与原席位换会话都经过 Core 当前事实与范围检查。

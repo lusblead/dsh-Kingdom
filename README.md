@@ -5,7 +5,7 @@
 **在 DeepSeek Harness 里，装一个插件，拥有一个自己的 Agent 王国。**
 
 [![CI](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml/badge.svg)](https://github.com/lusblead/dsh-Kingdom/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-3.2.1-blue)](docs/V3.2.1-RELEASE-NOTES.md)
+[![Version](https://img.shields.io/badge/version-3.3.0-blue)](docs/V3.3-RELEASE-NOTES.md)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.1.5--rc%20%7C%200.1.7--rc-orange)](#1-前置要求)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.19-339933)](#1-前置要求)
@@ -15,6 +15,8 @@
 ---
 
 ## 这是什么？
+
+**3.3.0 的日常工作台只有三个入口：运行总览、派发任务、主管设置。**先向 DSH 会话说明需求，再由 AI 核对实际任务、领地和角色。绑定或更换主管时，会话准备完整的人类管理窗口命令，你核对预览、确认并读回结果，无需编辑 JSON 或手查内部编号。先看 [当前使用指南](docs/CURRENT-USER-GUIDE.md) 和 [3.3 版本说明](docs/V3.3-RELEASE-NOTES.md)。
 
 3.2.1 修复派发前关联、可靠接受回执与只读恢复对账，收紧受理/验收的换绑窗口，并明确资源占用后的重新请求要求。输入缺失仍为 UNKNOWN，不提供安全作废或自动重发。查看 [3.2.1 版本说明](docs/V3.2.1-RELEASE-NOTES.md)。
 
@@ -45,19 +47,20 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 
 | 特性 | 说明 |
 |---|---|
-| 🚀 **零门槛安装** | 发布后的一个 tgz + 一条命令；内置 GUI 随 `lib/**` 交付，无需独立前端 |
+| 🚀 **随包交付** | 从官方 npm 或 GitHub 获取版本包；内置 GUI 随 `lib/**` 交付，无需独立前端 |
+| 🧭 **三个日常入口**（3.3） | 运行总览查看任务、已登记会话、领地和状态；派发任务集中创建、指派与启动；主管设置由目标会话准备绑定或接替引导 |
 | 🏛 **完整角色体系** | Owner / Chancellor / Supervisor / Worker，角色与 Session / 模型解耦 |
 | 📋 **治理闭环语义** | 规划 → 分配 → 独立执行 → 验收，任务状态全程留痕 |
 | ⚖️ **Claim ≠ Fact** | **Worker 说自己完成了 ≠ 任务完成**——完成权只在 Supervisor，代码强制，不是口头约定 |
 | 🧭 **主管与领地完全绑定**（3.2） | 任命主管必须同时指定它的领地，席位与领地主理**同一事务**原子写入；一个领地至多一个在任主理，一个主管只主理一个领地；退任主管时同时解除其领地主理。存量"未隶属领地"的席位不会被自动归属，只在界面上标注待处理 |
 | 👁️ **Owner 逐条知悉与提问**（3.0） | 交付摘要和细项独立呈现；知悉只记录 Owner 声明已知道该内容版本，不代替质量认可或任务完成；问题记在接受该交付的主管名下，待其主动读取并回复 |
 | 🧾 **改动证据**（3.0） | 主管确认属于本交付的文件改动可展开查看，包括有界的未提交差异快照；标明证据级别，不把 Git 时间窗口误称为 Worker 作者证明 |
-| 👷 **Persistent Governed Worker** | 候选源码的 canonical headless 路径使用 `kingdom_start_task_governed`：Worker 绑定长期 DSH Session，结果结构化返回并经 Capability/Lease 治理 |
+| 👷 **Persistent Governed Worker** | canonical headless 路径使用 `kingdom_start_task_governed`：Worker 绑定长期 DSH Session，结果结构化返回并经 Capability/Lease 治理 |
 | 🔁 **返工留痕** | governed REWORK 复用同一 Worker Persistent Session；每次尝试（attempt）都有独立 Lease/Execution 记录 |
-| 💾 **持久化与恢复语义** | 状态写入本地 SQLite；真实 DSH 重启恢复与正式数据库本轮未验证（`NOT_RUN`） |
+| 💾 **持久化与恢复语义** | 状态写入本地 SQLite；无法确认原执行时保持恢复核对，由主管先对账，不自动重发 |
 | 🔄 **换届与会话归属**（v0.4） | `kingdom_unbind_role` 解绑 / `kingdom_bind_session` 把角色绑到**独立会话**；`session-bound` 模式下只有被绑定会话能行使职权 |
 | 🪪 **会话身份预留字段**（v0.4） | 角色可携带 `model_name` / `agent_name` / `session_meta`（JSON 扩展槽）——现在不必填，未来完整会话逐步填满 |
-| 🎛 **内置本地 GUI**（v1.0） | 直接执行 `/kingdom gui` 打开操作台，进行会话绑定的任务规划、指派、持久治理执行与审查；Owner 配置仍只走 direct Slash |
+| 🎛 **内置本地 GUI**（v1.0） | 直接执行 `/kingdom gui` 打开操作台，进行会话绑定的任务规划、指派、持久治理执行与审查；Owner 配置由人类直接命令或准确激活的管理窗口确认 |
 | 👑 **Persistent Governed Worker**（v0.8） | Worker 拥有**长期 DSH Session**（REWORK 唤醒同一 Worker）；Session ↔ Territory Affinity 不可改绑；每次执行经 **Capability Gate**（仅 GRANTED+ENFORCED 才 dispatch，Runtime 无法 enforce → **DENIED + zero execution**）；**Execution Lease** 互斥 + **Dispatch Intent**（crash 可 reconcile，不盲发）；terminal 证据来自事件链，**Runtime 跑完 ≠ Task DONE**（Claim → Supervisor 裁定链不变）。这是 canonical headless 路径 |
 | 🛡️ **Fail-closed 能力治理**（v0.8） | 无自授 / 超 Ceiling / scope 外 / 部分 policy 一律拒绝；approval=never 禁扩权；workspace 外写真实拒绝；RECOVERING 状态如实显示，禁止显示成 Done |
 | 🧩 **Legacy 兼容**（v0.8） | `kingdom_start_task` 仅在用户明确选择时作为 `LEGACY_COMPAT` one-shot 入口；不会作为默认路径、错误恢复建议或 persistent 失败 fallback |
@@ -72,15 +75,16 @@ DSH：任务 CREATED → ASSIGNED → RUNNING → REVIEW → DONE ✅
 - **Node.js** ≥ `22.19`（内置 SQLite，插件零原生依赖）
 - 一个可用的模型 API key（Worker 执行需要）
 
-### 2. 安装 v3.2.1
+### 2. 安装 v3.3.0
 
-本版以 GitHub [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm 为公开入口；若当前环境还取不到已发布包，可从源码构建取得准确的 `dsh-kingdom-3.2.1.tgz`，核对包与本机备份后，再在自己的 DSH Web profile 安装：
+从官方 [npm 3.3.0](https://www.npmjs.com/package/dsh-kingdom/v/3.3.0) 获取准确版本包，再安装到自己的 DSH Web profile：
 
 ```bash
-dsh plugin --profile web add ./dsh-kingdom-3.2.1.tgz
+npm pack dsh-kingdom@3.3.0 --registry=https://registry.npmjs.org
+dsh plugin --profile web add ./dsh-kingdom-3.3.0.tgz
 ```
 
-安装后重启 Web profile 才会加载新包。不要将本地候选的版本号当作 npm 或 GitHub Releases 已可下载的证据。
+也可从 [GitHub v3.3.0 Release](https://github.com/lusblead/dsh-Kingdom/releases/tag/v3.3.0) 下载同名 tgz，执行第二条命令。安装或升级后重启原 Web profile，才会加载新包；使用其他 profile 时替换 `web`。升级前先核对未决执行并一致备份 SQLite。
 
 内置 GUI 随 `lib/**` 包含在 tgz 中，不需要额外 GUI zip：
 
@@ -96,10 +100,14 @@ Worker 才使用真实 DSH caller session 的会话绑定（`session-bound`）�
 
 ### 3. 用 GUI 完成最小治理闭环
 
-1. 先由人类通过 direct `/kingdom` Slash 或准确激活的人类管理窗口完成初始化、能力上限、领地、角色/会话与 Worker 执行方案配置；具体步骤见 [首次使用](docs/V2.0-USER-GUIDE.md#第一次使用)。
+先向 DSH 会话里的 AI 说明需求，完整步骤见 [当前使用指南](docs/CURRENT-USER-GUIDE.md)。历史版本指南保留供对应安装包参考。
+
+1. 向 AI 说：“帮我查看 dsh-Kingdom 当前的王国、领地、角色和任务；先说明缺少哪些配置，再逐项引导我确认。”已有配置就继续使用；缺少配置时，由会话准备准确输入并说明人类确认步骤。
 2. 在本地 DSH 会话直接键入 exact `/kingdom gui`；若本机浏览器完成带 ticket 的导航，一次性入口兑换后会重定向到干净的 `/console`。若本机打开请求失败，控制会话虽已激活，但命令只显示不含 ticket 的干净 `/console` 参考地址；该地址不能完成一次性兑换，不要手工拼接或复用启动值，直接重新执行 `/kingdom gui`。
-3. 日常工作台用于会话绑定操作与只读观察：Chancellor 会话规划任务；任务领地的 Supervisor 会话负责指派、选择 Host 提供的沙箱模式、启动与审查。设置页可进入独立人类管理页面。切换角色职权时要从对应真实 DSH 会话重新激活，不能由浏览器自报身份。
+3. **运行总览**查看任务、已登记会话、领地和状态；**派发任务**集中创建、指派与启动；**主管设置**复制绑定或更换请求，再到希望接任的会话交给 AI 引导。宰相会话创建任务，任务领地的主管会话指派、启动和审查。网页选择名称不会切换身份；切换会话后从该会话重新打开工作台。
 4. Worker 输出只会进入待审状态 `REVIEW`。Supervisor 选择接受 `ACCEPT` 后才进入 `DONE`；返工 `REWORK` 回到 `RUNNING` 并保留同一 Assignment，判定失败 `FAIL` 进入 `FAILED`。不用时执行 `/kingdom gui stop` 撤销控制会话并关闭本地 server。
+
+绑定主管可直接向目标会话说“让当前会话负责「前端」”；更换时说“把「前端」主管换成当前会话”。AI 准备完整窗口命令，你直接复制执行，打开链接、核对预览并确认，成功后再读回绑定。更换沿用原席位；如果该席位关联多个领地，引导会列出全部影响，确认后这些领地会一起由新会话负责。只想接替其中一个时停止确认，先让会话说明调整安排。
 
 Owner 专属 JSON Slash 命令只接受单个 object envelope；未知字段、额外 token、重复字段和
 `OWNER.session_id` 改绑会在写入前拒绝。独立 GUI/HTTP 不能自行取得 Authority；只有 direct
@@ -108,13 +116,16 @@ principal/session/Owner capability。
 
 ---
 
-## 🛠 工具一览
+## 🛠 高级工具参考
+
+日常先向会话说明需求，不需要记住下表。工具调用仍受真实会话角色和领地范围检查；会话准备人类管理操作时使用只读引导工具，不自动取得 Owner 权限。
 
 | 阶段 | 工具 |
 |---|---|
 | 王国基础 | **`/kingdom init`**（Owner direct）· `kingdom_status`（只读） |
 | 领地 | **`/kingdom territory.* <JSON>`**（Owner direct）· `kingdom_list_territories`（只读） |
 | 角色 | **`/kingdom role.* <JSON>`**（Owner direct）· `kingdom_list_bindings`（只读） |
+| 会话引导 | `kingdom_draft_owner_binding_intent`（只读准备绑定或接替步骤，不写入） |
 | 能力治理 | **`/kingdom ceiling <JSON>`**（Owner direct） |
 | 任务治理 | `kingdom_plan_task` · `kingdom_assign_task` · **`kingdom_start_task_governed`（CANONICAL HEADLESS）** · `kingdom_review_task` · `kingdom_list_tasks` |
 | 显式兼容 | `kingdom_start_task`（`LEGACY_COMPAT` one-shot；必须传 `legacy_opt_in=true`，仅用户明确选择，不自动 fallback） |
@@ -160,7 +171,7 @@ Worker 交回结果 ──→ 这是一条 Claim（自述），只进 REVIEW
 | `~/.dsh/kingdom/kingdom.db` | 王国全部数据（SQLite，自包含） |
 | Schema v4 | 在既有王国、领地、角色、任务、呈报、执行与事件之外，包含 Assignment、Affinity、Capability Decision、Lease 与 Dispatch 等治理账本 |
 
-全新库或尚无王国数据的库可直接建立 v4；已有 v3 库默认保持 v3，不会自动迁移。只有经过 Formal DB Migration Gate 明确放行后才可迁移；未迁移时 GUI governed plan 与 governed start 均 fail-closed。本文档施工没有读取、迁移或验证正式数据库（`NOT_RUN`），不能据此声称旧库兼容或迁移通过。
+全新库或尚无王国数据的库可直接建立 v4；已有 v3 库默认保持 v3，不会自动迁移。只有经过 Formal DB Migration Gate 明确放行后才可迁移；未迁移时 GUI governed plan 与 governed start 均 fail-closed。正式用户数据库迁移未在本版验证（`NOT_RUN`），不能据此声称任意旧库兼容或迁移通过。
 
 ---
 
@@ -176,11 +187,11 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 
 ### 操作台能力
 
-- 首页就是无外层边框的“王国地图”：默认森林墨绿主题，可切换四种主题；领地颜色随主题区分，人物卡片按任务状态显示不同状态色。
-- “管理中心”和“王国账本”是独立页面。首页只保留组织结构和一个主输入框；在输入框键入 `/` 可选择领地并发起常用任务，复杂技术信息放在展开详情中。
+- 3.3.0 默认进入“运行总览”，按任务与当前登记会话分别展示领地和状态；另有“派发任务”“主管设置”两个主入口，操作步骤见 [当前使用指南](docs/CURRENT-USER-GUIDE.md)。
+- 王国地图、用量与账本保留为高级入口；四种主题和现有角色视觉保留。任务详情继续区分治理状态、执行观察和执行者自述；未提供会话运行观测时显示未知。
 - 四类证据分别是治理事实（`GOVERNANCE_FACT`）、运行观察（`RUNTIME_OBSERVATION`）、执行者呈报（`WORKER_CLAIM`）与派生解释（`DERIVED_EXPLANATION`），不能压成一条“总体成功”。
 - 日常主链是规划→指派→持久治理执行→呈报进入 `REVIEW`→Supervisor 裁决 `ACCEPT/REWORK/FAIL/HANDOFF`；持久路径失败不会自动降级到 `LEGACY_COMPAT`。
-- Owner 专属动作始终不可执行（`executable=false / DIRECT_SLASH_REQUIRED`）。带状态 GET 需要有效本地控制 Cookie 或已配置 bearer；内部 `readContext` 来自 direct 激活时捕获的 Session，不接受浏览器自报，也不序列化到响应。
+- 日常工作台中的 Owner 写入动作不直接执行（`executable=false / DIRECT_SLASH_REQUIRED`）；人类配置通过准确激活的独立管理窗口预览、确认。带状态 GET 需要有效本地控制 Cookie 或已配置 bearer；内部 `readContext` 来自 direct 激活时捕获的 Session，不接受浏览器自报，也不序列化到响应。
 - 对 `GOVERNED_PERSISTENT`，暂停、恢复、终止当前都不可执行。合法生命周期候选在会话、Supervisor、scope、Host 与命令覆盖检查通过后，投影返回 `executable=false / GOVERNED_RUNTIME_CONTROL_UNAVAILABLE`；其他状态可能不列动作或先显示更早的拒绝原因。命令名称存在不代表可验证的 Runtime control seam 已实现。
 - 未结算的持久治理 Execution 会在访问 Runtime/Session/Lease 前阻止新 attempt；对已有 Dispatch 关联的不可判定恢复路径，Dispatch、Lease、Execution 原子进入 `RECOVERING`，不改 Task、不自动重试或伪造终态。
 - 事件与投影 payload 经过递归、有界脱敏，但这不是提交秘密的许可。
@@ -207,6 +218,7 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 | 3.1.0 | DSH 0.1.7 兼容（peer 分线声明）、无 live Agent 会话可绑定席位、`session_evidence` 证据字段 | ✅ 已发布，然后是 3.2.0 |
 | 3.2.0 | 主管与领地完全绑定、交付区版面修复 | 已发布 |
 | 3.2.1 | 单次派发关联、可靠 Receipt、只读恢复对账、事务授权与占用诊断修复 | 发布状态见 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 与 npm |
+| 3.3.0 | 三个日常入口、任务/会话运行总览、集中派发、会话引导绑定与接替主管 | [GitHub](https://github.com/lusblead/dsh-Kingdom/releases/tag/v3.3.0) · [npm](https://www.npmjs.com/package/dsh-kingdom/v/3.3.0) |
 
 > 已发布版本与市场更新状态以 [Releases](https://github.com/lusblead/dsh-Kingdom/releases) 为准（发布流程见 [RELEASE.md](RELEASE.md)）。
 
@@ -214,6 +226,9 @@ GUI 已内置在插件中，不需要下载或启动第二个前端项目。直�
 
 ## 📖 文档
 
+- [当前使用指南](docs/CURRENT-USER-GUIDE.md) — 3.3.0 三个日常入口、会话引导绑定/更换主管与派发步骤
+- [3.3 版本说明](docs/V3.3-RELEASE-NOTES.md) — 简化工作台、会话引导和实际验证范围
+- [3.2.1 版本说明](docs/V3.2.1-RELEASE-NOTES.md) — 派发关联、可靠 Receipt、只读恢复对账与事务授权修复
 - [3.2 版本说明](docs/V3.2-RELEASE-NOTES.md) — 主管与领地完全绑定、原子写入与退任联动、交付区版面修复
 - [3.1 版本说明](docs/V3.1-RELEASE-NOTES.md) — DSH 0.1.7 兼容范围与无 live Agent 会话的席位绑定
 - [3.0 使用指南](docs/V3.0-USER-GUIDE.md) — 交付清单、知悉、查看改动与条目问答

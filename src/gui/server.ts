@@ -589,6 +589,7 @@ export function startGuiServer(handlers: GuiServerHandlers, options: GuiServerOp
         typeof req.headers[CSRF_HEADER] === 'string' ? req.headers[CSRF_HEADER] : null,
         typeof req.headers[REQUEST_ID_HEADER] === 'string' ? req.headers[REQUEST_ID_HEADER] : null,
         meta,
+        command,
       )
       if (!admitted.ok) {
         sendControlFailure(res, admitted)

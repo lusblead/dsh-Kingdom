@@ -1,6 +1,7 @@
 /** Personal workbench presentation. No model calls or authority are created here. */
 export const WORKBENCH_CSS = String.raw`
-.workbench-page { grid-column: 1 / -1; min-width: 0; width: 100%; }
+.workbench-page { grid-column: 1 / -1; min-width: 0; width: 100%; scroll-margin-top: 130px; }
+.runtime-table-scroll-hint { display: none; color: var(--muted); font-size: .8rem; }
 .workbench-heading { display: flex; justify-content: space-between; align-items: start; gap: 24px; margin: 18px 0 24px; }
 .workbench-heading h2 { font-size: clamp(25px, 3vw, 36px); margin: 6px 0; }
 .workbench-heading p, .workbench-block > p { color: var(--muted); }
@@ -21,6 +22,26 @@ export const WORKBENCH_CSS = String.raw`
 .quick-task-form input { flex: 1; min-width: 0; min-height: 48px; }
 .quick-task-form button { flex: 0 0 auto; }
 .workbench-section-link { color: var(--gold); font-size: 13px; }
+.runtime-overview { display: grid; gap: 18px; }
+.runtime-table-scroll { overflow-x: auto; margin-top: 16px; }
+.runtime-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+.runtime-table caption { text-align: left; color: var(--muted); margin-bottom: 10px; }
+.runtime-table th, .runtime-table td { padding: 13px 10px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.runtime-table th { color: var(--muted); font-weight: 500; }
+.runtime-table td:first-child { min-width: 150px; }
+.runtime-table a { color: var(--bamboo); text-underline-offset: 3px; }
+.runtime-table small { display: block; color: var(--muted); margin-top: 5px; }
+.runtime-table .runtime-related-task { display: block; margin-bottom: 5px; }
+.runtime-overview-note { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.workbench-advanced { margin-top: 18px; }
+.workbench-advanced > summary, .settings-list > details > summary { cursor: pointer; font-weight: 600; }
+.workbench-advanced[open] > .workbench-grid { margin-top: 18px; }
+.dispatch-content { display: grid; gap: 18px; }
+.dispatch-step { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--patina); }
+.dispatch-step h3 { margin-bottom: 12px; }
+.dispatch-step > form { border: 0; padding: 0; box-shadow: none; }
+.dispatch-content > .task-draft-panel { margin: 0; }
+.supervisor-request { margin-top: 8px; min-height: 44px; }
 .task-detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
 .task-detail-section h3 { margin-bottom: 12px; font-size: 18px; }
 .task-detail-section p { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -135,9 +156,14 @@ export const WORKBENCH_CSS = String.raw`
 }
 @media (max-width: 1050px) { .role-workbench-layout:has(.role-inspector:not([hidden])) { grid-template-columns: minmax(0, 1fr); } .role-inspector { position: static; } }
 @media (max-width: 700px) {
+ .runtime-table-scroll-hint { display: block; margin-bottom: 12px; }
+ .workbench-page { scroll-margin-top: 185px; }
  .workbench-grid, .task-evidence-states { grid-template-columns: minmax(0, 1fr); }
  .workbench-heading { flex-direction: column; gap: 12px; }
  .workbench-block { padding: 16px; }
+ .dispatch-step { padding: 16px; }
+ .runtime-table { font-size: 13px; min-width: 640px; }
+ .runtime-table th, .runtime-table td { padding: 11px 8px; }
  .quick-task-form { flex-direction: column; }
  .usage-table { font-size: 12px; }
  .usage-table th, .usage-table td { padding: 9px 4px; }
@@ -148,16 +174,26 @@ export const WORKBENCH_CSS = String.raw`
 
 export const WORKBENCH_HTML = String.raw`
 <section id="today" data-console-section="today" data-console-page="today" class="workbench-page" aria-labelledby="today-title">
- <header class="workbench-heading"><div><p class="section-kicker">个人工作台</p><h2 id="today-title">今天，从要紧的事开始</h2><p>需要你决定的事、执行进展和最近交付，都在这里。</p></div><button id="workbench-refresh" class="refresh" type="button">重新读取</button></header>
- <form id="quick-task-form" class="quick-task-form"><label class="sr-only" for="quick-task-goal">写下一句话目标</label><input id="quick-task-goal" autocomplete="off" placeholder="写下一句话目标，先整理为草稿" required><button class="primary" type="submit">整理任务草稿</button></form>
- <div class="workbench-grid">
+ <header class="workbench-heading"><div><p class="section-kicker">个人工作台</p><h2 id="today-title">运行总览</h2><p>查看任务在哪个领地推进，以及已登记会话的执行状态。</p></div><button id="workbench-refresh" class="refresh" type="button">重新读取</button></header>
+ <div class="runtime-overview">
+  <section class="workbench-block" aria-labelledby="runtime-tasks-title"><div class="delivery-head"><h3 id="runtime-tasks-title">任务</h3><a class="workbench-section-link" href="#dispatch">派发新任务 →</a></div><div id="runtime-tasks" class="runtime-table-scroll"></div></section>
+  <section class="workbench-block" aria-labelledby="runtime-sessions-title"><h3 id="runtime-sessions-title">会话</h3><p class="runtime-overview-note">展示王国已登记角色与 Worker 长期会话。任务在推进，不代表主管会话正在调用模型；未提供运行观测时显示未知。</p><div id="runtime-sessions" class="runtime-table-scroll"></div></section>
+ </div>
+ <details class="workbench-block workbench-advanced" id="today-advanced"><summary>待处理、异常与交付</summary><div class="workbench-grid">
   <section class="workbench-block" data-priority="owner"><h3>待我处理</h3><p>仅列出已明确需要人类决定的事项。</p><div id="today-owner" class="workbench-list"></div><a class="workbench-section-link" href="#inbox">查看待我处理 →</a></section>
   <section class="workbench-block"><h3>执行异常</h3><p>说明发生了什么、由谁继续处理。</p><div id="today-exceptions" class="workbench-list"></div></section>
   <section class="workbench-block"><h3>正在推进</h3><div id="today-active" class="workbench-list"></div></section>
   <section class="workbench-block"><h3>最近交付</h3><p>呈报、主管接受与人类验收分别展示。</p><div id="today-deliveries" class="workbench-list"></div></section>
  </div>
  <section class="workbench-block" style="margin-top:18px"><h3>团队内部处理</h3><p>主管审查与返工由团队继续推进，不计入你的待办。</p><div id="today-internal" class="workbench-list"></div></section>
- <section class="workbench-block" style="margin-top:18px" aria-labelledby="collaboration-title"><h3 id="collaboration-title">按需协作计划</h3><p>单执行者仍是默认。需要协作时，只采纳一份分工明确的计划，由指定主执行者负责整合。</p><div id="collaboration-plans"></div><details data-read-key="collaboration:resources"><summary>当前工作区占用</summary><div id="collaboration-resources"></div></details></section>
+ </details>
+ <details class="workbench-block workbench-advanced" id="today-collaboration"><summary id="collaboration-title">协作计划与工作区占用</summary><p>单执行者仍是默认。需要协作时，由指定主执行者负责整合。</p><div id="collaboration-plans"></div><details data-read-key="collaboration:resources"><summary>当前工作区占用</summary><div id="collaboration-resources"></div></details></details>
+</section>
+<section id="dispatch-page" data-console-section="dispatch" data-console-page="dispatch" class="workbench-page" hidden aria-labelledby="dispatch-title">
+ <header class="workbench-heading"><div><p class="section-kicker">把事情交给团队</p><h2 id="dispatch-title">派发任务</h2><p>写清任务目标与所属领地，再由该领地主管指定执行者并启动。</p></div></header>
+ <form id="quick-task-form" class="quick-task-form"><label class="sr-only" for="quick-task-goal">任务目标</label><input id="quick-task-goal" autocomplete="off" placeholder="先写一句话目标" required><button class="primary" type="submit">填入任务草稿</button></form>
+ <div id="dispatch-content" class="dispatch-content"></div>
+ <p class="runtime-overview-note">按钮是否可用取决于打开本页的 DSH 会话身份。需要绑定或更换主管时，去<a class="workbench-section-link" href="#settings">主管设置</a>复制一句话请求，发给目标会话中的 AI。</p>
 </section>
 <section id="inbox" data-console-section="inbox" data-console-page="inbox" class="workbench-page" hidden aria-labelledby="inbox-title">
  <header class="workbench-heading"><div><p class="section-kicker">你的决定</p><h2 id="inbox-title">待我处理</h2><p>当前版本的人类治理入口仍为直接 Slash；这里帮助你找到准确事项。</p></div></header>
@@ -170,8 +206,8 @@ export const WORKBENCH_HTML = String.raw`
  <section class="workbench-block"><div id="usage-summary"></div><div id="usage-content"></div></section>
 </section>
 <section id="settings" data-console-section="settings" data-console-page="settings" class="workbench-page" hidden aria-labelledby="settings-title">
- <header class="workbench-heading"><div><p class="section-kicker">运行与治理</p><h2 id="settings-title">设置</h2><p>现有入口及真实操作权限；未开放的能力不会显示为可执行按钮。</p></div></header>
- <div class="settings-list"><section class="workbench-block"><h3>当前控制通道</h3><p>角色操作来自激活本页的合法会话，每次提交仍由宿主重新核验。</p><div id="settings-control-slot"></div><p class="hint">在已绑定角色的 DSH 会话直接输入 /kingdom gui，按宿主提供的链接重新打开本页。</p></section><section class="workbench-block"><h3>人类所有者设置</h3><p>通过短期人类管理窗口配置王国、领地、任命、权限上限与模型。先由人类在 DSH 直接激活具体管理范围，再在网页预览并提交。</p><a class="workbench-section-link" href="/owner">打开人类管理窗口 →</a><div id="settings-owner-slot"></div></section><section class="workbench-block"><h3>外观与动态效果</h3><p>顶部可选择羊皮纸、夜蓝、森林与酒红主题。人物动作沿用当前王国风格；减少动态效果跟随系统偏好。</p></section><details class="workbench-block" id="settings-advanced"><summary>高级治理记录</summary><nav class="task-detail-jump"><a href="#ledger">王国账本</a><a href="#organization">领地名册</a><a href="#executions">执行记录</a><a href="#activity">治理史册</a></nav></details></div>
+ <header class="workbench-heading"><div><p class="section-kicker">让会话负责领地</p><h2 id="settings-title">主管设置</h2><p>把下面的一句话发给目标 DSH 会话中的 AI，让它引导你确认绑定或更换主管。</p></div></header>
+ <div class="settings-list"><section class="workbench-block"><h3>各领地主管</h3><div id="settings-supervisors" class="runtime-table-scroll"></div><p class="hint">复制请求不会更改主管。到你希望担任主管的 DSH 会话发送请求，AI 会说明当前绑定并引导你确认；原生的人类确认仍需由你完成。</p></section><details class="workbench-block" id="settings-control"><summary>当前会话权限</summary><p>角色操作来自激活本页的合法会话，每次提交仍由宿主重新核验。</p><div id="settings-control-slot"></div><p class="hint">在已绑定角色的 DSH 会话输入 /kingdom gui，按宿主提供的链接重新打开本页。</p></details><details class="workbench-block" id="settings-owner"><summary>其他王国配置</summary><p>需要调整领地、权限或模型时，让当前 DSH 会话中的 AI 说明所需步骤并引导确认。</p><a class="workbench-section-link" href="/owner">打开人类管理窗口 →</a><div id="settings-owner-slot"></div></details><details class="workbench-block" id="settings-appearance"><summary>外观与动态效果</summary><p>顶部可选择羊皮纸、夜蓝、森林与酒红主题。人物动作沿用当前王国风格；减少动态效果跟随系统偏好。</p></details><details class="workbench-block" id="settings-advanced"><summary>高级记录与组织</summary><nav class="task-detail-jump"><a href="#map">王国地图</a><a href="#usage">用量</a><a href="#ledger">王国账本</a><a href="#organization">领地名册</a><a href="#executions">执行记录</a><a href="#activity">治理史册</a><a href="#tasks">任务详情</a></nav></details></div>
 </section>
 `;
 
@@ -218,6 +254,132 @@ export const WORKBENCH_SCRIPT = String.raw`
       if (value === 'RECOVERING') return '任务仍处于 ' + stateDisplay(task.status) + '；本次执行正在恢复核对。主管需核对原执行结果，不会自动重新派发。';
       if (String(task.status) === 'RUNNING' && !['STARTING', 'RUNNING', 'PAUSED'].includes(value)) return '任务处于处理中；当前没有正在运行的执行。返工决定不会自动启动下一次执行。';
       return '任务治理：' + stateDisplay(task.status) + ' · 本次执行：' + stateDisplay(value);
+    };
+    const runtimeView = snapshot => {
+      const source = record(snapshot); const governance = record(source.governance);
+      const organization = record(record(record(source.projection).organization).data);
+      // Top-level bindings preserve retired history and do not expose status. The stage
+      // contains every exact ACTIVE binding; it must be used before listing current roles.
+      const activeIds = Array.isArray(source.stage) ? new Set(source.stage.map(actor => actor.bindingId).filter(Boolean)) : null;
+      const bindings = Array.isArray(source.bindings) ? source.bindings : [];
+      const territories = Array.isArray(source.territories) ? source.territories : [];
+      const seats = Array.isArray(organization.territories) ? organization.territories : [];
+      return { tasks: Array.isArray(source.tasks) ? source.tasks : [], bindings: activeIds ? bindings.filter(item => activeIds.has(item.bindingId)) : bindings,
+        territories, seats, roles: queueItems(workbenchData(source).roles),
+        seatCoverageComplete: Array.isArray(source.territories) && Array.isArray(organization.territories) && organization.territoriesTruncated !== true
+          && territories.every(territory => seats.some(seat => typedEntityId(seat.territoryRef, 'territory') === territory.territoryId)),
+        affinities: Array.isArray(governance.workerSessions) ? governance.workerSessions.filter(item => item.isCurrent === true) : [],
+        executions: Array.isArray(source.liveExecutions) ? source.liveExecutions : [] };
+    };
+    const runtimeTerritoryName = (view, id) => {
+      const territory = view.territories.find(item => item.territoryId === id);
+      return territory ? friendly(territory.name, '领地名称未提供') : '领地未确认';
+    };
+    const runtimeSupervisorLookup = (view, id) => {
+      const seat = view.seats.find(item => typedEntityId(item.territoryRef, 'territory') === id);
+      if (seat) return { known: true, bindingId: typedEntityId(record(seat).supervisorBindingRef, 'binding') };
+      const roles = view.roles.filter(role => role.roleType === 'SUPERVISOR' && view.bindings.some(binding => binding.bindingId === role.bindingId && binding.roleType === 'SUPERVISOR')
+        && Array.isArray(role.territories) && role.territories.some(territory => territory.territoryId === id));
+      return roles.length === 1 ? { known: true, bindingId: roles[0].bindingId } : { known: false, bindingId: null };
+    };
+    const runtimeSupervisorScope = (view, bindingId) => {
+      const role = view.roles.find(item => item.bindingId === bindingId && item.roleType === 'SUPERVISOR' && Array.isArray(item.territories));
+      if (role) return { known: true, territories: role.territories.map(territory => view.territories.find(item => item.territoryId === territory.territoryId) || territory) };
+      return { known: view.seatCoverageComplete, territories: view.territories.filter(territory => runtimeSupervisorLookup(view, territory.territoryId).bindingId === bindingId) };
+    };
+    const runtimeBindingName = (view, id) => {
+      const binding = view.bindings.find(item => item.bindingId === id);
+      return binding ? friendly(binding.roleName, '角色名称未提供') : '尚未指定或角色不可见';
+    };
+    const runtimeTable = (parent, columns, label) => {
+      append(parent, 'p', '左右滑动表格，可查看完整信息与操作按钮。', 'runtime-table-scroll-hint');
+      const table = document.createElement('table'); table.className = 'runtime-table';
+      if (label) append(table, 'caption', label);
+      const head = document.createElement('thead'); const row = document.createElement('tr');
+      columns.forEach(label => { const cell = append(row, 'th', label); cell.setAttribute('scope', 'col'); }); head.append(row); table.append(head);
+      const body = document.createElement('tbody'); table.append(body); parent.append(table); return body;
+    };
+    const runtimeLinkCell = row => { const cell = document.createElement('td'); row.append(cell); return cell; };
+    const addRuntimeTasks = (parent, tasks, key, scopeKnown = true) => {
+      if (!tasks.length) { append(parent, 'span', scopeKnown ? '暂无关联任务' : '关联任务未确认'); return; }
+      tasks.slice(0, 8).forEach(task => { const link = addTaskLink(parent, task.taskId, friendly(task.title, '未命名任务'), key + ':' + task.taskId); link.className = 'runtime-related-task'; });
+      if (tasks.length > 8) append(parent, 'small', '另有 ' + (tasks.length - 8) + ' 项，去任务详情查看。');
+      if (!scopeKnown) append(parent, 'small', '其他关联任务未确认；当前领地关系投影不完整。');
+    };
+    const renderRuntimeOverview = snapshot => {
+      const view = runtimeView(snapshot); const tasksParent = clear('runtime-tasks'); const sessionsParent = clear('runtime-sessions');
+      if (tasksParent) {
+        if (!view.tasks.length) addEmpty(tasksParent, '暂无任务。去“派发任务”填写目标并选择领地。');
+        else {
+          const body = runtimeTable(tasksParent, ['任务', '领地', '执行者', '任务状态', '本次执行'], '当前快照中的 ' + view.tasks.length + ' 个任务；点击名称查看详情。');
+          view.tasks.forEach(task => {
+            const row = document.createElement('tr'); row.setAttribute('data-runtime-task', task.taskId);
+            addTaskLink(runtimeLinkCell(row), task.taskId, friendly(task.title, '未命名任务'), 'runtime-task:' + task.taskId);
+            append(row, 'td', runtimeTerritoryName(view, task.territoryId)); append(row, 'td', runtimeBindingName(view, task.assignedBindingId));
+            append(row, 'td', stateDisplay(task.status)); const cell = append(row, 'td', task.latestExecution ? stateDisplay(record(task.latestExecution).state || 'UNKNOWN') : '尚无执行');
+            if (record(task.latestExecution).state === 'RECOVERING') append(cell, 'small', '等待主管核对，不会自动重发');
+            body.append(row);
+          });
+        }
+      }
+      if (!sessionsParent) return;
+      const rows = [];
+      view.bindings.forEach(binding => {
+        const affinities = binding.roleType === 'WORKER' ? view.affinities.filter(item => item.workerBindingId === binding.bindingId) : [];
+        if (affinities.length) affinities.forEach(affinity => rows.push({ binding, affinity }));
+        else rows.push({ binding, affinity: null });
+      });
+      view.affinities.filter(affinity => !view.bindings.some(binding => binding.bindingId === affinity.workerBindingId)).forEach(affinity => rows.push({ binding: { bindingId: affinity.workerBindingId, roleType: 'WORKER', roleName: '执行者（登记角色不可见）' }, affinity }));
+      if (!rows.length) { addEmpty(sessionsParent, '尚未登记角色或 Worker 长期会话。可在“主管设置”让会话引导配置。'); return; }
+      const body = runtimeTable(sessionsParent, ['角色名称', '绑定会话', '领地', '关联任务', '执行观察'], '仅含王国已登记角色与当前 Worker 长期会话，非平台全部会话。');
+      rows.forEach(({ binding, affinity }) => {
+        const row = document.createElement('tr'); row.setAttribute('data-runtime-binding', binding.bindingId);
+        if (affinity) row.setAttribute('data-runtime-affinity', affinity.affinityId);
+        const roleCell = append(row, 'td', friendly(binding.roleName, '角色名称未提供'));
+        append(roleCell, 'small', ({ CHANCELLOR: '宰相', SUPERVISOR: '领地主管', WORKER: '执行者', OWNER: '人类所有者' })[binding.roleType] || '登记角色');
+        const session = affinity ? affinity.sessionDisplay : binding.sessionDisplay;
+        const sessionCell = append(row, 'td', friendly(session, binding.sessionBound ? '已绑定（标识未提供）' : '尚未绑定'));
+        if (binding.roleType === 'WORKER') append(sessionCell, 'small', affinity ? '长期执行会话' : '登记会话；长期执行会话尚未建立');
+        const supervisorScope = binding.roleType === 'SUPERVISOR' ? runtimeSupervisorScope(view, binding.bindingId) : null;
+        const territories = affinity ? view.territories.filter(item => item.territoryId === affinity.territoryId)
+          : supervisorScope ? supervisorScope.territories
+          : binding.roleType === 'WORKER' ? view.territories.filter(item => view.tasks.some(task => task.territoryId === item.territoryId && task.assignedBindingId === binding.bindingId)) : [];
+        const territoryCell = append(row, 'td', territories.length ? territories.map(item => friendly(item.name, '领地名称未提供')).join('、') : affinity || supervisorScope && !supervisorScope.known ? '领地未确认' : binding.roleType === 'CHANCELLOR' || binding.roleType === 'OWNER' ? '王国范围' : '尚未隶属领地');
+        if (territories.length && supervisorScope && !supervisorScope.known) append(territoryCell, 'small', '其他领地未确认');
+        const tasks = view.tasks.filter(task => binding.roleType === 'WORKER' ? task.assignedBindingId === binding.bindingId && (!affinity || task.territoryId === affinity.territoryId)
+          : supervisorScope ? supervisorScope.territories.some(territory => territory.territoryId === task.territoryId) : binding.roleType === 'CHANCELLOR');
+        addRuntimeTasks(runtimeLinkCell(row), tasks, 'runtime-session-task:' + binding.bindingId + ':' + (affinity ? affinity.affinityId : 'binding'), !supervisorScope || supervisorScope.known);
+        // Supervisor responsibilities and task counts are not a model activity observation.
+        // Worker observations must identify this binding, its task and the projected session.
+        const executions = binding.roleType === 'WORKER' && session ? view.executions.filter(execution => execution.workerBindingId === binding.bindingId
+          && execution.sessionId === session && tasks.some(task => task.taskId === execution.taskId)
+          && ['STARTING', 'RUNNING', 'PAUSED', 'RECOVERING'].includes(execution.state)) : [];
+        const observed = append(row, 'td', executions.length ? '执行记录：' + Array.from(new Set(executions.map(item => stateDisplay(item.state)))).join('、') : '未知：未提供该会话的运行观测');
+        if (executions.length) append(observed, 'small', executions.length + ' 条关联执行；不表示模型持续生成中');
+        body.append(row);
+      });
+    };
+    const renderSupervisorSettings = snapshot => {
+      const parent = clear('settings-supervisors'); if (!parent) return; const view = runtimeView(snapshot);
+      if (!view.territories.length) { addEmpty(parent, '尚无领地。请在 DSH 会话中告诉 AI“帮我创建项目领地，并引导我设置主管”。'); return; }
+      const body = runtimeTable(parent, ['领地', '当前主管', '绑定会话', '交给会话处理'], null);
+      view.territories.forEach(territory => {
+        const lookup = runtimeSupervisorLookup(view, territory.territoryId); const seatKnown = lookup.known; const bindingId = lookup.bindingId;
+        const supervisor = view.bindings.find(item => item.bindingId === bindingId && item.roleType === 'SUPERVISOR');
+        const row = document.createElement('tr'); row.setAttribute('data-supervisor-territory', territory.territoryId);
+        append(row, 'td', friendly(territory.name, '未命名领地')); append(row, 'td', supervisor ? friendly(supervisor.roleName, '主管名称未提供') : seatKnown ? '尚未绑定可用主管' : '当前主管未确认');
+        append(row, 'td', supervisor ? friendly(supervisor.sessionDisplay, supervisor.sessionBound ? '已绑定（标识未提供）' : '尚未绑定会话') : seatKnown ? '尚未绑定' : '尚未确认');
+        const cell = runtimeLinkCell(row); const request = supervisor ? '把「' + territory.name + '」主管换成当前会话' : '让当前会话负责「' + territory.name + '」';
+        append(cell, 'p', request); const button = append(cell, 'button', supervisor ? '复制更换主管请求' : '复制绑定主管请求', 'refresh supervisor-request');
+        button.type = 'button'; button.setAttribute('data-focus-key', 'supervisor-request:' + territory.territoryId);
+        button.onclick = () => {
+          const clipboard = globalThis.navigator && globalThis.navigator.clipboard;
+          const succeeded = () => addCopyStatus(button, '已复制。到目标 DSH 会话发给 AI，让它引导确认。', true);
+          const failed = () => addCopyStatus(button, '未能复制。请选中上面的一句话，发给目标 DSH 会话中的 AI。', false);
+          try { if (!clipboard || typeof clipboard.writeText !== 'function') { failed(); return; } Promise.resolve(clipboard.writeText(request)).then(succeeded, failed); } catch (_) { failed(); }
+        };
+        body.append(row);
+      });
     };
     const claimSummaryPreview = value => {
       let preview = friendly(value, '尚无呈报摘要');
@@ -570,6 +732,7 @@ export const WORKBENCH_SCRIPT = String.raw`
     };
     const renderWorkbench = snapshot => {
       const data = workbenchData(snapshot);
+      renderRuntimeOverview(snapshot); renderSupervisorSettings(snapshot);
       renderWorkbenchQueue('today-owner', data.ownerActions, '当前没有明确需要你处理的事项。');
       renderWorkbenchQueue('inbox-owner', data.ownerActions, '当前没有明确需要你处理的事项。主管审查与返工会在下方单独列出。');
       renderWorkbenchQueue('today-exceptions', data.exceptions, '当前没有已投影的执行异常。');
@@ -703,7 +866,7 @@ export const WORKBENCH_SCRIPT = String.raw`
       const trusted = detail && state.detailTaskId === state.selectedTaskId && record(detail.task).taskId === state.selectedTaskId ? detail : null;
       const task = trusted ? trusted.task : selectedTask();
       if (!task) { addEmpty(parent, state.selectedTaskId ? '所选任务暂不可用，请重新读取；不会改选其他任务。' : '尚无任务，先展开任务草稿，写清目标和验收。'); return; }
-      const id = task.taskId; const back = append(parent, 'a', '← 返回' + ({ today: '今日工作台', inbox: '待我处理', overview: '王国地图', map: '王国地图', usage: '用量' }[state.taskReturnSection] || '今日工作台'), 'task-return'); back.href = '#' + (state.taskReturnSection || 'today'); back.setAttribute('data-focus-key', 'task-back');
+      const id = task.taskId; const back = append(parent, 'a', '← 返回' + ({ today: '运行总览', dispatch: '派发任务', settings: '主管设置', inbox: '待我处理', overview: '王国地图', map: '王国地图', usage: '用量' }[state.taskReturnSection] || '运行总览'), 'task-return'); back.href = '#' + (state.taskReturnSection || 'today'); back.setAttribute('data-focus-key', 'task-back');
       const summary = document.createElement('article'); summary.className = 'task-summary-card'; summary.setAttribute('data-read-anchor', id + ':summary'); append(summary, 'h3', task.title); append(summary, 'p', executionExplanation(task)); parent.append(summary);
       const nav = document.createElement('nav'); nav.className = 'task-detail-jump'; nav.setAttribute('aria-label', '任务内容'); ['目标与验收', '当前进展', '交付及验证', '参与者', '用量', '历史'].forEach((label, index) => { const button = append(nav, 'button', label, 'role-inspect-button'); button.type = 'button'; button.setAttribute('data-focus-key', 'detail-jump:' + index); button.onclick = () => { const target = byId('task-section-' + ['goal', 'progress', 'delivery', 'participants', 'usage', 'history'][index]); if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'start' }); } }; }); parent.append(nav);
       const goal = detailSection(parent, id, 'goal', '目标与验收'); addParagraph(goal, '目标', task.title, '尚未填写'); addParagraph(goal, '范围', task.description, '尚未填写范围'); addParagraph(goal, '验收条件', task.acceptanceCriteria, '尚未填写验收条件');
@@ -757,12 +920,18 @@ export const WORKBENCH_SCRIPT = String.raw`
     const mountWorkbench = () => {
       const tasks = byId('tasks'); const zones = document.querySelector('.zones'); if (tasks && zones) { tasks.setAttribute('data-console-page', 'tasks'); tasks.hidden = true; zones.append(tasks); }
       const management = byId('management'); if (management) management.setAttribute('data-console-page', 'legacy-management');
-      const composer = document.querySelector('.task-composer-card'); if (composer && tasks) { const draft = document.createElement('details'); draft.id = 'task-draft-panel'; draft.className = 'task-draft-panel'; append(draft, 'summary', '新建任务 · 编辑草稿'); draft.append(composer); tasks.insertBefore(draft, tasks.firstChild); }
+      const dispatch = byId('dispatch-content'); const composer = document.querySelector('.task-composer-card');
+      if (composer && dispatch) { const draft = document.createElement('details'); draft.id = 'task-draft-panel'; draft.className = 'task-draft-panel'; draft.open = true; append(draft, 'summary', '1. 写清任务与领地'); draft.append(composer); dispatch.append(draft); }
+      [['assign-form', '2. 指定执行者'], ['start-form', '3. 启动执行']].forEach(([id, title]) => {
+        const form = byId(id); if (!form || !dispatch) return; const oldWrapper = form.closest('details');
+        const section = document.createElement('section'); section.className = 'dispatch-step'; append(section, 'h3', title); section.append(form); dispatch.append(section);
+        if (oldWrapper) oldWrapper.remove();
+      });
       const actionDock = byId('operation-forms'); const detailParent = byId('task-detail-content'); if (actionDock && detailParent) { actionDock.classList.add('task-actions-inline'); detailParent.parentElement.append(actionDock); }
       const capability = document.querySelector('.capability-card'); if (capability) byId('settings-control-slot').append(capability);
       const owner = document.querySelector('.owner-management'); if (owner) { owner.querySelectorAll('.owner-actions').forEach(node => node.remove()); byId('settings-owner-slot').append(owner); }
       const overview = byId('overview'); const grid = overview && overview.querySelector('.council-grid'); if (grid) { grid.classList.add('role-workbench-layout'); const inspector = document.createElement('aside'); inspector.id = 'role-inspector'; inspector.className = 'role-inspector'; inspector.hidden = true; inspector.tabIndex = -1; inspector.setAttribute('aria-label', '角色职责与任务'); const close = append(inspector, 'button', '关闭角色侧栏', 'refresh'); close.type = 'button'; close.onclick = () => { const roleId = state.selectedRoleId; state.selectedRoleId = ''; inspector.hidden = true; const original = Array.from(document.querySelectorAll('[data-focus-key]')).find(node => node.getAttribute('data-focus-key') === 'role:' + roleId); if (original) original.focus(); }; const content = document.createElement('div'); content.id = 'role-inspector-content'; inspector.append(content); grid.append(inspector); }
-      const quick = byId('quick-task-form'); if (quick) quick.addEventListener('submit', event => { event.preventDefault(); const goal = String(byId('quick-task-goal').value || '').trim(); if (!goal) return; const title = byId('task-title'); if (!stageWorkbenchGoal(goal)) status('已有未提交草稿，请在任务页继续编辑。新目标保留在工作台输入框中。', 'neutral'); else status('草稿尚未提交，请补充范围和验收条件。', 'neutral'); history.pushState(null, '', '#tasks'); applyNavigationFromLocation(false); const draft = byId('task-draft-panel'); if (draft) { draft.open = true; readerDetails.set(draft.id, true); } if (title) { title.focus(); title.scrollIntoView({ block: 'center' }); } });
+      const quick = byId('quick-task-form'); if (quick) quick.addEventListener('submit', event => { event.preventDefault(); const goal = String(byId('quick-task-goal').value || '').trim(); if (!goal) return; const title = byId('task-title'); if (!stageWorkbenchGoal(goal)) status('已有未提交草稿，请继续编辑。新目标保留在输入框中。', 'neutral'); else status('草稿尚未提交，请补充范围和验收条件。', 'neutral'); history.pushState(null, '', '#dispatch'); applyNavigationFromLocation(false); const draft = byId('task-draft-panel'); if (draft) { draft.open = true; readerDetails.set(draft.id, true); } if (title) { title.focus(); title.scrollIntoView({ block: 'center' }); } });
       const refresh = byId('workbench-refresh'); if (refresh) refresh.onclick = () => { void load(false); };
       const territory = byId('task-territory'); if (territory) territory.addEventListener('change', () => { state.selectedTerritoryId = territory.value; const chip = byId('task-territory-chip'); if (chip) chip.hidden = true; });
       document.addEventListener('click', event => { const target = event.target && typeof event.target.closest === 'function' ? event.target.closest('a[href]') : null; if (target && String(target.getAttribute('href') || '').startsWith('#task=') && state.activeSection !== 'tasks') state.taskReturnSection = state.activeSection === 'overview' ? 'map' : state.activeSection; });

@@ -38,7 +38,7 @@ function harness(fetcher: (url: string, init?: any) => Promise<unknown> = async 
   const location = { hash: '#today' }; const history = { pushState(_state: unknown, _title: string, hash: string) { location.hash = hash } }
   const sink: any = {}; const script = CONSOLE_APP_HTML.match(/<script>([\s\S]*?)<\/script>/u)![1]; const cutoff = script.indexOf('      const formValue =')
   assert.ok(cutoff > 0)
-  new Function('document', 'location', 'history', 'fetch', 'sink', script.slice(0, cutoff) + '\n sink.api = { state, stateMeaning, statusTone, preserveWorkbenchView, renderWorkbenchTaskDetail, renderWorkbench, renderWorkbenchUsage, renderWorkbenchQueue, submit, normalizeCapabilities, renderSnapshot, consumeSubmittedDraft, stageWorkbenchGoal }; })();')(doc, location, history, fetcher, sink)
+  new Function('document', 'location', 'history', 'fetch', 'sink', script.slice(0, cutoff) + '\n sink.api = { state, stateMeaning, statusTone, preserveWorkbenchView, renderWorkbenchTaskDetail, renderWorkbench, renderWorkbenchUsage, renderWorkbenchQueue, submit, normalizeCapabilities, renderSnapshot, consumeSubmittedDraft, stageWorkbenchGoal, selectTask }; })();')(doc, location, history, fetcher, sink)
   return { ...sink.api, doc, node, nodes, allNodes, location }
 }
 
@@ -69,11 +69,13 @@ test('same revision reconnect and control changes replace stale status without r
 const emptyQueue = () => ({ totalCount: 0, items: [], truncated: false })
 const task = (id: string) => ({ taskId: id, territoryId: 'territory-1', title: '任务 ' + id, description: '明确范围', acceptanceCriteria: '验证条件', status: 'RUNNING', attemptCount: 1, assignedBindingId: 'worker-1', latestClaim: null, latestExecution: { state: 'RECOVERING' } })
 
-test('workbench has six navigation entries and defaults to today', () => {
+test('workbench has three main navigation entries and keeps legacy routes available', () => {
   assert.equal(parseConsoleFragment('').section, 'today')
   const nav = CONSOLE_APP_HTML.match(/<nav id="main-navigation"[\s\S]*?<\/nav>/u)![0]
-  assert.equal((nav.match(/data-nav-section=/gu) || []).length, 6)
-  for (const value of ['today', 'tasks', 'inbox', 'map', 'usage', 'settings']) assert.equal(parseConsoleFragment('#' + value).known, true)
+  assert.equal((nav.match(/data-nav-section=/gu) || []).length, 3)
+  assert.deepEqual(Array.from(nav.matchAll(/data-nav-section="([^"]+)"/gu), match => match[1]), ['today', 'dispatch', 'settings'])
+  for (const label of ['运行总览', '派发任务', '主管设置']) assert.ok(nav.includes(label))
+  for (const value of ['today', 'dispatch', 'settings', 'tasks', 'inbox', 'map', 'usage', 'management']) assert.equal(parseConsoleFragment('#' + value).known, true)
   assert.equal(parseConsoleFragment('#task=task%2Fone').taskId, 'task/one')
   assert.equal(parseConsoleFragment('#overview').section, 'overview')
 })
@@ -152,4 +154,54 @@ test('successful draft consumption preserves edits made while the command is in 
   const h = harness(); const payload = { title: '第一目标', description: '范围', acceptance_criteria: '验收', territory_id: 'territory-1' }
   for (const [id, value] of [['task-title', '提交期间的新目标'], ['task-description', '范围'], ['task-acceptance', '验收'], ['task-territory', 'territory-1']]) h.node(id, 'input').value = value
   assert.equal(h.consumeSubmittedDraft(payload), false); assert.equal(h.nodes.get('task-title').value, '提交期间的新目标'); assert.equal(h.nodes.get('task-description').value, '范围')
+})
+
+
+test('dispatch task selection stays on the page and loads only the newly selected resource', async () => {
+  const first = task('task-first'), second = task('task-second'); const requests: string[] = []
+  const h = harness(async (url) => { requests.push(url); return { ok: true, status: 200, json: async () => ({ task: second, allowedActions: { start: { executable: false, disabledReason: 'SCOPE_MISMATCH' } } }) } })
+  h.location.hash = '#dispatch'; h.state.activeSection = 'dispatch'; h.state.snapshot = { tasks: [first, second] }
+  h.state.selectedTaskId = first.taskId; h.state.detailTaskId = first.taskId; h.state.detail = { task: first, allowedActions: { start: { executable: true } } }
+  h.selectTask(second.taskId, true, true)
+  assert.equal(h.location.hash, '#dispatch'); assert.equal(h.state.activeSection, 'dispatch'); assert.equal(h.state.selectedTaskId, second.taskId)
+  assert.equal(h.state.detail, null, 'old resource permission must clear before the async read')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(requests, ['/api/tasks/task-second']); assert.equal(h.state.detailTaskId, second.taskId)
+  assert.equal(h.state.detail.allowedActions.start.executable, false)
+  h.selectTask(second.taskId, true)
+  assert.equal(h.location.hash, '#task=task-second', 'explicit task-detail navigation remains available')
+})
+
+test('creation from dispatch selects the returned task without leaving dispatch or starting it', async () => {
+  const created = task('created-on-dispatch'); const requests: string[] = []
+  const caps = { state: 'ACTIVE', active: true, csrfToken: 'fixture-token', roleSessionBound: true, actions: { 'task.create': { executable: true } } }
+  const snapshot = { revision: 10, tasks: [created], territories: [], bindings: [], liveExecutions: [], projection: {} }
+  const h = harness(async (url, init) => { requests.push((init?.method || 'GET') + ' ' + url); return { ok: true, status: 200, json: async () => init?.method === 'POST' ? { ok: true, task: created } : url === '/api/control' ? caps : url === '/api/snapshot' ? snapshot : { task: created } } })
+  h.location.hash = '#dispatch'; h.state.activeSection = 'dispatch'; h.state.capabilities = h.normalizeCapabilities(caps); h.state.snapshot = { tasks: [] }; h.node('status-line')
+  await h.submit('plan', { title: '目标', territory_id: 'territory-1', description: '', acceptance_criteria: '' }, 'task.create', false)
+  assert.equal(h.location.hash, '#dispatch'); assert.equal(h.state.selectedTaskId, created.taskId)
+  assert.equal(requests.filter(value => value.startsWith('POST')).length, 1)
+  assert.equal(requests.some(value => /commands\/(?:assign|start)/u.test(value)), false)
+})
+
+
+test('primary navigation brings the new page into view without scrolling same-page dispatch selection', () => {
+  const script = CONSOLE_APP_HTML.match(/<script>([\s\S]*?)<\/script>/u)![1]
+  const start = script.indexOf('       const applyNavigationFromLocation =')
+  const end = script.indexOf('     const selectTask =', start)
+  assert.ok(start > 0 && end > start)
+  const events: string[] = []; const state = { activeSection: 'today', navigationHash: '', snapshot: {}, detail: null }
+  const location = { hash: '#settings' }
+  const pages = Object.fromEntries(['today', 'dispatch-page', 'settings-page'].map(id => [id, { scrollIntoView: () => events.push(id) }]))
+  const noOp = () => {}
+  const env = { state, location, globalThis: { requestAnimationFrame: (action: () => void) => action() },
+    reconcileSelections: () => { state.activeSection = location.hash.slice(1); return { known: true, section: state.activeSection } },
+    renderSelectors: noOp, renderTaskNavigator: noOp, renderNavigation: noOp, renderTaskDetail: noOp,
+    renderExecutions: noOp, renderGates: noOp, status: noOp, refreshSelectedDetail: noOp, byId: (id: string) => pages[id],
+  }
+  const navigate = new Function('env', 'const {' + Object.keys(env).join(',') + '} = env;\n' + script.slice(start, end) + '\nreturn applyNavigationFromLocation;')(env)
+  navigate(false); assert.deepEqual(events, ['settings-page'])
+  location.hash = '#dispatch'; navigate(false); assert.deepEqual(events, ['settings-page', 'dispatch-page'])
+  navigate(false); assert.equal(events.length, 2, 'same-page task selection keeps the dispatch form in view')
+  location.hash = '#today'; navigate(false); assert.deepEqual(events, ['settings-page', 'dispatch-page', 'today'])
 })

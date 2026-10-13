@@ -122,6 +122,7 @@ import {
 } from './core/owner-control.js'
 import {
   draftOwnerBindingIntent,
+  buildOwnerBindingGuidance,
   draftOwnerBindingIntentFromRejectedWrite,
   serializeOwnerBindingIntentDraft,
   type OwnerBindingIntentContext,
@@ -1205,12 +1206,17 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
       return 'OWNER_CONTROL_REQUIRED: Owner-only 写操作只能通过 direct `/kingdom` Slash 执行；'
         + 'Agent Tool、未激活的 GUI/HTTP、工具参数和 caller session 不能代表 Owner。'
     }
-    return serializeOwnerBindingIntentDraft(draftOwnerBindingIntentFromRejectedWrite({
+    const context = ownerBindingIntentContext(rejection.exec)
+    const draft = draftOwnerBindingIntentFromRejectedWrite({
       code: 'OWNER_CONTROL_REQUIRED',
       operation: rejection.operation,
       request: rejection.request,
-      context: ownerBindingIntentContext(rejection.exec),
-    }))
+      context,
+    })
+    return JSON.stringify({
+      ...JSON.parse(serializeOwnerBindingIntentDraft(draft)),
+      guidance: buildOwnerBindingGuidance(draft, context),
+    })
   }
 
   // ── 加载期孤儿处理：按 Execution Contract 保持事实诚实 ──────────
@@ -1469,20 +1475,24 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kingdom_draft_owner_binding_intent',
-    description: '解析 bounded 自然语言 Owner 绑定意图；只返回 zero-write Draft，不执行绑定、不 mint Owner authority，最终须 direct /kingdom Slash 确认',
+    description: '为当前会话绑定或接替宰相、指定领地主管，解析自然语言并准备完整管理窗口命令、预览确认步骤；只读不绑定。用户确认后须读回结果；缺失或歧义时按 ambiguity.question 与 guidance 追问。',
     parameters: {
-      text: { type: 'string', required: true, description: '自然语言意图，例如“把当前会话设为宰相”或“让该会话主管 RAG 研发辖区”' },
+      text: { type: 'string', required: true, description: '用户原意，例如“把当前会话设为「领地名」的主管”或“把「领地名」主管换成当前会话”' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
     },
     async execute(args: { text: string }, exec: KingdomToolExecutionLike) {
+      const context = ownerBindingIntentContext(exec)
       const draft = draftOwnerBindingIntent({
         text: args.text,
-        context: ownerBindingIntentContext(exec),
+        context,
       })
-      return serializeOwnerBindingIntentDraft(draft)
+      return JSON.stringify({
+        ...JSON.parse(serializeOwnerBindingIntentDraft(draft)),
+        guidance: buildOwnerBindingGuidance(draft, context),
+      })
     },
   })), 'dsh-kingdom: owner-binding-intent draft tool')
 
@@ -2028,6 +2038,19 @@ export function apply(ctx: Context, config: Config, dependencies: ApplyDependenc
         // This remains empty until startGuiServer reports the actual port.
         // In particular, port=0 can never activate against a guessed origin.
         expectedOrigin: () => listeningAddress?.origin ?? '',
+        inspectRoleAction: (principal, command) => {
+          const kingdomId = requireKingdom()
+          if (!kingdomId || !principal.sessionId
+            || !validateLiveDirectSession(principal.sessionId, dshRegistrySeam()).ok) {
+            return { executable: false, disabledReason: 'ROLE_AUTH_REQUIRED' }
+          }
+          const role = command === 'plan' ? 'CHANCELLOR' : 'SUPERVISOR'
+          const matches = store.getBindingsByRole(kingdomId, role).some(binding =>
+            binding.status === 'ACTIVE' && binding.session_id === principal.sessionId)
+          return matches
+            ? { executable: true }
+            : { executable: false, disabledReason: role === 'CHANCELLOR' ? 'CHANCELLOR_REQUIRED' : 'SUPERVISOR_REQUIRED' }
+        },
       })
       const ownerController = new OwnerDecisionController(store, {
         validateTargetSession: async ({ sessionId, signal }) => {

@@ -176,11 +176,11 @@ test('v1 Console fragment and Task navigator preserve public navigation without 
   assert.deepEqual(command, { name: 'plan', payload: { title: 'bounded task' } })
 
   const html = renderConsoleApp()
-  for (const section of ['today', 'tasks', 'inbox', 'map', 'usage', 'settings']) {
+  for (const section of ['today', 'dispatch', 'settings']) {
     assert.match(html, new RegExp(`href="#${section}"[^>]+data-nav-section="${section}"`, 'u'))
   }
   // Legacy deep links remain covered by parseConsoleFragment above; the visible
-  // navigation now follows the personal workbench's six user-facing pages.
+  // navigation now follows the three primary workbench pages.
   assert.match(html, /aria-label="任务导航器"/u)
   assert.match(html, /'#task=' \+ encodeURIComponent/u)
 })

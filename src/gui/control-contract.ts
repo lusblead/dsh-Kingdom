@@ -202,6 +202,10 @@ export const GUI_OWNER_DIRECT_SLASH_HINTS: Record<GuiOwnerOnlyAction, string> = 
 export type GuiControlDisabledReason =
   | 'SESSION_AUTH_REQUIRED'
   | 'DIRECT_SLASH_REQUIRED'
+  | 'ROLE_AUTH_REQUIRED'
+  | 'CHANCELLOR_REQUIRED'
+  | 'SUPERVISOR_REQUIRED'
+  | 'ROLE_PREFLIGHT_UNAVAILABLE'
 
 export interface GuiControlActionView {
   executable: boolean
@@ -220,6 +224,7 @@ export type GuiControlFailureCode =
   | 'CONTROL_REPLAY_DENIED'
   | 'CONTROL_BUSY'
   | 'CONTROL_TICKET_INVALID'
+  | 'CONTROL_ROLE_DENIED'
 
 export interface GuiControlRequestMeta {
   host: string | null
@@ -293,6 +298,8 @@ export interface GuiControlBroker {
     csrfToken: string | null,
     requestId: string | null,
     meta: GuiControlRequestMeta,
+    /** Optional compatibility seam; a supplied command is role-preflighted. */
+    command?: GuiSessionCommand,
   ): GuiControlAuthorizeResult
   revoke(cookieValue: string | null): void
   dispose(): void

@@ -61,7 +61,7 @@ test('testConsoleShellPresentsChineseCouncilNavigationMapAndAccessibleActions', 
   assert.match(CONSOLE_APP_HTML, /\.main-nav \{ display: flex; gap: 4px; overflow-x: auto/u)
   assert.match(CONSOLE_APP_HTML, /body \{[^}]*overflow-x: hidden/u)
   assert.match(CONSOLE_APP_HTML, /skip-link/u)
-  assert.match(CONSOLE_APP_HTML, /href="#today">跳到今日工作台/u)
+  assert.match(CONSOLE_APP_HTML, /href="#today">跳到运行总览/u)
   assert.match(CONSOLE_APP_HTML, /focus-visible/u)
   assert.match(CONSOLE_APP_HTML, /prefers-reduced-motion/u)
   for (const marker of ['主导航', '领地名册', '任务导航器', '执行', '史册', 'aria-current="page"', 'data-task-selector']) {
@@ -137,7 +137,7 @@ test('testOrganogramConnectorsFollowActualTerritoryCountAndElementGeometry', () 
 })
 
 test('testManagementPresentsTheRealChancellorThenTerritorySupervisorRouteFirst', () => {
-  for (const marker of ['明确目标与验收', '任务草稿', '提交任务草稿', '写下任务，按 / 选择领地', '领地主管承接', '领地主管接手并派发', '主管确认派发']) {
+  for (const marker of ['填写任务', '创建任务', '要完成什么？', '用宰相会话创建，再交给领地主管执行', '领地主管承接', '第二步 · 指定执行者', '第三步 · 开始执行']) {
     assert.match(CONSOLE_APP_HTML, new RegExp(marker, 'u'))
   }
   assert.match(CONSOLE_APP_HTML, /按 <kbd>\/<\/kbd> 唤出领地/u)
@@ -179,8 +179,8 @@ test('testConsoleShellKeepsOwnerBoundaryAndUsesExplicitChineseActionVerbs', () =
   assert.doesNotMatch(CONSOLE_APP_HTML, /data-gated-action="setup\.basic"/u)
   assert.doesNotMatch(CONSOLE_APP_HTML, /CONFIG\.commands\.setup/u)
   assert.doesNotMatch(CONSOLE_APP_HTML, /name="worker_model"/u)
-  assert.match(CONSOLE_APP_HTML, />提交任务草稿</u)
-  assert.match(CONSOLE_APP_HTML, />主管确认派发</u)
+  assert.match(CONSOLE_APP_HTML, />创建任务</u)
+  assert.match(CONSOLE_APP_HTML, />指定执行者</u)
   assert.match(CONSOLE_APP_HTML, />开始执行</u)
   assert.match(CONSOLE_APP_HTML, />暂停</u)
   assert.match(CONSOLE_APP_HTML, />继续</u)

@@ -16,6 +16,7 @@ import {
   GUI_START_SANDBOX_MODES,
   GuiControlAuthorizeResult,
   type GuiControlActionView,
+  type GuiControlDisabledReason,
   GuiControlBroker,
   GuiControlExecutionContext,
   GuiControlFailure,
@@ -65,6 +66,11 @@ const MAX_TOKEN_LENGTH = 512
 type Clock = () => number
 type TokenFactory = () => string
 
+export interface LocalRoleActionInspection {
+  readonly executable: boolean
+  readonly disabledReason?: GuiControlDisabledReason | null
+}
+
 export interface LocalControlOptions {
   /** HTTP Host must resolve to this exact IPv4 loopback address. */
   host?: string
@@ -75,6 +81,12 @@ export interface LocalControlOptions {
   maxRequestIds?: number
   now?: Clock
   tokenFactory?: TokenFactory
+  /**
+   * Read-only live Role lookup against the captured Session identity. It may
+   * only narrow transport admission; Core still checks the exact task and
+   * territory on every mutation. Owner actions never pass through this hook.
+   */
+  inspectRoleAction?: (principal: Principal, command: GuiSessionCommand) => LocalRoleActionInspection
 }
 
 export interface LocalControlActivation {
@@ -284,6 +296,7 @@ export class LocalControlManager implements GuiControlBroker {
   private readonly maxRequestIds: number
   private readonly now: Clock
   private readonly tokenFactory: TokenFactory
+  private readonly inspectRoleAction?: LocalControlOptions['inspectRoleAction']
   private readonly tickets = new Map<string, TicketRecord>()
   private readonly sessions = new Map<string, SessionRecord>()
   private closed = false
@@ -296,6 +309,7 @@ export class LocalControlManager implements GuiControlBroker {
     this.maxRequestIds = validLimit(options.maxRequestIds, DEFAULT_MAX_REQUEST_IDS)
     this.now = options.now ?? Date.now
     this.tokenFactory = options.tokenFactory ?? token
+    this.inspectRoleAction = options.inspectRoleAction
   }
 
   private expectedOrigin(): string {
@@ -320,13 +334,46 @@ export class LocalControlManager implements GuiControlBroker {
     return null
   }
 
+  private roleAction(session: SessionRecord, command: GuiSessionCommand): LocalRoleActionInspection {
+    // Closing this transport must remain possible even after the Role was
+    // removed, the ledger became unavailable, or the activation had no Session.
+    if (command === 'control.revoke') return { executable: true }
+    if (session.sessionId === null) return { executable: false, disabledReason: 'SESSION_AUTH_REQUIRED' }
+    if (!this.inspectRoleAction) return { executable: true }
+    try {
+      const result: unknown = this.inspectRoleAction(Object.freeze({ sessionId: session.sessionId }), command)
+      if (typeof result !== 'object' || result === null) {
+        return { executable: false, disabledReason: 'ROLE_PREFLIGHT_UNAVAILABLE' }
+      }
+      const inspection = result as { executable?: unknown; disabledReason?: unknown }
+      if (inspection.executable === true && (inspection.disabledReason === undefined || inspection.disabledReason === null)) {
+        return { executable: true }
+      }
+      if (inspection.executable === false) {
+        const reason = inspection.disabledReason ?? 'ROLE_AUTH_REQUIRED'
+        if (reason === 'ROLE_AUTH_REQUIRED' || reason === 'CHANCELLOR_REQUIRED' || reason === 'SUPERVISOR_REQUIRED') {
+          return { executable: false, disabledReason: reason }
+        }
+      }
+    } catch {
+      // Do not echo callback errors or ledger details into the browser.
+    }
+    return { executable: false, disabledReason: 'ROLE_PREFLIGHT_UNAVAILABLE' }
+  }
+
   private publicView(session: SessionRecord): GuiControlPublicView {
     const actions: Record<string, GuiControlActionView> = {}
+    const roleActions = new Map<GuiSessionCommand, LocalRoleActionInspection>()
     for (const [action, command] of Object.entries(SESSION_ACTION_COMMANDS)) {
-      const executable = command === 'control.revoke' || session.sessionId !== null
+      let inspection = roleActions.get(command)
+      if (!inspection) {
+        inspection = this.roleAction(session, command)
+        roleActions.set(command, inspection)
+      }
+      const executable = inspection.executable
       actions[action] = {
         executable,
-        disabledReason: executable ? null : 'SESSION_AUTH_REQUIRED',
+        disabledReason: executable ? null : inspection.disabledReason ?? 'ROLE_AUTH_REQUIRED',
         command,
         directSlashHint: null,
       }
@@ -454,6 +501,7 @@ export class LocalControlManager implements GuiControlBroker {
     csrfToken: string | null,
     requestId: string | null,
     meta: GuiControlRequestMeta,
+    command?: GuiSessionCommand,
   ): GuiControlAuthorizeResult {
     const transport = this.validateTransport(meta, true)
     if (transport) return toContractFailure(transport)
@@ -470,6 +518,24 @@ export class LocalControlManager implements GuiControlBroker {
       return toContractFailure(reject('REQUEST_WINDOW_EXHAUSTED', '本地 control session 的 request-id 窗口已满，请重新激活。'))
     }
     if (session.inFlight) return toContractFailure(reject('MUTATION_IN_FLIGHT', '同一 local control session 已有 mutation 正在执行。'))
+    if (command !== undefined) {
+      if (!(GUI_SESSION_COMMANDS as readonly string[]).includes(command)) {
+        return { ok: false, code: 'CONTROL_ROLE_DENIED', message: '该操作不属于会话可执行命令；角色预检不能授予 Owner 权限。' }
+      }
+      const inspection = this.roleAction(session, command)
+      if (!inspection.executable) {
+        const reason = inspection.disabledReason ?? 'ROLE_AUTH_REQUIRED'
+        const messages: Record<GuiControlDisabledReason, string> = {
+          SESSION_AUTH_REQUIRED: '当前操作通道没有可验证的会话身份，请从角色会话重新打开工作台。',
+          DIRECT_SLASH_REQUIRED: '此操作只能由人类 Owner 直接执行 /kingdom Slash。',
+          ROLE_AUTH_REQUIRED: '当前会话未绑定所需角色，请在会话中请求设置角色后重新操作。',
+          CHANCELLOR_REQUIRED: '创建任务需要宰相会话，请回到宰相会话打开工作台。',
+          SUPERVISOR_REQUIRED: '此操作需要主管会话，请回到该领地主管会话打开工作台。',
+          ROLE_PREFLIGHT_UNAVAILABLE: '暂时无法核实当前会话角色，请稍后重新打开工作台。',
+        }
+        return { ok: false, code: 'CONTROL_ROLE_DENIED', message: messages[reason] }
+      }
+    }
 
     session.requestIds.add(requestId)
     session.inFlight = true

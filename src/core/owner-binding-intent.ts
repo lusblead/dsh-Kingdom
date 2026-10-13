@@ -195,6 +195,14 @@ export interface RoleSessionDraftOperation {
 
 export type DraftOperation = RoleBindDraftOperation | RoleSessionDraftOperation
 
+export interface AffectedSupervisorTerritorySnapshot {
+  territory_id: string
+  name: string
+  supervisor_binding_id: string
+  status: string | null
+  kingdom_id: string | null
+}
+
 export interface OwnerBindingIntentDraft {
   kind: 'OWNER_BINDING_INTENT_DRAFT'
   status: 'DRAFT_READY' | 'AMBIGUOUS'
@@ -212,12 +220,16 @@ export interface OwnerBindingIntentDraft {
   canonical_direct_slash: string | null
   confirmation: typeof DIRECT_SLASH_CONFIRM_REQUIRED | null
   ambiguity: DraftAmbiguity | null
+  /** Read-only scope snapshot for a seat-wide session change; never authorization. */
+  affected_territories?: readonly AffectedSupervisorTerritorySnapshot[]
 }
 
 interface ParsedLanguage {
   role_type: ParsedRoleType
   role_alias: string
   territory_query: string | null
+  /** New conversation guidance uses an exact territory name, never a fuzzy suffix match. */
+  territory_exact?: boolean
 }
 
 interface ResolutionFailure {
@@ -319,11 +331,21 @@ function actionPattern(): string {
 
 function parseNaturalLanguage(value: string): ParsedLanguage | null {
   const normalized = withoutTerminalPunctuation(normalizeInput(value))
+  const currentSession = '(?:当前|这个|该)\\s*会话'
+  const replacement = normalized.match(new RegExp(`^(?:把|将)\\s*(.+?)(?:的)?(?:主管|主理)\\s*(?:换成|更换为|改为)\\s*${currentSession}$`, 'u'))
+  if (replacement) return parsedExactSupervisorTerritory(replacement[1]!)
   const subject = normalized.match(/^(?:把|将|让)?(?:当前|这个|该)\s*会话(?:的)?(.*)$/u)
   if (!subject) return null
 
   const remainder = subject[1]!.trim()
   if (!remainder) return null
+
+  const responsible = remainder.match(/^负责\s*(.+)$/u)
+  if (responsible) return parsedExactSupervisorTerritory(responsible[1]!)
+  const successor = remainder.match(/^接替\s*(.+?)(?:的)?(?:主管|主理)$/u)
+  if (successor) return parsedExactSupervisorTerritory(successor[1]!)
+  const appointed = remainder.match(/^(?:设置为|设为|绑定为|任命为)\s*(.+?)(?:的)?(?:主管|主理)$/u)
+  if (appointed) return parsedExactSupervisorTerritory(appointed[1]!)
 
   // Supervisor is checked first because its territory tail is meaningful.
   const supervisorPattern = new RegExp(
@@ -349,6 +371,15 @@ function parseNaturalLanguage(value: string): ParsedLanguage | null {
   const alias = ROLE_ALIASES.find(item => item.alias.toLocaleLowerCase() === generic[1]!.toLocaleLowerCase())
   if (!alias) return null
   return { role_type: alias.role_type, role_alias: alias.alias, territory_query: null }
+}
+
+function parsedExactSupervisorTerritory(value: string): ParsedLanguage | null {
+  let name = value.trim()
+  const quoted = name.match(/^(?:「([^「」]+)」|“([^“”]+)”|"([^"]+)")$/u)
+  if (quoted) name = quoted[1] ?? quoted[2] ?? quoted[3]!
+  else if (/[「」“”"]/u.test(name)) return null
+  if (!name || name.length > 2000) return null
+  return { role_type: 'SUPERVISOR', role_alias: '主管', territory_query: name, territory_exact: true }
 }
 
 function ambiguityQuestion(code: IntentAmbiguityCode): string {
@@ -532,12 +563,14 @@ function resolveTerritorySupervisorBinding(
 function resolveTerritory(
   query: string | null,
   context: OwnerBindingIntentContext,
+  exactName = false,
 ): TerritoryResolution | ResolutionFailure {
   if (!query || territoryIsPlaceholder(query)) return { ok: false, code: 'TERRITORY_REQUIRED', question: ambiguityQuestion('TERRITORY_REQUIRED') }
   if (!context.territories) return { ok: false, code: 'TERRITORY_UNRESOLVED', question: ambiguityQuestion('TERRITORY_UNRESOLVED') }
 
-  const wanted = normalizedTerritoryLabel(query)
+  const wanted = exactName ? normalizeInput(query) : normalizedTerritoryLabel(query)
   const matches = context.territories.filter(row => {
+    if (exactName) return normalizeInput(row.name) === wanted
     const labels = [row.name, ...(row.aliases ?? [])].map(normalizedTerritoryLabel)
     return labels.includes(wanted)
   })
@@ -663,6 +696,7 @@ function readyDraft(
   territory: { territory_id: string; name: string } | null,
   operation: DraftOperation,
   supervisorBindingId: string | null,
+  context: OwnerBindingIntentContext,
 ): OwnerBindingIntentDraft {
   const draft = baseDraft(normalizedInput, {
     role_type: parsed.role_type,
@@ -678,7 +712,20 @@ function readyDraft(
   draft.canonical_steps = steps
   draft.canonical_direct_slash = steps[0]?.canonical_direct_slash ?? null
   draft.confirmation = DIRECT_SLASH_CONFIRM_REQUIRED
+  if (parsed.role_type === 'SUPERVISOR' && operation.kind === 'role.session') {
+    draft.affected_territories = snapshotAffectedSupervisorTerritories(operation.args.binding_id, context)
+  }
   return draft
+}
+
+function snapshotAffectedSupervisorTerritories(
+  bindingId: string,
+  context: OwnerBindingIntentContext,
+): AffectedSupervisorTerritorySnapshot[] {
+  return (context.territories ?? []).filter(row => row.supervisor_binding_id === bindingId)
+    .map(row => ({ territory_id: row.territory_id, name: row.name, supervisor_binding_id: bindingId,
+      status: row.status ?? null, kingdom_id: row.kingdom_id ?? null }))
+    .sort((left, right) => left.territory_id.localeCompare(right.territory_id))
 }
 
 function readyExactRoleSessionDraft(
@@ -686,6 +733,7 @@ function readyExactRoleSessionDraft(
   sessionRef: string,
   bindingId: string,
   roleType: ParsedRoleType,
+  context: OwnerBindingIntentContext,
 ): OwnerBindingIntentDraft {
   const draft = baseDraft(normalizedInput, {
     role_type: roleType,
@@ -705,6 +753,7 @@ function readyExactRoleSessionDraft(
   draft.canonical_steps = steps
   draft.canonical_direct_slash = steps[0]!.canonical_direct_slash
   draft.confirmation = DIRECT_SLASH_CONFIRM_REQUIRED
+  if (roleType === 'SUPERVISOR') draft.affected_territories = snapshotAffectedSupervisorTerritories(bindingId, context)
   return draft
 }
 
@@ -828,7 +877,7 @@ function buildDraftFromExactBinding(
   if (roleTypeHint !== null && roleTypeHint !== binding.role_type) {
     return ambiguousDraft(normalizedInput, intent, 'ROLE_BINDING_UNSAFE')
   }
-  return readyExactRoleSessionDraft(normalizedInput, session.session_ref, bindingId, binding.role_type)
+  return readyExactRoleSessionDraft(normalizedInput, session.session_ref, bindingId, binding.role_type, context)
 }
 
 function buildDraftFromParsed(
@@ -856,7 +905,7 @@ function buildDraftFromParsed(
   let territorySupervisorBindingId: string | null = null
   if (parsed.role_type === 'SUPERVISOR') {
     const resolved = forcedTerritoryId === null
-      ? resolveTerritory(parsed.territory_query, context)
+      ? resolveTerritory(parsed.territory_query, context, parsed.territory_exact)
       : resolveTerritoryById(forcedTerritoryId, context)
     if (!resolved.ok) return ambiguousDraft(normalizedInput, parsedIntent, resolved.code)
     territory = resolved.territory
@@ -874,7 +923,7 @@ function buildDraftFromParsed(
       kind: 'role.session',
       args: { binding_id: forcedBindingId, session_id: session.session_ref },
     }
-    return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
+    return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId, context)
   }
 
   if (forceRoleSession) {
@@ -883,7 +932,7 @@ function buildDraftFromParsed(
         kind: 'role.session',
         args: { binding_id: territorySupervisorBindingId, session_id: session.session_ref },
       }
-      return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
+      return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId, context)
     }
     const existingSingleton = resolveExistingSingleton(parsed.role_type, context)
     if (existingSingleton && 'ok' in existingSingleton) return ambiguousDraft(normalizedInput, parsedIntent, existingSingleton.code)
@@ -892,7 +941,7 @@ function buildDraftFromParsed(
         kind: 'role.session',
         args: { binding_id: existingSingleton.binding_id, session_id: session.session_ref },
       }
-      return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
+      return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId, context)
     }
     return ambiguousDraft(normalizedInput, parsedIntent, 'ROLE_BINDING_UNSAFE')
   }
@@ -902,7 +951,7 @@ function buildDraftFromParsed(
       kind: 'role.session',
       args: { binding_id: territorySupervisorBindingId, session_id: session.session_ref },
     }
-    return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
+    return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId, context)
   }
 
   const existing = resolveExistingSingleton(parsed.role_type, context)
@@ -912,7 +961,7 @@ function buildDraftFromParsed(
     : { kind: 'role.bind', args: { role_type: parsed.role_type, role_name: canonicalRoleName(parsed.role_type), session_id: session.session_ref,
       // 主管的领地归属是任命的一部分：Draft 必须与 direct Slash 语法一致，否则草案不可执行。
       ...(parsed.role_type === 'SUPERVISOR' && territory ? { territory_id: territory.territory_id } : {}) } }
-  return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId)
+  return readyDraft(normalizedInput, parsed, session.session_ref, territory, operation, territorySupervisorBindingId, context)
 }
 
 /** Parse one bounded natural-language intent without performing any write. */
@@ -1037,4 +1086,128 @@ export const parseOwnerBindingIntent = draftOwnerBindingIntent
 /** Stable, JSON-safe rendering for UI/Agent echo and deterministic tests. */
 export function serializeOwnerBindingIntentDraft(draft: OwnerBindingIntentDraft): string {
   return stableJson(draft)
+}
+
+export interface OwnerBindingGuidance {
+  kind: 'OWNER_BINDING_GUIDANCE'
+  status: 'READY' | 'NEEDS_CLARIFICATION'
+  authority_source: 'NONE'
+  owner_authority: false
+  write_effect: 'ZERO_WRITE'
+  summary: string
+  steps: readonly string[]
+  /** A bounded human activation command, never an Owner ticket or capability. */
+  canonical_owner_gui: string | null
+}
+
+/**
+ * Explain a verified binding draft without making the user learn IDs or JSON.
+ * Prefer the management window: its preview/commit path also guards unsettled
+ * work. The legacy canonical_direct_slash stays intact for compatibility.
+ */
+export function buildOwnerBindingGuidance(
+  draft: OwnerBindingIntentDraft,
+  context: OwnerBindingIntentContext = {},
+): OwnerBindingGuidance {
+  const blocked = (summary: string): OwnerBindingGuidance => ({
+    kind: 'OWNER_BINDING_GUIDANCE', status: 'NEEDS_CLARIFICATION', authority_source: 'NONE',
+    owner_authority: false, write_effect: 'ZERO_WRITE', summary,
+    steps: ['在希望担任主管的会话中说明准确领地名称；会话会重新核对并准备操作。'],
+    canonical_owner_gui: null,
+  })
+  if (draft.status !== 'DRAFT_READY' || !draft.operation || draft.steps.length !== 1) {
+    const code = draft.ambiguity?.code
+    if (code?.startsWith('SESSION_')) return blocked('无法确认当前会话有效，请在希望担任主管的会话中重新提出请求。')
+    if (code === 'TERRITORY_REQUIRED') return blocked('请说明准确领地名称，例如：让当前会话负责「研发领」。')
+    if (code === 'TERRITORY_NOT_FOUND') return blocked('没有找到这个领地名称，请先查看工作台里的领地名称，再重新提出请求。')
+    if (code === 'TERRITORY_MULTIPLE') return blocked('这个名称对应多个领地，不能自动选择；请先在管理窗口区分同名领地。')
+    if (code === 'UNSUPPORTED_INPUT') return blocked('请说明要任命还是接替，例如：让当前会话负责「研发领」，或把「研发领」主管换成当前会话。')
+    return blocked(draft.ambiguity?.question ?? '本次操作尚不能唯一确定，请先补齐会话和领地信息。')
+  }
+  if (draft.owner_authority !== false || draft.authority_source !== 'NONE' || draft.write_effect !== 'ZERO_WRITE') {
+    return blocked('本次草案不能作为管理授权，请重新准备。')
+  }
+  const session = resolveTargetSession(context)
+  if (!session.ok || session.session_ref !== draft.intent.target_session_ref
+    || session.session_ref !== draft.operation.args.session_id) {
+    return blocked('当前会话已失效或发生变化，请在要担任角色的会话中重新提出请求。')
+  }
+  if (!isExactToken(context.kingdom_id)) return blocked('尚未确认当前王国，请先完成初始化后重新提出请求。')
+
+  const operation = draft.operation
+  let roleType: 'SUPERVISOR' | 'CHANCELLOR'
+  let territory: { territory_id: string; name: string } | null = null
+  let affectedTerritories: { territory_id: string; name: string }[] = []
+  const bindingIds: string[] = []
+  if (operation.kind === 'role.bind') {
+    if (operation.args.role_type !== 'SUPERVISOR' && operation.args.role_type !== 'CHANCELLOR') {
+      return blocked('本次会话引导支持主管和宰相；执行者会话由正常执行流程建立。')
+    }
+    roleType = operation.args.role_type
+    if (draft.intent.role_type !== roleType) return blocked('角色信息发生变化，请重新准备操作。')
+    if (roleType === 'SUPERVISOR') {
+      if (!operation.args.territory_id) return blocked('请说明要负责的准确领地名称。')
+      const resolved = resolveTerritoryById(operation.args.territory_id, context)
+      if (!resolved.ok || resolved.supervisor_binding_id !== null
+        || draft.intent.territory?.territory_id !== resolved.territory.territory_id
+        || draft.intent.territory?.name !== resolved.territory.name) {
+        return blocked('领地或现任主管发生变化，请重新提出任命或更换请求。')
+      }
+      territory = resolved.territory
+      affectedTerritories = [territory]
+    } else if (resolveExistingSingleton(roleType, context) !== null) {
+      return blocked('宰相席位已有变化，请重新提出接替请求。')
+    }
+  } else {
+    const resolved = resolveExactBindingForSession(operation.args.binding_id, context)
+    if (!resolved.ok || (resolved.role_type !== 'SUPERVISOR' && resolved.role_type !== 'CHANCELLOR')
+      || resolved.role_type !== draft.intent.role_type
+      || (context.kingdom_id && resolved.binding.kingdom_id && resolved.binding.kingdom_id !== context.kingdom_id)) {
+      return blocked('现任角色已变化或不可用，请重新准备接替操作。')
+    }
+    roleType = resolved.role_type
+    bindingIds.push(operation.args.binding_id)
+    const related = snapshotAffectedSupervisorTerritories(operation.args.binding_id, context)
+    if (roleType === 'SUPERVISOR') {
+      if (!related.length || !draft.affected_territories
+        || stableJson(draft.affected_territories) !== stableJson(related)) {
+        return blocked('主管负责的领地范围已变化或无法核对，请重新准备并确认全部受影响领地。')
+      }
+      for (const row of related) {
+        const resolvedTerritory = resolveTerritoryById(row.territory_id, context)
+        if (!resolvedTerritory.ok || resolvedTerritory.supervisor_binding_id !== operation.args.binding_id) {
+          return blocked('受影响领地已不可用、属于其他王国或关系发生变化，请先核对主管负责范围。')
+        }
+        affectedTerritories.push(resolvedTerritory.territory)
+      }
+      if (draft.intent.territory !== null && !affectedTerritories.some(row => row.territory_id === draft.intent.territory!.territory_id
+        && row.name === draft.intent.territory!.name)) return blocked('被点名领地与主管关系发生变化，请重新提出接替请求。')
+      territory = draft.intent.territory ?? affectedTerritories[0]!
+    } else if (related.length) return blocked('角色与领地关系不一致，请先核对现任角色。')
+  }
+  const input = {
+    kingdomId: context.kingdom_id,
+    actions: [operation.kind],
+    scope: { kingdomWide: false, territoryIds: affectedTerritories.map(row => row.territory_id), bindingIds,
+      roleTypes: [roleType], targetSessionIds: [session.session_ref], workspaceRoots: [] },
+    ttlMs: 600000,
+  }
+  const subject = territory ? `领地「${territory.name}」的主管` : '宰相'
+  const allTerritoryNames = affectedTerritories.map(row => `「${row.name}」`).join('、')
+  const seatScopeNotice = operation.kind === 'role.session' && roleType === 'SUPERVISOR'
+    ? `本次更换的是同一主管席位的会话，会同时接替全部领地：${allTerritoryNames}。若只想接替其中一个领地，请停止确认，不执行此变更。`
+    : null
+  return {
+    kind: 'OWNER_BINDING_GUIDANCE', status: 'READY', authority_source: 'NONE', owner_authority: false, write_effect: 'ZERO_WRITE',
+    summary: operation.kind === 'role.bind' ? `已准备让当前会话担任${subject}；尚未变更。`
+      : `已准备让当前会话接替${subject}；保留原席位及任务历史，尚未变更。${seatScopeNotice ?? ''}`,
+    steps: [
+      ...(seatScopeNotice ? [seatScopeNotice] : []),
+      '复制下方完整命令，在当前 DSH 会话的直接命令入口执行一次，打开十分钟管理窗口。无需修改命令中的字段。',
+      '打开返回的管理链接；窗口会预选本次唯一目标。核对领地、角色和当前会话，点击「查看变更预览」。',
+      '确认预览准确后点击「确认应用此变更」。只有这一步会提交；仍有未结算工作时窗口会说明阻止原因。',
+      '收到成功结果后回到当前会话继续操作；若被拒绝或结果不明，先核对结果，不重复提交或自动解除现任主管。',
+    ],
+    canonical_owner_gui: `/kingdom owner.gui ${stableJson(input)}`,
+  }
 }

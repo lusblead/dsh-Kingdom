@@ -1,7 +1,7 @@
 {
   "name": "dsh-kingdom",
-  "version": "3.2.1",
-  "description": "个人 Agent 工作台：任务交付可逐条查看、知悉与提问，改动证据可追溯；Worker Claim 仍须主管审查才成为事实。",
+  "version": "3.3.0",
+  "description": "清晰的 Agent 工作台：查看任务与领地会话、派发任务，并由会话引导主管绑定和接替；执行结果仍须主管审查。",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -27,7 +27,9 @@
     "docs/V3.2-RELEASE-NOTES.md",
     "docs/DSH-KINGDOM-3.0-ANNOUNCEMENT.md",
     "docs/V3.2.1-RELEASE-NOTES.md",
-    "docs/DISPATCH-IDENTITY-PROBE.md"
+    "docs/DISPATCH-IDENTITY-PROBE.md",
+    "docs/CURRENT-USER-GUIDE.md",
+    "docs/V3.3-RELEASE-NOTES.md"
   ],
   "license": "AGPL-3.0-or-later",
   "publishConfig": {

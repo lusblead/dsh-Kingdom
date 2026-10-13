@@ -6,6 +6,91 @@ status: "implemented"
 
 # Local GUI Control Session
 
+## Current Role preflight
+
+The production local-control broker reads the current ACTIVE Role binding for
+the exact Session captured by direct `/kingdom gui`, after checking that the
+captured Session is still valid in the live DSH registry. Having a nonempty Session
+ID alone does not make task creation available: `plan` requires CHANCELLOR;
+`assign`, `start`, `review`, `reconcile` and execution controls require
+SUPERVISOR. An uninitialized ledger or missing current Role disables these
+actions. Rebinding or retiring the Role after launch narrows the next control
+read and the next mutation admission without replacing browser identity.
+
+This is a synchronous read-only preflight. It adds no domain write, Runtime
+call, retry, authority grant, or persisted lifecycle transition. Core still
+rechecks the exact Task, Territory and current Role on every accepted command.
+The optional callback may only narrow existing transport/Session admission;
+omitting it preserves the broker's legacy behavior for compatibility fixtures.
+`control.revoke` stays usable after Role removal or preflight failure. Owner
+actions remain `executable=false / DIRECT_SLASH_REQUIRED` and never pass through
+the callback. The server passes its allowlisted command into authorization
+before body parsing or handler entry; a Role rejection returns HTTP 403
+`CONTROL_ROLE_DENIED` without reserving the request ID or mutation lock.
+
+The control view uses `CHANCELLOR_REQUIRED`, `SUPERVISOR_REQUIRED` or
+`ROLE_AUTH_REQUIRED` for known Role denials. Callback exceptions, promises,
+malformed results or contradictory permission/reason values disable the action
+with `ROLE_PREFLIGHT_UNAVAILABLE`; private failure details are not echoed.
+Transport expiry, Origin, CSRF and replay protections keep their existing
+outcomes. No browser field supplies a Role or upgrades a denied action.
+
+```mermaid
+flowchart TD
+    E9(["E9 Control read or allowlisted command submission"]) --> D27{"D27 Existing transport and captured Session guards pass"}
+    D27 -->|No| X37(["X37 Keep control unavailable; reject mutation without business effect"])
+    D27 -->|Yes| D28{"D28 Command is control.revoke"}
+    D28 -->|Yes| A29["A29 Revoke the existing in-memory control session"]
+    A29 --> X40(["X40 Control closed even when Role lookup is unavailable"])
+    D28 -->|No| A27["A27 Read current Role for the captured exact Session"]
+    A27 --> D29{"D29 Valid preflight permits the required current Role"}
+    D29 -->|No or unreadable| X39(["X39 Disable with reason or return 403; retain input and no automatic retry"])
+    D29 -->|Yes| A28["A28 Advertise narrowed actions or admit the command to existing Core checks"]
+    A28 --> X38(["X38 Current Role is eligible; Core still decides exact Task and Territory authority"])
+    G25[["G25 Preflight only narrows captured identity; never grants Owner or resource authority"]] -.-> A27
+    G25 -.-> A28
+    G26[["G26 Failed preflight closes actions; revoke does not depend on Role lookup"]] -.-> D29
+    G26 -.-> A29
+```
+
+```mermaid
+sequenceDiagram
+    actor Reader
+    participant Browser
+    participant Server
+    participant Broker
+    participant Ledger
+    participant Core
+    Reader->>Browser: Refresh controls under activated Session
+    Browser->>Server: GET /api/control with existing cookie
+    Server->>Broker: Inspect captured Session
+    Broker->>Ledger: Read current ACTIVE Role only
+    alt valid expected Role
+        Broker-->>Browser: Narrowed executable actions
+    else wrong Role, missing binding or unreadable result
+        Broker-->>Browser: Disabled action with stable reason
+    end
+    Reader->>Browser: Submit command
+    Browser->>Server: Existing cookie, CSRF and request ID
+    Server->>Broker: Authorize exact allowlisted command
+    alt control.revoke after transport admission
+        Broker-->>Server: Admit without Role lookup
+        Server->>Broker: Revoke in-memory session
+        Server-->>Browser: Control closed
+    else Role command
+        Broker->>Ledger: Reread current Role for captured Session
+        alt denied or preflight unavailable
+            Broker-->>Server: CONTROL_ROLE_DENIED, no request reservation
+            Server-->>Browser: HTTP 403, no handler side effect
+        else Role eligible
+            Broker-->>Server: Existing captured command context
+            Server->>Core: Existing command with exact Task and Territory
+            Core->>Ledger: Revalidate current authorization and business state
+            Core-->>Browser: Existing structured command result
+        end
+    end
+```
+
 ## 1.2 personal workbench interaction update
 
 The default browser entry is Today, with six main destinations: Today, Tasks,
